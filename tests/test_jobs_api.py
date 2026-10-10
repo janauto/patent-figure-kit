@@ -38,13 +38,13 @@ def _isolated_config(tmp_path, monkeypatch):
 
 # ------------------------------------------------------------ OpenAPI cross-check (no OCP)
 
-def test_openapi_paths_match_live_routes():
+def test_openapi_paths_match_live_routes(tmp_path):
     """Every /v1 and /mcp path+method declared in docs/openapi.yaml must exist on the app —
     this is what keeps WP3's mock honest (advisor's recommendation)."""
-    import yaml
+    yaml = pytest.importorskip("yaml")
     import workbench as W
 
-    reg = W.Registry(Path("/tmp/does-not-matter-openapi"), "t0k")  # no projects needed
+    reg = W.Registry(tmp_path / "data", "t0k")  # no projects needed; isolated tmp dir
     app = W.build_workbench(reg, "t0k", 8790)
     live = set()
     for route in app.routes:
@@ -67,7 +67,7 @@ def test_openapi_paths_match_live_routes():
 
 
 def test_openapi_is_valid_and_declares_job_states():
-    import yaml
+    yaml = pytest.importorskip("yaml")
     spec = yaml.safe_load((_ROOT / "docs" / "openapi.yaml").read_text(encoding="utf-8"))
     states = spec["components"]["schemas"]["Job"]["properties"]["state"]["enum"]
     assert set(states) == {"queued", "running", "succeeded", "failed", "cancelled", "interrupted"}
@@ -186,7 +186,11 @@ def test_export_async_then_download(client):
     eid = r.json()["export_id"]
     j = _poll(client, eid)
     assert j["state"] == "succeeded", j
-    assert j["result"]["manifest"]
+    manifest = j["result"]["manifest"]
+    # Manifest must reflect what the zip actually holds: docx/dxf produced, pdf deferred to WP2.
+    assert manifest["docx"] == "ok"
+    assert manifest["dxf"] == "ok"
+    assert manifest["pdf"] == "skip"
     dl = client.get("/v1/exports/%s/download" % eid, headers=H)
     assert dl.status_code == 200
     assert dl.headers["content-type"] == "application/zip"
@@ -208,6 +212,24 @@ def test_cancel_terminal_job_returns_state(client):
 def test_job_404(client):
     assert client.get("/v1/jobs/nope", headers=H).status_code == 404
     assert client.delete("/v1/jobs/nope", headers=H).status_code == 404
+
+
+def test_create_project_async_prepare(client):
+    """POST /v1/projects uploads a STEP (raw octet-stream), returns 202 + a prepare job that
+    only reaches 'succeeded' once the project is actually ready (not instantly)."""
+    step_bytes = (_ROOT / "tests" / "fixtures" / "synthetic.stp").read_bytes()
+    r = client.post("/v1/projects?title=bench-upload&name=up.stp", headers=H,
+                    content=step_bytes)
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["project_id"] and body["job_id"]
+    j = _poll(client, body["job_id"], timeout=300)
+    assert j["state"] == "succeeded", j
+    assert j["result"]["status"] == "ready"
+    # and the project is genuinely usable now
+    proj = client.get("/v1/projects/%s" % body["project_id"], headers=H).json()
+    assert proj["status"] == "ready"
+    assert "plan_etag" in proj
 
 
 def test_mcp_has_new_job_tools():

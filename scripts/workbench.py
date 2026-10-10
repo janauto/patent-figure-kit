@@ -806,11 +806,26 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             proj = reg.create(title, step_bytes=step_bytes, filename=name)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
-        # reg.create already prepared synchronously; record a succeeded prepare job so the
-        # async contract (202 + job_id) holds and the client can poll one uniform shape.
-        job, _ = jobs.create("prepare", proj.id,
-                             inputs={"title": title, "filename": name})
-        jobs.run(job, lambda j: {"project_id": proj.id, "status": proj.meta.get("status")})
+        # reg.create prepares (analyze + GLB) in a background thread and returns while the
+        # project is still "preparing". The prepare job must therefore WAIT for that to reach
+        # ready/error — otherwise a client would see the job succeed before the project is
+        # usable (S1-09 honesty). It does not fake-report an instant success.
+        job, _ = jobs.create("prepare", proj.id, inputs={"title": title, "filename": name})
+
+        def prepare_fn(j):
+            j.emit(JOBS.EV_STAGE, "解析装配体与导出预览", stage="prepare", progress=0.2)
+            deadline = time.time() + 1800
+            while time.time() < deadline:
+                j.raise_if_cancelled()
+                status = proj.meta.get("status")
+                if status == "error":
+                    raise RuntimeError("工程准备失败：%s" % proj.meta.get("message", ""))
+                if status == "ready" and not proj.meta.get("message"):
+                    return {"project_id": proj.id, "status": "ready"}
+                time.sleep(0.5)
+            raise RuntimeError("工程准备超时")
+
+        jobs.start(job, prepare_fn)
         return JSONResponse({"project_id": proj.id, "job_id": job.id}, status_code=202)
 
     @app.post("/v1/projects/from-example", status_code=202, tags=["工程"],
@@ -920,12 +935,11 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
             bundle = studio.export_now(want_dwg)
             download = base + "/v1/exports/%s/download" % j.id
-            # per-format manifest: a format present in the bundle's file list is ok; dwg is
-            # skipped when no converter was available (export_now already decides that).
-            produced = " ".join(bundle.get("files", []))
-            label = {"docx": "docx", "pdf": "pdf", "dxf": "DXF", "dwg": "DWG"}
-            manifest = {f: ("ok" if (label.get(f, f) in produced or f in produced)
-                            else ("skip" if f == "dwg" else "ok")) for f in formats}
+            # Per-format manifest derived from the extensions actually produced — never
+            # report a format "ok" that is not in the zip (S0-04 / S1-11: 缺项不得报成功).
+            # PDF is not produced this round (F1 lands in WP2), so it reports "skip".
+            exts = {Path(n).suffix.lower().lstrip(".") for n in bundle.get("files", [])}
+            manifest = {f: ("ok" if f in exts else "skip") for f in formats}
             exports[j.id] = str(Path(bundle["dir"]).with_suffix(".zip"))
             return {"export_id": j.id, "manifest": manifest, "files": bundle.get("files", []),
                     "download_url": download}
