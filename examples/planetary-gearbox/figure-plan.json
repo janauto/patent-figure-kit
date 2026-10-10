@@ -1,0 +1,105 @@
+{
+  "schema": "patent-figure-plan/1",
+  "source": {
+    "step": "demo-planetary-gearbox.stp",
+    "include": [
+      "PGB-*"
+    ],
+    "exclude": []
+  },
+  "terms": [
+    {
+      "selector": "PGB-MOTOR-HOUSING",
+      "term": "电机壳体"
+    },
+    {
+      "selector": "PGB-MOTOR-REAR-CAP",
+      "term": "电机后盖"
+    },
+    {
+      "selector": "PGB-MOUNT-FLANGE",
+      "term": "安装法兰"
+    },
+    {
+      "selector": "PGB-RING-GEAR",
+      "term": "内齿圈"
+    },
+    {
+      "selector": "PGB-END-COVER",
+      "term": "端盖"
+    },
+    {
+      "selector": "PGB-OUTPUT-SHAFT",
+      "term": "输出轴"
+    },
+    {
+      "selector": "PGB-SUN-GEAR",
+      "term": "太阳轮"
+    },
+    {
+      "selector": "PGB-PLANET-GEAR",
+      "term": "行星轮"
+    },
+    {
+      "selector": "PGB-PLANET-PIN",
+      "term": "行星销"
+    },
+    {
+      "selector": "PGB-PLANET-CARRIER",
+      "term": "行星架"
+    },
+    {
+      "selector": "PGB-OUTPUT-BEARING",
+      "term": "输出轴承"
+    },
+    {
+      "selector": "PGB-OIL-SEAL",
+      "term": "油封"
+    },
+    {
+      "selector": "PGB-SCREW-*",
+      "term": "紧固螺钉",
+      "label": "none"
+    }
+  ],
+  "figures": [
+    {
+      "id": "fig1",
+      "caption": "行星齿轮减速器整体结构示意图",
+      "kind": "assembly",
+      "members": [
+        "PGB-MOTOR-HOUSING",
+        "PGB-MOTOR-REAR-CAP",
+        "PGB-MOUNT-FLANGE",
+        "PGB-RING-GEAR",
+        "PGB-END-COVER",
+        "PGB-OUTPUT-SHAFT",
+        "PGB-SCREW-*"
+      ]
+    },
+    {
+      "id": "fig2",
+      "caption": "行星齿轮减速器齿轮系分解示意图",
+      "kind": "exploded",
+      "members": [
+        "PGB-SUN-GEAR",
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN",
+        "PGB-PLANET-CARRIER",
+        "PGB-RING-GEAR",
+        "PGB-OUTPUT-SHAFT",
+        "PGB-OUTPUT-BEARING",
+        "PGB-END-COVER",
+        "PGB-OIL-SEAL"
+      ]
+    }
+  ],
+  "layout": {
+    "view": "iso",
+    "explode_axis": "auto",
+    "axis_angle": "auto",
+    "density": "normal",
+    "max_labels_per_figure": 20,
+    "engineering_table": false
+  }
+}

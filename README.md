@@ -13,7 +13,7 @@
 
 <img src="docs/assets/shot-studio.png" width="92%" alt="Plan Studio：左侧零件列表，中间 3D 视图可点选与框选，右侧按图分组，下方是渲染结果与 QA 检查项">
 
-<sub>Plan Studio 界面。装配体是仓库自带的合成模型 <code>tests/fixtures/synthetic.stp</code>，不含任何真实产品数据。</sub>
+<sub>Plan Studio 界面，示例为行星齿轮减速器（27 个零件实例）。装配体由 <code>scripts/make_demo_assemblies.py</code> 生成，与任何真实产品无关。</sub>
 
 </div>
 
@@ -37,17 +37,17 @@
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/assets/out-fig1-assembly.png" alt="装配图：七个零件各带引线与阿拉伯数字标号" width="85%"><br>
-      <sub><b>装配图</b> — 引线与标号自动避让，编号连续发放</sub>
+      <img src="docs/assets/out-fig1-assembly.png" alt="行星齿轮减速器整体结构图：六个零件各带引线与阿拉伯数字标号，左下角是件号表" width="95%"><br>
+      <sub><b>图1 整体结构图</b> — 引线与标号自动避让，附图标记连续发放，件号表自动生成</sub>
     </td>
     <td align="center" width="50%">
-      <img src="docs/assets/out-fig2-exploded.png" alt="分解图：四个零件沿轴线拉开，各带标号" width="85%"><br>
-      <sub><b>分解图</b> — 沿主轴自动拉开，图面角度按长宽比自动求解</sub>
+      <img src="docs/assets/out-fig2-exploded.png" alt="行星齿轮减速器齿轮系分解图：九种零件沿轴线拉开，各带标号" width="95%"><br>
+      <sub><b>图2 齿轮系分解图</b> — 沿主轴自动拉开，图面角度按长宽比自动求解</sub>
     </td>
   </tr>
 </table>
 
-另外还会输出 `reference-numerals.json`，其中有可直接粘进说明书的句子：「附图标记说明：1—底座；2—回转座；……」。
+上图由 [`examples/planetary-gearbox`](examples/planetary-gearbox/README.md) 生成，该示例还演示了如何按质量闸门的提示拆图。另外还会输出 `reference-numerals.json`，其中有可直接粘进说明书的句子：「附图标记说明：1—底座；2—回转座；……」。
 
 ### 主要能力
 
@@ -118,7 +118,19 @@ python3 scripts/render_patent_figure.py examples/synthetic/figure-plan.json --as
 
 预期结果：终端显示 `共 2 张图，全部通过`，`out/` 下出现 `fig1.dxf`、`fig2.dxf`、对应的预览 PNG 与 `reference-numerals.json`。
 
-### 5. 换成你自己的模型
+### 5. 试试更复杂的示例
+
+行星齿轮减速器：27 个零件实例，含齿轮、轴承和螺钉，本机实测约 10 秒内出图。
+
+```bash
+python3 scripts/make_demo_assemblies.py -o examples/planetary-gearbox
+python3 scripts/analyze_assembly.py examples/planetary-gearbox/demo-planetary-gearbox.stp -o assembly.json --include 'PGB-*'
+python3 scripts/render_patent_figure.py examples/planetary-gearbox/figure-plan.json --assembly assembly.json -o out/ --preview
+```
+
+预期结果：终端显示 `共 2 张图，全部通过`，即上方展示的图1与图2。
+
+### 6. 换成你自己的模型
 
 ```bash
 python3 scripts/analyze_assembly.py YOUR.stp -o assembly.json --include '*' --exclude '*SCREW*'
@@ -126,7 +138,7 @@ python3 scripts/analyze_assembly.py YOUR.stp -o assembly.json --include '*' --ex
 
 然后写自己的 `figure-plan.json`，格式见 [SKILL.md](SKILL.md)。也可以用浏览器界面点选生成，见[浏览器界面](#浏览器界面)一节。
 
-### 6. 运行验收（可选）
+### 7. 运行验收（可选）
 
 先装好第 2 步末尾的可选依赖，再运行：
 
@@ -206,7 +218,8 @@ scripts/                 全部命令行工具，内核在 patent_figure/
 webui/                   Workbench / Plan Studio 前端（内含 three.js）
 acceptance/              验收套件
 tests/                   单元测试与合成装配体
-examples/synthetic/      可直接运行的示例 plan 与产物
+examples/synthetic/      最小示例（几秒跑完）
+examples/planetary-gearbox/  进阶示例：27 个零件实例的行星齿轮减速器
 docs/assets/             README 用图及其生成脚本
 ```
 

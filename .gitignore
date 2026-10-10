@@ -7,3 +7,5 @@ __pycache__/
 .cache/
 out/
 assembly.json
+examples/planetary-gearbox/*.stp
+examples/planetary-gearbox/out/
