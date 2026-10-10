@@ -2001,3 +2001,48 @@ Two failure modes of the harness itself are worth recording, because they cost a
 empty reports with exit code 0 — a silent success. Use the single-valued `--tools` instead. And the
 first local verification script called `importlib.metadata` without importing it, which is what
 produced the bogus "jsonschema missing" reading on the first pass.
+
+---
+
+## 13. WP1 内核稳固新增（2026-10-11）
+
+本轮在既有契约之上新增三个模块与一个 HTTP 契约文件，面向 WP2/WP3。既有签名（§5）与确定性
+规则（§7/§11）不变；N10 基础金样不变，N10b 为其伴生扩展摘要（§5.4）。
+
+### 13.1 `scripts/patent_figure/worker.py` — 常驻单任务渲染 worker
+
+- `Worker(python=?, repo=?, time_limit_s=1800, mem_limit_mb=0)`：常驻子进程，启动时一次性导入
+  OCP 与渲染链各 CLI；`run(args, timeout=?) -> subprocess.CompletedProcess` 在子进程内 set
+  `sys.argv` 后调对应 `main()`，输出与子进程调用逐位一致（N15）。超时/子进程死亡即杀掉重建，
+  该任务返回退出码 124。未登记的脚本透明回退子进程。
+- `run_cli_via_worker(args, timeout)`：`plan_studio.run_cli` 的实现；`PFK_WORKER=0` 关闭 worker。
+- `snapshot_inputs(plan_path) -> {plan_hash, terms_hash, step_sha}`：作业输入快照（§13.3 用）。
+- 线程环境 `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB=1` 在 numpy/OCP 导入前设置；每任务前 reset 丢边计数。
+
+### 13.2 `scripts/patent_figure/jobs.py` — 作业状态机（纯 stdlib）
+
+- 状态机 `queued → running → {succeeded|failed|cancelled|interrupted}`；崩溃重启后未完成作业标
+  `interrupted`（不假装恢复）。`JobStore(root)` 持久化到 `<root>/<id>.json`。
+- `create(kind, project_id, inputs=, idempotency_key=) -> (Job, created)`：幂等键命中返回原作业。
+- 每作业 append-only 事件日志（单调 id），`events_since(last_id)` / `wait_for_event_after` 支撑
+  SSE 的 `Last-Event-ID` 重放。`sse_frame(event)` 产出带 `id:`/`event:`/`data:` 的 SSE 帧。
+
+### 13.3 HTTP 契约 `docs/openapi.yaml`
+
+前后端并行的冻结依据，字段名与 `scripts/workbench.py` 实现一致。要点：
+
+- 长任务 202 + `{project_id?, job_id}`；`GET /v1/jobs/{id}` 轮询、`GET /v1/jobs/{id}/events`
+  订阅（SSE，**不与 GZip 同用**——本 app 未挂 GZip 中间件）、`DELETE /v1/jobs/{id}` 取消。
+- `POST /v1/projects/{id}/render`：默认 202 + job_id + 输入快照；`?wait=1` 保留旧同步语义（200）。
+- `GET/PUT /v1/projects/{id}/plan`：`ETag` / `If-Match`，冲突 409。
+- `POST /v1/projects/{id}/export` → 202 `export_id` → `GET /v1/exports/{id}`（清单 + 下载地址）
+  → `GET /v1/exports/{id}/download`（zip）。F1 新格式在 WP2；本轮返回现有导出能力。
+- `POST /v1/projects/{id}/plan/suggest` 形态已在 openapi 冻结，WP2 填充（候选分图）。
+
+### 13.4 鉴权迁移（Codex R0 S1-10）
+
+- 子应用 `plan_studio` 的 guard 现在也认浏览器会话 Cookie `wb_token`（原先只认 Header/query），
+  六条路径（首页、子应用、SSE、下载、REST、MCP）均可用会话或 Bearer。
+- MCP 配置生成改为 Header 方案（`headers.Authorization: Bearer <token>`），`?token=` 旧配置
+  保留一个版本 + 迁移说明（`/api/wb/settings` 的 `mcp_migration_note`）。
+- MCP 新增工具 `submit_render / get_job / cancel_job / get_export`（异步出图/导出 + 查询/取消）。

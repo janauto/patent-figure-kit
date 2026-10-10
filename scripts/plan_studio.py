@@ -410,9 +410,14 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None) -> FastAPI
         rel = path[len(root):] if root and path.startswith(root) else path
         if rel.startswith("/api/"):
             auth = request.headers.get("authorization", "")
+            # S1-10: the sub-app must also honour the browser session cookie (``wb_token``),
+            # set by the workbench after a ``?token=`` bootstrap. Without this a browser that
+            # navigated into /p/<id>/ with only the cookie (no header) got 401 on every API
+            # call. Order: explicit header/bearer first, then query (legacy), then cookie.
             supplied = request.headers.get("x-studio-token") or \
+                (auth[7:] if auth.lower().startswith("bearer ") else None) or \
                 request.query_params.get("token") or \
-                (auth[7:] if auth.lower().startswith("bearer ") else None)
+                request.cookies.get("wb_token")
             if not secrets.compare_digest(str(supplied or ""), token):
                 return Response("token 无效——请从终端打印的完整地址进入", status_code=401)
         response = await call_next(request)

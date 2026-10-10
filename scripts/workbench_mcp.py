@@ -76,6 +76,27 @@ TOOLS = [
      "description": "把一段方法步骤描述交给 DeepSeek 整理成流程图并出图（自动校验、修复一轮）。",
      "inputSchema": _schema({"text": {"type": "string"}, "title": {"type": "string"},
                              "project_id": PID}, ["text"])},
+    {"name": "submit_render", "title": "异步出图",
+     "description": "对工程发起一次异步出图，立即返回 job_id（不阻塞）。用 get_job 轮询到 "
+                    "succeeded/failed，再用 get_project_figures 取结果。适合大装配体出图较久时。",
+     "inputSchema": _schema({"project_id": PID}, ["project_id"])},
+    {"name": "get_job", "title": "查询作业",
+     "description": "按 job_id 查作业状态：queued/running/succeeded/failed/cancelled/interrupted，"
+                    "含阶段、进度、日志与结果/错误。submit_render、get_export 返回的 job 都用它查。",
+     "inputSchema": _schema({"job_id": {"type": "string", "description": "submit_render/get_export 返回的 id"}},
+                            ["job_id"])},
+    {"name": "cancel_job", "title": "取消作业",
+     "description": "取消一个还没结束的作业（已结束则原样返回）。",
+     "inputSchema": _schema({"job_id": {"type": "string"}}, ["job_id"])},
+    {"name": "get_export", "title": "导出附图包（异步）",
+     "description": "对工程发起一次导出，返回 export_id（= job_id）。用 get_job 轮询到 succeeded，"
+                    "结果里的 download_url 即 zip 下载地址。formats 可含 pdf/docx/dxf/dwg。",
+     "inputSchema": _schema({"project_id": PID,
+                             "formats": {"type": "array", "items": {"type": "string",
+                                         "enum": ["pdf", "docx", "dxf", "dwg"]}},
+                             "variant": {"type": "string",
+                                         "enum": ["filing", "disclosure", "both"]}},
+                            ["project_id"])},
 ]
 
 FLOW_GUIDE = {

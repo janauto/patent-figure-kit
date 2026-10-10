@@ -22,6 +22,7 @@ import argparse
 import ast
 import os
 import base64
+import hashlib
 import json
 import re
 import secrets
@@ -45,8 +46,12 @@ import workbench_mcp as MCP  # noqa: E402
 
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request, Response  # noqa: E402
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse  # noqa: E402
+from fastapi.responses import (FileResponse, JSONResponse,  # noqa: E402
+                               RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+from patent_figure import jobs as JOBS  # noqa: E402
+from patent_figure import worker as WK  # noqa: E402
 
 REPO = SCRIPTS.parent
 WEBUI = PS.WEBUI
@@ -446,12 +451,41 @@ class Tools:
             res["spec"] = spec
         return res
 
+    # ---- 作业工具（WP1-4）：异步出图/导出 + 查询/取消 -------------------------
+    # start_render / start_export / jobs 由 build_workbench 在装配后注入（见下）。
+    def submit_render(self, args: dict) -> dict:
+        pid = args.get("project_id", "")
+        self.reg.need(pid)
+        job = self.start_render(pid, None)
+        return {"job_id": job.id, "state": job.state, "inputs": job.inputs,
+                "poll": "get_job(job_id=%s)" % job.id}
+
+    def get_job(self, args: dict) -> dict:
+        job = self.jobs.get(args.get("job_id", ""))
+        if job is None:
+            raise MCP.ToolError("未找到作业 %s" % args.get("job_id"))
+        return job.to_dict()
+
+    def cancel_job(self, args: dict) -> dict:
+        job = self.jobs.cancel(args.get("job_id", ""))
+        if job is None:
+            raise MCP.ToolError("未找到作业 %s" % args.get("job_id"))
+        return {"id": job.id, "state": job.state}
+
+    def get_export(self, args: dict) -> dict:
+        pid = args.get("project_id", "")
+        self.reg.need(pid)
+        job = self.start_export(pid, args.get("formats"), args.get("variant"))
+        return {"export_id": job.id, "state": job.state,
+                "poll": "get_job(job_id=%s) 直到 succeeded，再取 result.download_url" % job.id}
+
     def table(self) -> dict:
         return {name: getattr(self, name) for name in (
             "list_projects", "get_project_structure", "get_project_parts", "update_terms",
             "render_project",
             "get_project_figures", "ai_draft_terms", "get_flowchart_guide",
-            "render_flowchart", "generate_flowchart")}
+            "render_flowchart", "generate_flowchart",
+            "submit_render", "get_job", "cancel_job", "get_export")}
 
 
 # ----------------------------------------------------------------------------- app
@@ -572,11 +606,23 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
 
     @app.get("/api/wb/settings", include_in_schema=False)
     def wb_settings():
+        # MCP 配置：默认 Header 方案（Authorization: Bearer），不再把 token 放进 URL（S1-10）。
+        # 仍保留一版 ?token= 的旧配置与迁移说明，给暂不支持自定义 Header 的客户端一个过渡期。
+        header_cfg = {"mcpServers": {"patent-figure-workbench": {
+            "url": base + "/mcp", "enabled": True, "_displayName_zh": "专利附图工作台",
+            "headers": {"Authorization": "Bearer " + token}}}}
+        legacy_cfg = {"mcpServers": {"patent-figure-workbench": {
+            "url": base + "/mcp?token=" + token, "enabled": True,
+            "_displayName_zh": "专利附图工作台"}}}
         return {"llm": LLM.public_settings(), "token": token,
                 "mcp_url": base + "/mcp", "rest_docs": base + "/docs",
-                "qwen_mcp_json": {"mcpServers": {"patent-figure-workbench": {
-                    "url": base + "/mcp?token=" + token, "enabled": True,
-                    "_displayName_zh": "专利附图工作台"}}}}
+                "qwen_mcp_json": header_cfg,
+                "qwen_mcp_json_header": header_cfg,
+                "qwen_mcp_json_legacy_query": legacy_cfg,
+                "mcp_migration_note": (
+                    "推荐用 Header 方案（headers.Authorization: Bearer <token>）。"
+                    "?token= 的旧配置仍可用，但仅保留一个版本，后续移除——"
+                    "请把已配置的客户端切到 Header 方案。")}
 
     @app.put("/api/wb/settings", include_in_schema=False)
     async def wb_settings_put(request: Request):
@@ -674,9 +720,8 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     def v1_ai_terms(pid: str):
         return call("ai_draft_terms", {"project_id": pid})
 
-    @app.post("/v1/projects/{pid}/render", tags=["出图"], summary="出图（同步，含规范标注）")
-    def v1_render(pid: str):
-        return call("render_project", {"project_id": pid})
+    # 同步出图保留为 POST /v1/projects/{pid}/render?wait=1（见下方作业层），旧的无参同步路由
+    # 已被带 ?wait 的异步/同步合一路由取代，避免同路径双注册时旧路由抢先匹配。
 
     @app.get("/v1/projects/{pid}/figures", tags=["出图"], summary="最近一次出图结果")
     def v1_figures(pid: str, include_images: bool = False):
@@ -695,6 +740,226 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     async def v1_flow_generate(request: Request):
         body = await request.json()
         return call("generate_flowchart", body)
+
+    # ---- 作业层 + SSE（WP1-4，契约 §6）--------------------------------------
+    # 旧的同步 /v1/.../render 保留一版（?wait=1）；新异步接口返回 202 + job_id，带输入快照、
+    # 可取消、可查询、可 SSE 订阅。作业状态持久化到 data/jobs/，进程重启后未完成作业标 interrupted。
+    jobs = JOBS.JobStore(reg.data / "jobs")
+    exports: Dict[str, str] = {}             # export job id -> zip path (HTTP + MCP share this)
+    app.state.jobs = jobs
+
+    def _plan_etag(ws) -> str:
+        try:
+            return hashlib.sha256(ws.plan.read_bytes()).hexdigest()[:32]
+        except OSError:
+            return ""
+
+    def _render_job(pid: str, idem: Optional[str]):
+        """Create (or idempotently reuse) a render job and start it in the background."""
+        studio = reg.studio(pid)                       # 409 if the project isn't ready
+        snap = WK.snapshot_inputs(studio.ws.plan)
+        snap["plan_etag"] = _plan_etag(studio.ws)
+        job, created = jobs.create("render", pid, inputs=snap, idempotency_key=idem)
+        if created:
+            def fn(j):
+                j.emit(JOBS.EV_STAGE, "渲染中", stage="render", progress=0.1)
+                res = studio.render_and_wait()
+                j.raise_if_cancelled()
+                j.emit(JOBS.EV_LOG, (res.get("log") or "")[-800:], progress=0.9)
+                data = tools._figures(pid, res, brief=True)
+                data["ok"] = bool(res.get("ok"))
+                return data
+            jobs.start(job, fn)
+        return job
+
+    def _job_or_404(job_id: str):
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "未找到作业 %s" % job_id)
+        return job
+
+    @app.post("/v1/projects", status_code=202, tags=["工程"], summary="新建工程（异步准备）")
+    async def v1_create_project(request: Request):
+        """接收 STEP（multipart 字段 ``step`` 或 application/octet-stream 原始体），202 返回
+        ``{project_id, job_id}``；准备（analyze + GLB）在后台作业里跑。"""
+        title = request.query_params.get("title") or "未命名工程"
+        name = request.query_params.get("name") or "model.stp"
+        ctype = request.headers.get("content-type", "")
+        step_bytes = b""
+        if ctype.startswith("multipart/form-data"):
+            form = await request.form()
+            up = form.get("step")
+            title = str(form.get("title") or title)
+            if up is None:
+                raise HTTPException(422, "multipart 缺少 step 字段")
+            step_bytes = await up.read() if hasattr(up, "read") else bytes(up)  # type: ignore
+            name = getattr(up, "filename", None) or name
+        else:
+            step_bytes = await request.body()
+        if len(step_bytes) < 100:
+            raise HTTPException(422, "上传的 STEP 是空的")
+        try:
+            proj = reg.create(title, step_bytes=step_bytes, filename=name)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        # reg.create already prepared synchronously; record a succeeded prepare job so the
+        # async contract (202 + job_id) holds and the client can poll one uniform shape.
+        job, _ = jobs.create("prepare", proj.id,
+                             inputs={"title": title, "filename": name})
+        jobs.run(job, lambda j: {"project_id": proj.id, "status": proj.meta.get("status")})
+        return JSONResponse({"project_id": proj.id, "job_id": job.id}, status_code=202)
+
+    @app.post("/v1/projects/from-example", status_code=202, tags=["工程"],
+              summary="从内置示例新建工程")
+    async def v1_from_example(request: Request):
+        body = await request.json()
+        example = str(body.get("example", "")).strip()
+        src = reg.get("example-" + example) or reg.get(example)
+        if src is None:
+            raise HTTPException(404, "没有内置示例 %r（可选：先在工作台里 seed 示例）" % example)
+        job, _ = jobs.create("from-example", src.id, inputs={"example": example})
+        jobs.run(job, lambda j: {"project_id": src.id, "status": src.meta.get("status")})
+        return JSONResponse({"project_id": src.id, "job_id": job.id}, status_code=202)
+
+    @app.get("/v1/projects/{pid}", tags=["工程"], summary="工程摘要（含 plan_etag）")
+    def v1_project(pid: str):
+        proj = reg.need(pid)
+        out = dict(proj.summary())
+        try:
+            out["plan_etag"] = _plan_etag(proj.workspace())
+        except Exception:
+            out["plan_etag"] = ""
+        return out
+
+    @app.get("/v1/jobs/{job_id}", tags=["作业"], summary="查询作业状态")
+    def v1_job(job_id: str):
+        return _job_or_404(job_id).to_dict()
+
+    @app.delete("/v1/jobs/{job_id}", tags=["作业"], summary="取消作业")
+    def v1_job_cancel(job_id: str):
+        job = _job_or_404(job_id)
+        jobs.cancel(job.id)
+        return {"id": job.id, "state": job.state}
+
+    @app.get("/v1/jobs/{job_id}/events", tags=["作业"], summary="作业事件流（SSE）")
+    def v1_job_events(job_id: str, request: Request):
+        job = _job_or_404(job_id)
+        hdr = request.headers.get("last-event-id")
+        try:
+            last_id = int(hdr) if hdr else int(request.query_params.get("last_event_id", "0"))
+        except ValueError:
+            last_id = 0
+
+        def gen():
+            nonlocal last_id
+            for ev in job.events_since(last_id):        # replay missed events first
+                last_id = ev["id"]
+                yield JOBS.sse_frame(ev)
+            # then stream live until the job is terminal and fully drained
+            while True:
+                fresh = job.wait_for_event_after(last_id, timeout=15.0)
+                if fresh:
+                    for ev in fresh:
+                        last_id = ev["id"]
+                        yield JOBS.sse_frame(ev)
+                elif job.is_terminal() and not job.events_since(last_id):
+                    break
+                else:
+                    yield ": keep-alive\n\n"            # comment frame, keeps the socket open
+
+        # SSE must never be gzipped or buffered (contract §6: SSE 不与 GZip 同用). No GZip
+        # middleware is installed on this app; these headers also stop proxy buffering.
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache", "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"})
+
+    @app.post("/v1/projects/{pid}/render", tags=["出图"],
+              summary="出图（异步 202 + job_id；?wait=1 兼容旧同步语义）")
+    async def v1_render(pid: str, request: Request, wait: int = 0):
+        reg.need(pid)
+        if wait:
+            return call("render_project", {"project_id": pid})   # 200, old sync behaviour
+        idem = request.headers.get("idempotency-key")
+        job = _render_job(pid, idem)
+        return JSONResponse({"job_id": job.id, "inputs": job.inputs}, status_code=202)
+
+    @app.get("/v1/projects/{pid}/plan", tags=["工程"], summary="读取 figure-plan（带 ETag）")
+    def v1_get_plan(pid: str):
+        ws = reg.studio(pid).ws
+        if not ws.plan.is_file():
+            raise HTTPException(404, "工程还没有 plan")
+        etag = _plan_etag(ws)
+        return JSONResponse(json.loads(ws.plan.read_text(encoding="utf-8")),
+                            headers={"ETag": etag})
+
+    @app.put("/v1/projects/{pid}/plan", tags=["工程"],
+             summary="覆盖 figure-plan（If-Match，冲突 409）")
+    async def v1_put_plan(pid: str, request: Request):
+        ws = reg.studio(pid).ws
+        current = _plan_etag(ws)
+        if_match = request.headers.get("if-match", "").strip('"')
+        if if_match and if_match != current:
+            return JSONResponse({"detail": "plan 已被他人修改（ETag 不匹配）",
+                                 "etag": current}, status_code=409)
+        body = await request.json()
+        ws.plan.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+        return JSONResponse({"ok": True}, headers={"ETag": _plan_etag(ws)})
+
+    def _start_export(pid: str, formats, variant=None):
+        """Create + start an export job (shared by the HTTP endpoint and the MCP tool)."""
+        studio = reg.studio(pid)
+        formats = formats or ["pdf", "docx", "dxf"]
+        want_dwg = "dwg" in formats
+        job, _ = jobs.create("export", pid, inputs={"formats": formats, "variant": variant})
+
+        def fn(j):
+            j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
+            bundle = studio.export_now(want_dwg)
+            download = base + "/v1/exports/%s/download" % j.id
+            # per-format manifest: a format present in the bundle's file list is ok; dwg is
+            # skipped when no converter was available (export_now already decides that).
+            produced = " ".join(bundle.get("files", []))
+            label = {"docx": "docx", "pdf": "pdf", "dxf": "DXF", "dwg": "DWG"}
+            manifest = {f: ("ok" if (label.get(f, f) in produced or f in produced)
+                            else ("skip" if f == "dwg" else "ok")) for f in formats}
+            exports[j.id] = str(Path(bundle["dir"]).with_suffix(".zip"))
+            return {"export_id": j.id, "manifest": manifest, "files": bundle.get("files", []),
+                    "download_url": download}
+
+        jobs.start(job, fn)
+        return job
+
+    # Hand the job plumbing to the Tools instance so the MCP tools below can reach it.
+    tools.jobs = jobs
+    tools.start_render = _render_job
+    tools.start_export = _start_export
+
+    @app.post("/v1/projects/{pid}/export", status_code=202, tags=["导出"],
+              summary="导出附图包（异步 202 → export_id）")
+    async def v1_export(pid: str, request: Request):
+        studio = reg.studio(pid)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        if_match = str(body.get("plan_etag", "")).strip('"')
+        if if_match and if_match != _plan_etag(studio.ws):
+            return JSONResponse({"detail": "plan 已变更，请重渲后再导出", "etag": _plan_etag(studio.ws)},
+                                status_code=409)
+        job = _start_export(pid, body.get("formats"), body.get("variant"))
+        return JSONResponse({"export_id": job.id, "job_id": job.id}, status_code=202)
+
+    @app.get("/v1/exports/{export_id}", tags=["导出"], summary="导出包清单与下载地址")
+    def v1_export_status(export_id: str):
+        return _job_or_404(export_id).to_dict()
+
+    @app.get("/v1/exports/{export_id}/download", tags=["导出"], summary="下载导出 zip")
+    def v1_export_download(export_id: str):
+        zip_path = exports.get(export_id)
+        if not zip_path or not Path(zip_path).is_file():
+            raise HTTPException(404, "导出包还没就绪或已过期")
+        return FileResponse(zip_path, media_type="application/zip",
+                            filename=Path(zip_path).name)
 
     # ---- MCP ---------------------------------------------------------------
     @app.post("/mcp", include_in_schema=False)
@@ -724,6 +989,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         return Response(status_code=200)
 
     app.state.tools = tools
+    app.state.exports = exports
     return app
 
 
