@@ -14,8 +14,16 @@ Rationale for the whole design is in [iteration-plan-v2.md](iteration-plan-v2.md
 
 1. **The LLM's only output is `figure-plan.json`.** No layout constants, coordinates, text heights,
    or numerals ever come from a model. Everything geometric is computed by these modules.
-2. **Determinism is a correctness property, not a nicety.** Same inputs → byte-identical output
-   after normalization. Every algorithm here must be reproducible across machines and runs.
+2. **Determinism is a correctness property, not a nicety.** The honest claim (§3.5 口径,
+   architecture v1): *in a verified environment, the same plan renders a DXF whose normalized
+   entity digest is identical* — coordinates at 6 decimals, covering geometry and text entities,
+   excluding file headers and handles (see `sheet.normalized_digest`, §5.4). The pure modules
+   (`layout` / `labels` / `numbering` / `sheet`) are reproducible across machines by construction
+   (§11.9: element-wise math, no threaded BLAS, no `np.median`); the one environment-dependent
+   step is OCCT's HLR float output, which is why the cross-machine guarantee is scoped to the
+   *verified environments* table, not "any machine / byte-identical". N10 pins the base digest;
+   N10b (§5.4) pins an extended digest that also covers colour, lineweight, linetype and TEXT
+   rotation/alignment. Do **not** write "逐字节相同" or "任何一台机器".
 3. **One OCC boundary.** `patent_figure/occ_backend.py` is the *only* module that may
    `import OCP.*`. Every other module operates on plain numpy arrays and dicts, so it is unit
    testable without CAD libraries installed.
@@ -450,7 +458,34 @@ def normalized_digest(dxf: Path) -> str
     Rounding at 6 decimals and comparing at 6 decimals is the same operation here, so the
     round-then-hash cannot disagree with round-then-compare (a hazard one audit model raised).
     Two runs of the same plan must produce the same digest."""
+
+def normalized_digest_ext(dxf: Path) -> str
+    """Extended canonical digest (WP1 deliverable 7 / Codex R0 S0-01). Identical recipe to
+    normalized_digest, but every entity tuple is appended with the attributes the frozen
+    §5.4 digest is blind to, so a change that is visible on the sheet yet rounds to the same
+    geometry no longer slips through unhashed.
+
+    **Covers** (on top of everything normalized_digest covers — layer, dxftype, style, text,
+    coordinates rounded to 6): colour (ACI), true colour, lineweight, linetype, and for TEXT
+    the rotation (rounded to 6) and the horizontal/vertical alignment (halign/valign ints).
+
+    **Excludes**: the DXF header, entity and owner handles, entity order (records are sorted),
+    and — importantly — the raw DXF file bytes. The file bytes carry `$TDCREATE` and a
+    per-save GUID and so differ on every run; they are NOT a baseline and are never asserted.
+    The golden file records only the *source STEP* sha256 as provenance (stable, assertable).
+
+    This is a **separate** function with a **separate** baseline
+    (`tests/fixtures/golden_digest_ext.txt`); `normalized_digest` and its N10 golden are never
+    touched. Acceptance node N10b pins it; `tests/test_golden.py` pins it in-process and proves
+    it catches a colour/rotation change the base digest ignores."""
 ```
+
+The determinism claim these digests back is the §3.5 口径, stated once: *in a verified
+environment (see the architecture's environments table), the same plan renders a DXF whose
+normalized entity digest is identical — coordinates at 6 decimals, covering geometry and text
+entities, excluding file headers and handles.* Never "逐字节相同" / "任何一台机器": the pure
+modules are cross-machine reproducible by construction (§11.9), but OCCT's HLR float output is
+environment-dependent, so the cross-machine guarantee is scoped to the verified environments.
 
 ### 5.5 `qa.py`
 
@@ -662,7 +697,7 @@ solve_figure(pieces, axis2d, density, labelled_keys, n_labels, figure_id, kind)
        s        = fit_to_frame(result, aw, ah, margin=0.0)
        接受条件见 §11.6
   2. 接受后：把几何按 s 缩放并居中进 (aw, ah)，图框原点取 FRAME 左下角
-  3. sheet_lo/sheet_hi = 整个 FRAME（180x250），不是 (aw, ah)——
+  3. sheet_lo/sheet_hi = 整个 FRAME（170x250），不是 (aw, ah)——
      标记允许落进边槽，几何不允许
   4. place_labels(...) 在毫米坐标系里跑
   5. 页面填充闸门在这里判（layout 不判，它不知道毫米）：见 §11.6
@@ -834,7 +869,7 @@ roll the view instead"），不需要任何横向位移。`roll_for_axis()`（§
 | 名字 | 值 | 从哪个约束反解出来 |
 | --- | --- | --- |
 | `DENSITY` | `{"compact":0.35, "normal":0.55, "loose":0.85}` | **§5.2 冻结原值，逐位照抄。** 语义同样冻结：**中位 body 沿爆炸方向足迹的比例，不是串总长的比例**。三个候选设计都误抄成 0.035/0.055/0.085（差 10 倍）并都误用了「总跨度」语义——后者正是 v1「串越长每件槽位越小而间隙越大」的失败机理，§5.2 注释已点名 |
-| `FRAME_W, FRAME_H` | `180.0, 250.0` | §5.2 冻结：A4 竖版减 15 mm 边距 |
+| `FRAME_W, FRAME_H` | `170.0, 250.0` | §5.2 冻结：A4 竖版可用版心 = 210−25−15 = 170（宽）× 250（高）；180 不可摆放 |
 | `RANK_DEC` | `9` | §7 规则 4 |
 | `EPS_REL` | `1e-9` | 一切比较先做 `Q(v) = round(v / SCALE_REF, RANK_DEC)`。float64 相对精度 2.2e-16，留 7 个数量级吸收 ≤1e5 次运算的累积舍入。**必须是相对量**：`layout.py` 拿到的是模型单位，同一装配体以 m 或以 mm 导出，绝对 `round(v,9)` 要么完全不起作用要么过度合并 |
 | `OVERLAP_TOL_REL` | `1e-6` | §5.2 冻结的 `1e-6` 重叠容差，改写为 `1e-6 * SCALE_REF`（同上理由；偏离见 §11.10） |
@@ -1260,7 +1295,7 @@ def layout_assembly(pieces):
    `geometry_occupancy` 是**尺度不变**的——等比缩放不改变它分毫。所以 `s_target` **改善不了
    任何一道 QA 闸门**，只会白白把线性比例尺压掉 `sqrt(0.62) = 21%`，进而把字高压掉 21%。
    实测：N=20 时 `0.45×slot` 由 3.83 降到 3.02，直接跌破 `TEXT_FLOOR_MM = 3.5`。
-2. `margin=0.06` 是双重内缩：`FRAME_W×FRAME_H = 180×250` 本身已经是「A4 减 15 mm 边距」的可用区，
+2. `margin=0.06` 是双重内缩：`FRAME_W×FRAME_H = 170×250` 本身已经是「A4 可用版心」，
    而标记边槽与图题带由调用方按 §11.6 从 `frame_w/frame_h` 里**显式扣除**后再传进来。
    两者叠加会把可用面积压到 77.4%，几何再也够不到纸的边。
 3. `s_target` 存在的目的（给标记留出余量）已经由 §11.6 的 `label_margin_mm/caption_band_mm` 承担，
@@ -1417,7 +1452,7 @@ def solve_figure(pieces, axis2d, density, labelled_keys, n_labels, figure_id, ki
 ### 11.7 `place_labels` 伪代码
 
 **坐标系：毫米图纸坐标。** `requests` 的 `lo/hi`、`obstacles`、`sheet_lo/sheet_hi` 都已由 renderer
-乘过 `s` 并平移进图框。`sheet_lo/sheet_hi` 是整个 `FRAME`（180×250），不是几何可用区——
+乘过 `s` 并平移进图框。`sheet_lo/sheet_hi` 是整个 `FRAME`（170×250），不是几何可用区——
 标记允许落进边槽，几何不允许。
 
 ```python
@@ -1839,7 +1874,7 @@ def place_labels(requests, *, obstacles, text_height, sheet_lo, sheet_hi):
 | # | 条目 | 冻结原文 | 本节裁定 | 理由 |
 | --- | --- | --- | --- | --- |
 | 1 | `fit_to_frame` 的 `s_target` | §5.2 `s = min(s_fit, s_target)` | **废止 `s_target`，`s = s_fit`** | `geometry_occupancy` 尺度不变，`s_target` 改善不了任何闸门，只把字高压掉 21% 并跌破 3.5 mm 下限。见 §11.5 |
-| 2 | `fit_to_frame` 的 `margin` 默认值 | §5.2 `margin = 0.06` | **改为 `0.0`**，调用方必须传 0.0 | 180×250 已经是可用区；边槽与图题带由 §11.6 显式扣除。双重内缩后几何再也够不到纸的边 |
+| 2 | `fit_to_frame` 的 `margin` 默认值 | §5.2 `margin = 0.06` | **改为 `0.0`**，调用方必须传 0.0 | 170×250 已经是可用区；边槽与图题带由 §11.6 显式扣除。双重内缩后几何再也够不到纸的边 |
 | 3 | `LayoutResult.slot` | §5.2 `min over pieces of max(hi-lo)` | **`min(该值, SLOT_QA_CAP_K*diag/N)`**；另在 `diagnostics["slot_labelled"]` 上报「被标注件的最小外廓」，**由后者驱动字高** | 一颗 `label:"none"` 的垫圈不该把全图数字压小；双口径夹紧让两种可能的 qa 实现都过闸 |
 | 4 | `layout_exploded` 的 `max_rows` | §5.2 默认 1，语义为上限 | **只接受 1，其它值抛 `LayoutError`** | §11.1 裁决：不实现二维排布，且绝不静默降级 |
 | 5 | 重叠容差 | §5.2 `1e-6` | **`1e-6 × SCALE_REF`**（相对量） | `layout.py` 拿的是模型单位，绝对容差在 1e5 量级坐标上失效、在 1e-3 量级坐标上过度合并 |
@@ -1851,7 +1886,7 @@ def place_labels(requests, *, obstacles, text_height, sheet_lo, sheet_hi):
 1. `geometry_occupancy` 的口径钉死为 `area(GEOM∪HIDDEN 包围盒) / area(全部模型空间实体包围盒)`
    （裁决 D1，与失败基线的 0.1353 逐位吻合）。qa 实现者若采用别的口径，**必须报出不一致**，不许沉默。
 2. **新增** `sheet_fill_min = 0.55`：`area(GEOM∪HIDDEN 包围盒) / (aw × ah)`（裁决 D2），
-   其中 `h` 取自 `NUM` 图层 TEXT 实体的字高，`aw = 180 - 2*label_margin_mm(h)`、
+   其中 `h` 取自 `NUM` 图层 TEXT 实体的字高，`aw = FRAME_W - 2*label_margin_mm(h)`（FRAME_W=170）、
    `ah = 250 - label_margin_mm(h) - caption_band_mm(h)`，两个函数与 §11.6 同定义。
    **分母不要取整张 FRAME**：正方形几何在任何字号档下都只能得到 0.487~0.513，会结构性地
    过不了闸门，而它的长宽比旋转不变，hint 里的「改 axis_angle」什么也改变不了。

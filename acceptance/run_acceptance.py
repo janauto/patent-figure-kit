@@ -29,6 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / "scripts"
 FIXTURE = REPO / "tests" / "fixtures" / "synthetic.stp"
 GOLDEN = REPO / "tests" / "fixtures" / "golden_digest.txt"
+GOLDEN_EXT = REPO / "tests" / "fixtures" / "golden_digest_ext.txt"
 PY = sys.executable or "python3"
 
 RESULTS: list = []
@@ -320,6 +321,57 @@ def n10(ctx):
     return "%d 张图与仓库金样逐位一致（本机环境下可复现；跨机器需在异构机器上另跑一次）" % len(expected)
 
 
+@node("N10b", "扩展摘要 · 覆盖线色/线宽/线型/TEXT 旋转对齐")
+def n10b(ctx):
+    """N10 的伴生节点，不改动 N10。
+
+    §5.4 冻结的基础摘要只取图层/类型/样式/文本/取整坐标，Codex R0 S0-01 复现了它的盲区：
+    改线色、线宽、TEXT 旋转后摘要原封不动。N10b 用 normalized_digest_ext 把这些属性也纳入，
+    与仓库 golden_digest_ext.txt 比对。它证明的口径与 N10 一致——“已验证环境下规范化摘要
+    一致”，不是“任何机器逐字节相同”。另外断言基线所依据的原始输入文件（source STEP）SHA
+    与当前夹具一致，保证比对的是同一份输入（该 SHA 稳定可断言；DXF 原始字节 SHA 因 $TDCREATE
+    每次都变，不作基线）。
+    """
+    import hashlib
+    sys.path.insert(0, str(SCRIPTS))
+    from patent_figure.sheet import normalized_digest_ext
+
+    assert GOLDEN_EXT.is_file(), "缺少扩展金样文件 %s" % GOLDEN_EXT
+    expected = {}
+    recorded_step_sha = None
+    for line in GOLDEN_EXT.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("# source-step") and "sha256=" in s:
+            recorded_step_sha = s.split("sha256=", 1)[1].strip()
+            continue
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) == 2:
+            expected[parts[0]] = parts[1]
+    assert expected, "扩展金样文件里没有记录任何哈希"
+
+    # 比对的是同一份输入吗？原始 STEP 的 SHA 应与基线记录一致。
+    step_sha = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    assert recorded_step_sha, "扩展金样缺少 source-step SHA 记录"
+    assert step_sha == recorded_step_sha, (
+        "原始输入 STEP 变了：当前 %s，基线记录 %s。扩展金样是针对旧输入录的，先确认是有意改动。"
+        % (step_sha[:12], recorded_step_sha[:12]))
+
+    got = {name: normalized_digest_ext(ctx["out"] / name) for name in expected}
+    bad = [name for name, want in expected.items() if got[name] != want]
+    if bad:
+        versions = []
+        for check in (ctx.get("doctor") or {}).get("checks", []):
+            if check["id"] in ("cadquery-ocp", "ezdxf", "numpy", "python"):
+                versions.append("%s=%s" % (check["id"], check.get("detail", "?")[:24]))
+        raise AssertionError(
+            "扩展摘要与金样不一致：%s（本机 %s）。先核对依赖版本；若一致仍不同，说明线色/线宽/"
+            "线型或 TEXT 旋转对齐变了，请把两边哈希一并反馈。"
+            % ("、".join(bad), "；".join(versions)))
+    return "%d 张图扩展摘要与金样一致（含线色/线宽/线型/TEXT 旋转对齐；输入 STEP SHA 吻合）" % len(expected)
+
+
 @node("N11", "合规 · 图上不得出现明细表与厂内件号")
 def n11(ctx):
     import ezdxf
@@ -431,7 +483,7 @@ def n16(ctx):
     return "失败件 %d 张全部进 diag/，输出目录 0 张未过闸图（退出码 1）" % len(quarantined)
 
 
-NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n16]
+NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n10b, n11, n12, n13, n14, n16]
 
 
 # ------------------------------------------------------------------ 主流程

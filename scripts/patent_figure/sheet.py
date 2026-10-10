@@ -451,3 +451,70 @@ def normalized_digest(dxf: Path) -> str:
     records.sort()
     blob = "\n".join(repr(rec) for rec in records)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+#: Default attribute values for the extended digest. ezdxf 1.4.2, verified empirically on
+#: a figure written by this module: an entity that never set the attribute reports BYLAYER
+#: colour 256, no true colour, BYLAYER lineweight -1, BYLAYER linetype, and TEXT writes an
+#: integer halign/valign. These defaults are what ``_entity_record_ext`` records when an
+#: entity does not carry the attribute, so a figure that leaves them at BYLAYER hashes the
+#: same whether or not ezdxf wrote the DXF tag.
+EXT_COLOR_DEFAULT = 256
+EXT_LINEWEIGHT_DEFAULT = -1
+EXT_LINETYPE_DEFAULT = "BYLAYER"
+
+
+def _ext_style_record(entity: Any) -> tuple:
+    """The style attributes the extended digest adds on top of ``_entity_record``.
+
+    Covers exactly what Codex R0 S0-01 showed the frozen digest is blind to — colour,
+    lineweight, linetype, and (for TEXT) rotation and alignment — so a change that is
+    visible on the sheet but geometrically identical can no longer slip through unhashed.
+    Read defensively: ``dxf.get(attr, default)`` never raises for an entity that does not
+    carry the attribute.
+    """
+    dxf = entity.dxf
+    color = int(dxf.get("color", EXT_COLOR_DEFAULT))
+    true_color = dxf.get("true_color", None)
+    true_color = None if true_color is None else int(true_color)
+    lineweight = int(dxf.get("lineweight", EXT_LINEWEIGHT_DEFAULT))
+    linetype = str(dxf.get("linetype", EXT_LINETYPE_DEFAULT))
+    if entity.dxftype() == "TEXT":
+        rotation = _r(dxf.get("rotation", 0.0))
+        halign = int(dxf.get("halign", 0))
+        valign = int(dxf.get("valign", 0))
+    else:
+        rotation, halign, valign = None, None, None
+    return (color, true_color, lineweight, linetype, rotation, halign, valign)
+
+
+def _entity_record_ext(entity: Any) -> tuple:
+    """The base record (§5.4) with the extended style attributes appended."""
+    return _entity_record(entity) + _ext_style_record(entity)
+
+
+def normalized_digest_ext(dxf: Path) -> str:
+    """SHA-256 over an *extended* canonical form (WP1 deliverable 7 / Codex R0 S0-01).
+
+    Identical recipe to ``normalized_digest`` — read, build one tuple per modelspace
+    entity, total-order sort, join ``repr()`` with newlines, SHA-256 — but every entity
+    tuple also carries colour (ACI), true colour, lineweight, linetype, and TEXT rotation /
+    horizontal+vertical alignment. The base digest deliberately leaves those out (§5.4), so
+    this is the companion gate for "the drawing looks different but its geometry rounds the
+    same". It is a *separate* function and a *separate* baseline: ``normalized_digest`` and
+    its N10 golden are never touched.
+
+    The coverage is a property of the rendered figure, not of the DXF file bytes: the raw
+    file SHA changes every run (``$TDCREATE`` and the per-save GUIDs), so it is recorded in
+    the baseline as provenance only and never asserted — only this digest is the invariant.
+    """
+    doc = ezdxf.readfile(str(Path(dxf)))
+    insunits = doc.header.get("$INSUNITS", None)
+    if insunits is None or int(insunits) != INSUNITS_MM:
+        raise SheetError(
+            "normalized_digest_ext: $INSUNITS = %r，期望 %d（毫米）。"
+            "该文件不是按本契约 §5.4 写出的，摘要没有意义。" % (insunits, INSUNITS_MM))
+    records = [_entity_record_ext(e) for e in doc.modelspace()]
+    records.sort(key=repr)   # tuples may hold None; sort on repr for a total order
+    blob = "\n".join(repr(rec) for rec in records)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()

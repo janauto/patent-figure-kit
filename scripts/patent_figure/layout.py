@@ -748,7 +748,7 @@ def fit_to_frame(
        all and merely throws away ``sqrt(0.62) = 21%`` of linear scale — and 21% of text height with
        it.  Measured: at N=20 ``0.45*slot`` falls from 3.83 to 3.02, straight through
        ``TEXT_FLOOR_MM = 3.5``.
-    2. ``margin=0.06`` is a second inset: 180x250 is already "A4 minus a 15 mm margin", and the
+    2. ``margin=0.06`` is a second inset: 170x250 is already "A4 usable area", and the
        label gutter and caption band are subtracted explicitly by the caller per §11.6.  Stacking
        both leaves 77.4% of the area and the geometry can never reach the edge of the paper.
     3. What ``s_target`` was for (headroom for the labels) is already carried, and carried more

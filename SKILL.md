@@ -1,5 +1,5 @@
 ---
-name: patent-drawing-dwg-cleanup
+name: patent-figure-kit
 description: Generate patent figures from a 3D CAD assembly (STEP) by writing one figure-plan.json that scripts render deterministically into assembly and exploded DXF sheets with leaders and reference numerals, and clean or convert existing patent line drawings (DWG, DXF, Matplotlib, PDF, raster) into continuous-line DXF plus an AutoCAD-audited DWG with reference numerals removed and functional labels preserved.
 ---
 

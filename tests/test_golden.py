@@ -43,6 +43,7 @@ pytestmark = pytest.mark.skipif(
 
 FIXTURE = _ROOT / "tests" / "fixtures" / "synthetic.stp"
 GOLDEN = _ROOT / "tests" / "fixtures" / "golden_digest.txt"
+GOLDEN_EXT = _ROOT / "tests" / "fixtures" / "golden_digest_ext.txt"
 ANALYZE_CLI = _SCRIPTS / "analyze_assembly.py"
 RENDER_CLI = _SCRIPTS / "render_patent_figure.py"
 
@@ -112,6 +113,21 @@ def render_in_subprocess(plan_path: Path, assembly_path: Path, out: Path, extra=
 
 def digests(out: Path) -> dict:
     return {fid + ".dxf": SH.normalized_digest(out / (fid + ".dxf")) for fid in FIGURE_IDS}
+
+
+def ext_digests(out: Path) -> dict:
+    return {fid + ".dxf": SH.normalized_digest_ext(out / (fid + ".dxf")) for fid in FIGURE_IDS}
+
+
+def read_golden_ext() -> dict:
+    out = {}
+    for line in GOLDEN_EXT.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        name, digest = s.split()
+        out[name] = digest
+    return out
 
 
 # --------------------------------------------------------------------------- golden file
@@ -213,6 +229,45 @@ def test_no_two_figures_share_a_digest(rendered):
     pinning explicitly."""
     values = digests(rendered["out_a"])
     assert len(set(values.values())) == len(values)
+
+
+def test_extended_digest_is_deterministic(rendered):
+    """WP1 deliverable 7: the extended digest (colour/lineweight/linetype + TEXT
+    rotation/alignment) is as reproducible as the base one — same plan, same hash."""
+    a, b = ext_digests(rendered["out_a"]), ext_digests(rendered["out_b"])
+    assert a == b
+    assert ext_digests(rendered["out_a"]) == a
+
+
+def test_extended_digest_matches_baseline(rendered):
+    got = ext_digests(rendered["out_a"])
+    assert GOLDEN_EXT.is_file(), "缺少扩展基准；用 python3 tests/test_golden.py --update-ext 生成"
+    assert got == read_golden_ext(), (
+        "扩展摘要与 %s 记录的基准不一致（线色/线宽/线型/TEXT 旋转对齐之一变了）。\n"
+        "确认是有意改动后再用 python3 tests/test_golden.py --update-ext 重新生成。\n"
+        "实测 %r\n基准 %r" % (GOLDEN_EXT.name, got, read_golden_ext()))
+
+
+def test_extended_digest_catches_what_the_base_digest_misses(rendered, tmp_path):
+    """The point of N10b: a change the frozen §5.4 digest is blind to (Codex R0 S0-01 —
+    colour, lineweight, TEXT rotation) must move the extended digest."""
+    import ezdxf
+    src = rendered["out_a"] / "fig1.dxf"
+    base0, ext0 = SH.normalized_digest(src), SH.normalized_digest_ext(src)
+    doc = ezdxf.readfile(str(src))
+    msp = doc.modelspace()
+    for e in msp:
+        if e.dxftype() == "TEXT":
+            e.dxf.rotation = 13.0
+            break
+    for e in msp:
+        if e.dxftype() == "LINE":
+            e.dxf.color = 1
+            break
+    tampered = tmp_path / "tampered.dxf"
+    doc.saveas(str(tampered))
+    assert SH.normalized_digest(tampered) == base0, "base digest should ignore colour/rotation"
+    assert SH.normalized_digest_ext(tampered) != ext0, "ext digest must catch colour/rotation"
 
 
 def test_qa_passes_on_both_figures(rendered):
@@ -320,10 +375,48 @@ def _update() -> int:  # pragma: no cover - developer entry point
     return 0
 
 
+def _update_ext() -> int:  # pragma: no cover - developer entry point
+    import hashlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        plan_path, assembly_path = prepare(work)
+        out = work / "out"
+        code = render_in_process(plan_path, assembly_path, out)
+        if code != 0:
+            sys.stderr.write("渲染未通过（退出码 %d），扩展基准未更新\n" % code)
+            return 1
+        values = ext_digests(out)
+        step_sha = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    header = [
+        "# tests/fixtures/golden_digest_ext.txt",
+        "# sheet.normalized_digest_ext (impl-contract §5.4 扩展版，WP1 交付 7) of the figures",
+        "# rendered from tests/fixtures/synthetic.stp by the plan in tests/test_golden.py.",
+        "# 扩展摘要在基础摘要（§5.4）之上追加：线色(ACI)、真彩色、线宽(lineweight)、线型、",
+        "# 以及 TEXT 的旋转与水平/垂直对齐。基础摘要的 N10 金样与本文件互不影响。",
+        "#",
+        "# 说明：这里的 digest 是渲染产物的不变量；DXF 文件原始字节 SHA 因 $TDCREATE/GUID 每次都变，",
+        "# 不作基线、不做断言。下面记录的是原始输入文件（source STEP）的 SHA，用于溯源，稳定可断言。",
+        "# Regenerate with:  python3 tests/test_golden.py --update-ext",
+        "# " + environment_note(),
+        "#",
+        "# source-step  tests/fixtures/synthetic.stp  sha256=%s" % step_sha,
+        "",
+    ]
+    lines = header + ["%s  %s" % (n, values[n]) for n in sorted(values)]
+    GOLDEN_EXT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    sys.stdout.write("已更新 %s\n" % GOLDEN_EXT)
+    for name in sorted(values):
+        sys.stdout.write("  %s  %s\n" % (name, values[name]))
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover
     if "--update" in sys.argv[1:]:
         raise SystemExit(_update())
-    sys.stderr.write("用法：python3 tests/test_golden.py --update\n")
+    if "--update-ext" in sys.argv[1:]:
+        raise SystemExit(_update_ext())
+    sys.stderr.write("用法：python3 tests/test_golden.py --update | --update-ext\n")
     raise SystemExit(2)
 
 
