@@ -453,6 +453,57 @@ def n14(ctx):
     return tail
 
 
+@node("N15", "常驻 worker · 与 CLI 两条路径摘要一致，序列稳定")
+def n15(ctx):
+    """常驻单任务 worker 必须是透明的：同一 plan 经 CLI（子进程）和 worker（常驻、OCP 只导入
+    一次、main 在进程内跑）两条路径，规范化摘要逐位一致；且 A→B→A、失败→成功序列中结果稳定、
+    不串味（Codex R0 S1-06 / S1-08）。
+    """
+    sys.path.insert(0, str(SCRIPTS))
+    from patent_figure.sheet import normalized_digest
+    from patent_figure.worker import Worker
+
+    RP = str(SCRIPTS / "render_patent_figure.py")
+    tmp = ctx["tmp"]
+
+    def dig(out):
+        return {f: normalized_digest(out / (f + ".dxf")) for f in ("fig1", "fig2")}
+
+    # CLI path
+    cli = tmp / "n15_cli"
+    pc = run([RP, ctx["plan"], "--assembly", ctx["assembly"], "-o", cli])
+    assert pc.returncode == 0, "CLI 渲染失败：%s" % (pc.stdout + pc.stderr)[-300:]
+    cli_dig = dig(cli)
+
+    worker = Worker()
+    try:
+        # worker path, same plan
+        wk = tmp / "n15_wk"
+        rw = worker.run([RP, ctx["plan"], "--assembly", ctx["assembly"], "-o", str(wk)])
+        assert rw.returncode == 0, "worker 渲染失败：%s" % (rw.stdout + rw.stderr)[-300:]
+        assert dig(wk) == cli_dig, "worker 与 CLI 摘要不一致：%s vs %s" % (dig(wk), cli_dig)
+
+        # A -> B -> A（B 只出一张图），回到 A 必须与首次 A 逐位一致
+        a1 = tmp / "n15_a1"; worker.run([RP, ctx["plan"], "--assembly", ctx["assembly"], "-o", str(a1)])
+        worker.run([RP, ctx["plan"], "--assembly", ctx["assembly"], "-o", str(tmp / "n15_b"),
+                    "--only", "fig2"])
+        a2 = tmp / "n15_a2"; worker.run([RP, ctx["plan"], "--assembly", ctx["assembly"], "-o", str(a2)])
+        assert dig(a1) == dig(a2) == cli_dig, "A→B→A 序列后摘要漂移"
+
+        # 失败 -> 成功：强制一次 QA 失败，再正常出图，结果不受污染
+        thr = tmp / "n15_thr.json"
+        thr.write_text(json.dumps({"text_height_mm_min": 99.0}), encoding="utf-8")
+        rf = worker.run([RP, ctx["plan"], "--assembly", ctx["assembly"], "-o", str(tmp / "n15_fail"),
+                         "--thresholds", str(thr)])
+        assert rf.returncode == 1, "强制失败应退出码 1"
+        s = tmp / "n15_succ"
+        rs = worker.run([RP, ctx["plan"], "--assembly", ctx["assembly"], "-o", str(s)])
+        assert rs.returncode == 0 and dig(s) == cli_dig, "失败后下一次成功渲染被污染"
+    finally:
+        worker.close()
+    return "CLI==worker 摘要一致；A→B→A 与 失败→成功 序列稳定（OCP 仅导入一次）"
+
+
 @node("N16", "过闸后原子发布 · 失败件不得进输出目录")
 def n16(ctx):
     """故意制造一张过不了闸的图，断言它不会出现在输出目录，而是被隔离进 diag/。
@@ -483,7 +534,7 @@ def n16(ctx):
     return "失败件 %d 张全部进 diag/，输出目录 0 张未过闸图（退出码 1）" % len(quarantined)
 
 
-NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n10b, n11, n12, n13, n14, n16]
+NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n10b, n11, n12, n13, n14, n15, n16]
 
 
 # ------------------------------------------------------------------ 主流程

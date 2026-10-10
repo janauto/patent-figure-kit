@@ -106,9 +106,16 @@ class Workspace:
 def run_cli(args: list, timeout: int = 1800) -> subprocess.CompletedProcess:
     """Every render-chain step goes through the same CLIs the model route uses — never an
     import of package internals. That keeps the human path and the model path behind one
-    set of gates with one set of error messages."""
-    return subprocess.run([PY] + args, capture_output=True, text=True,
-                          timeout=timeout, cwd=str(REPO))
+    set of gates with one set of error messages.
+
+    WP1: routed through the resident single-task worker (``patent_figure.worker``), which
+    imports OCP once and runs each CLI's ``main`` in-process, so a "出图" click no longer pays
+    the OCP/matplotlib import every time. The worker returns a ``CompletedProcess`` identical
+    to ``subprocess.run`` and falls back to a plain subprocess for any CLI it does not
+    dispatch, or when ``PFK_WORKER=0`` disables it — so the gates, error messages and
+    deterministic output are unchanged (acceptance N15)."""
+    from patent_figure.worker import run_cli_via_worker
+    return run_cli_via_worker(args, timeout=timeout)
 
 
 def prepare(ws: Workspace, quiet: bool = False) -> None:

@@ -20,7 +20,7 @@
 python3 acceptance/run_acceptance.py
 ```
 
-约 90 秒，输出一张 16 行的结果表。退出码 `0` = 全通过，`1` = 有节点未通过。
+约 100 秒，输出一张 17 行的结果表。退出码 `0` = 全通过，`1` = 有节点未通过。
 
 需要机器可读结果时加 `--json`：
 
@@ -28,7 +28,7 @@ python3 acceptance/run_acceptance.py
 python3 acceptance/run_acceptance.py --json acceptance-report.json
 ```
 
-### 它检查的 16 个节点
+### 它检查的 17 个节点
 
 | 节点 | 内容 | 判据 |
 | --- | --- | --- |
@@ -47,6 +47,7 @@ python3 acceptance/run_acceptance.py --json acceptance-report.json
 | N12 | BOM 导入 | 件号→中文名匹配可用 |
 | N13 | DWG 转换 | AutoCAD 或 LibreDWG 任一可用即可（都没有则跳过） |
 | N14 | 单元测试 | pytest 全绿 |
+| N15 | **常驻 worker 一致性** | 同一 plan 经 CLI 与常驻 worker 两条路径摘要一致；A→B→A、失败→成功序列稳定 |
 | N16 | **过闸后原子发布** | 故意制造失败件，断言输出目录不含它、失败件进 diag/、退出码 1 |
 
 几个节点值得单独说：
