@@ -667,6 +667,15 @@ class GeometryCache:
         """Return the cached curves, or None on a miss."""
         return self._read(self._path(part_key, view, deflection))[0]
 
+    def get_with_drops(self, part_key: str, view: ViewFrame,
+                       deflection: float) -> Tuple[Optional[list], Tuple[int, int]]:
+        """Curves and drop delta in a single read (one ``np.load``, not two).
+
+        ``get`` + ``get_drops`` would open the same npz twice, which measurably slowed the
+        warm-cache path; callers that need both use this.
+        """
+        return self._read(self._path(part_key, view, deflection))
+
     def get_drops(self, part_key: str, view: ViewFrame,
                   deflection: float) -> Optional[Tuple[int, int]]:
         """Return the cached ``(dropped_edges, dropped_compounds)`` delta, or None on a miss.

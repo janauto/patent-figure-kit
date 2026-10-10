@@ -682,7 +682,11 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             sub = "out" if area == "out" else "flow_out"
             path = proj.root / "studio" / sub / name
         if not path.is_file():
-            raise HTTPException(404)
+            # WP1-5: raster PNGs are produced lazily from the sibling DXF (the interactive
+            # render path only writes SVGs now). A missing SVG/DXF still 404s.
+            if not (path.suffix == ".png" and area == "out"
+                    and EXT.ensure_preview_png(path)):
+                raise HTTPException(404)
         return FileResponse(str(path), media_type=MEDIA[name.rsplit(".", 1)[1]])
 
     # ---- REST v1 -------------------------------------------------------------

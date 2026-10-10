@@ -611,7 +611,10 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None) -> FastAPI
             raise HTTPException(400, "非法文件名")
         path = ws.out / name
         if not path.is_file():
-            raise HTTPException(404)
+            # WP1-5: PNGs are made lazily from the sibling DXF (the interactive path writes
+            # SVGs only). SVG/DXF that are genuinely absent still 404.
+            if not (path.suffix == ".png" and studio_ext.ensure_preview_png(path)):
+                raise HTTPException(404)
         media = {"svg": "image/svg+xml", "png": "image/png",
                  "dxf": "application/octet-stream"}[path.suffix[1:]]
         return FileResponse(str(path), media_type=media)

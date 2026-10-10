@@ -25,6 +25,10 @@ VARIANTS = ("annotated", "filing")
 VARIANT_LABEL = {"annotated": "交底版（图号 + 件号名称表）", "filing": "递交版（仅图号）",
                  "raw": "原始出图（描述性图题）"}
 
+#: PNG preview resolution at export (WP1-5): the interactive path previews via SVG only, so
+#: raster PNGs are produced just once, here, at export time. 300 dpi matches the F1 default.
+EXPORT_PNG_DPI = 300
+
 
 def _load(path: Path, default=None):
     try:
@@ -41,6 +45,27 @@ def _dump(path: Path, data) -> None:
 # --------------------------------------------------------------------------- #
 # 结构附图：出图后自动出交底版 / 递交版                                          #
 # --------------------------------------------------------------------------- #
+
+def ensure_preview_png(png_path: Path, dpi: int = EXPORT_PNG_DPI) -> bool:
+    """Lazily render a missing PNG from its sibling DXF (WP1-5).
+
+    The interactive path makes SVGs only; a PNG is produced on first request here (and at
+    export). Returns True if the PNG exists after the call. matplotlib is imported lazily
+    inside render_preview, so a page that never asks for a PNG never pays for matplotlib.
+    """
+    png_path = Path(png_path)
+    if png_path.is_file():
+        return True
+    dxf = png_path.with_suffix(".dxf")
+    if not dxf.is_file():
+        return False
+    try:
+        from patent_figure import sheet as _sheet
+        _sheet.render_preview(dxf, png_path, dpi=dpi)
+        return png_path.is_file()
+    except Exception:
+        return False
+
 
 def annotate_all(ws, run_cli: Callable, svg_of: Callable, result: dict) -> None:
     """给 result["figures"] 里每张已渲染的图补上两个规范版本与附图说明。"""
@@ -64,8 +89,12 @@ def annotate_all(ws, run_cli: Callable, svg_of: Callable, result: dict) -> None:
         for variant in VARIANTS:
             dst = ws.out / ("%s_%s.dxf" % (fid, variant))
             rep_path = ws.out / ("%s_%s.json" % (fid, variant))
+            # WP1-5: no --preview here. The interactive preview of the annotated / filing
+            # variants goes through the same hand-written interactive SVG (svg_of) as the raw
+            # figure; the raster PNG is produced only at export (export_bundle), by dpi. This
+            # removes one matplotlib launch per variant per render from the "出图" click.
             args = [str(ANNOTATE_CLI), str(src), "--numerals", str(numerals),
-                    "--figure-number", str(number), "-o", str(dst), "--preview",
+                    "--figure-number", str(number), "-o", str(dst),
                     "--json", str(rep_path)]
             if variant == "filing":
                 args.append("--no-table")
@@ -78,6 +107,9 @@ def annotate_all(ws, run_cli: Callable, svg_of: Callable, result: dict) -> None:
                     fig["annotation"] = {
                         "table": rep.get("table"), "warnings": rep.get("warnings", []),
                         "figure_description": rep.get("figure_description", ""),
+                        "svg": "/api/preview/%s.svg" % dst.stem,
+                        # PNG is now rendered lazily on first request (served from the sibling
+                        # DXF), so this URL is valid without an eager matplotlib launch.
                         "png": "/api/preview/%s.png" % dst.stem,
                     }
                     if rep.get("figure_description"):
@@ -206,9 +238,26 @@ def apply_terms(ws, rows: List[dict], overwrite: bool = False) -> dict:
 # 导出：说明书附图 Word + 附图说明                                                #
 # --------------------------------------------------------------------------- #
 
-def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: bool) -> dict:
+def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: bool,
+                  png_dpi: int = EXPORT_PNG_DPI) -> dict:
     files, notes = [], []
     figs = sorted(result.get("figures", []), key=lambda f: f.get("number", 999))
+    # WP1-5: raster PNGs are generated here, at export, by dpi — the interactive path only
+    # ever made SVGs. Render each annotated/filing DXF to PNG in-process (matplotlib is
+    # imported lazily inside render_preview); a failure is cosmetic and must not block export.
+    try:
+        from patent_figure import sheet as _sheet
+        for fig in figs:
+            for suffix in ("_annotated", "_filing"):
+                dxf = ws.out / (fig["id"] + suffix + ".dxf")
+                png = ws.out / (fig["id"] + suffix + ".png")
+                if dxf.is_file() and not png.is_file():
+                    try:
+                        _sheet.render_preview(dxf, png, dpi=png_dpi)
+                    except Exception as exc:
+                        notes.append("PNG 未生成 %s：%s" % (png.name, exc))
+    except Exception as exc:  # pragma: no cover - import guard
+        notes.append("预览渲染不可用：%s" % exc)
     for fig in figs:
         for suffix in ("", "_annotated", "_filing"):
             for ext in (".dxf", ".png", ".svg"):

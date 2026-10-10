@@ -202,11 +202,10 @@ class CurveSource:
             self.hits += 1
             return self._memo[key]
         if self.cache is not None:
-            cached = self.cache.get(key, self.view, self.deflection)
+            cached, drops = self.cache.get_with_drops(key, self.view, self.deflection)
             if cached is not None:
                 self.hits += 1
                 self._memo[key] = cached
-                drops = self.cache.get_drops(key, self.view, self.deflection) or (0, 0)
                 self._drops[key] = drops
                 return cached
         return None
@@ -220,11 +219,10 @@ class CurveSource:
             # re-checking the cache turns a duplicate compute into a cheap hit. The lock
             # is advisory: if we time out we compute anyway (see GeometryCache).
             with self.cache.single_flight(key, self.view, self.deflection):
-                cached = self.cache.get(key, self.view, self.deflection)
+                cached, drops = self.cache.get_with_drops(key, self.view, self.deflection)
                 if cached is not None:
                     self._memo[key] = cached
-                    self._drops[key] = (self.cache.get_drops(
-                        key, self.view, self.deflection) or (0, 0))
+                    self._drops[key] = drops
                     return cached
                 return self._run_and_store(key, fn)
         return self._run_and_store(key, fn)
