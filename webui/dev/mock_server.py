@@ -355,6 +355,11 @@ def run_job(job, kind, fail_stage, speed):
         job["stages"] = done
         _emit(job, "stage", {"stage": name, "progress": prog, "seconds": elapsed, "label": label})
     job["state"] = "succeeded"
+    # 渲染作业：把权威结果落到工程，重新进入也能看到（Codex finding 3）
+    if kind == "render" and job.get("project_id") and job.get("result"):
+        p = PROJECTS.get(job["project_id"])
+        if p and p.get("data") is not None:
+            p["data"]["render"] = job["result"]
     _emit(job, "done", {"result": job.get("result")})
     with job["_cv"]:
         job["_done"] = True
@@ -373,10 +378,14 @@ def project_summary(p):
     if d:
         r = d.get("render")
         figs = (r or {}).get("figures", [])
+        # 缩略图用渲染结果里图1的交底版变体 URL（真实资产所在），不靠按工程名拼路径
+        thumb = None
+        if figs:
+            v = figs[0].get("variants") or {}
+            thumb = v.get("annotated") or figs[0].get("svg")
         base.update(figures=len(figs),
                     figures_pass=sum(1 for f in figs if f.get("pass")),
-                    flowcharts=0,
-                    thumb=(f"/v1/projects/{p['id']}/preview/fig1_annotated.svg" if r else None))
+                    flowcharts=0, thumb=thumb)
     else:
         base.update(figures=0, figures_pass=0, flowcharts=0, thumb=None)
     return base
@@ -390,6 +399,25 @@ def project_detail(p):
                plan=d.get("plan"),                      # 静态只读站要能读到 plan（S2-16）
                model_url=f"/v1/projects/{p['id']}/model.glb")
     return out
+
+
+def render_payload(pid, fail):
+    """渲染作业的权威结果：gearbox 用真实出图；其它工程借用 gearbox 演示闭环。
+    fail=True 时把图1 的三项 QA 翻成失败（渲染进程完成，但 QA 未过闸）。"""
+    src = (PROJECTS.get("gearbox", {}).get("data") or {}).get("render")
+    r = copy.deepcopy(src)
+    if not r:
+        return {"ok": True, "figures": [], "numerals": None, "figure_descriptions": []}
+    if fail:
+        f = r["figures"][0]
+        rows = f.get("annotation", {}).get("table", {}).get("rows", [])
+        f["qa"] = failing_qa(rows)
+        f["pass"] = False
+        r["ok"] = False
+    else:
+        r["ok"] = True
+    r["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    return r
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -460,11 +488,10 @@ class Handler(BaseHTTPRequestHandler):
     # ---- static files (relative paths; serves webui/ and dev/fixtures) ----
     def static(self, path):
         rel = path.lstrip("/")
-        if rel.startswith("dev/"):
-            target = WEBUI / rel
-        else:
-            target = WEBUI / rel
-        target = target.resolve()
+        # 与正式后端兼容：首页资源走 /static/*（workbench.py 把 /static 挂到 webui/）
+        if rel.startswith("static/"):
+            rel = rel[len("static/"):]
+        target = (WEBUI / rel).resolve()
         if WEBUI not in target.parents and target != WEBUI:
             return self._err(403, "越界访问")
         if not target.is_file():
@@ -617,11 +644,10 @@ class Handler(BaseHTTPRequestHandler):
             p = PROJECTS.get(m.group(1))
             if not p:
                 return self._err(404, "没有这个工程")
-            wait = (q.get("wait") or ["0"])[0] == "1"
             fail = (q.get("fail") or [""])[0] == "gate"
+            # 渲染进程照常跑完（4 阶段都成功）；QA 的过/不过体现在 result 里，而不是作业失败
             job = new_job("render", project_id=m.group(1),
-                          fail_stage=("QA" if fail else None),
-                          result={"ok": not fail})
+                          result=render_payload(m.group(1), fail))
             return self._send(202, {"job_id": job["job_id"]})
         # 导出
         m = re.fullmatch(r"/v1/projects/([\w\-]+)/export", path)
@@ -650,16 +676,25 @@ class Handler(BaseHTTPRequestHandler):
                              "fig1.dxf", "fig2.dxf", "附图说明.txt", "核对清单.txt"],
             }
             return self._send(202, {"export_id": exp_id, "job_id": job["job_id"]})
-        # AI 起名（F9）
+        # AI 起名（F9）：按工程的空白术语给中文名建议（前端只写入选中且空白的）
         if path in ("/v1/ai/draft-terms", "/api/llm/draft-terms"):
             if not LLM["configured"]:
                 return self._err(409, "AI 通道未配置", "到设置里填 DeepSeek 密钥，或改用本机 MCP 客户端。",
                                  "ai_not_configured")
-            return self._send(200, {"suggestions": [
-                {"selector": "PGB-PLANET-PIN", "term": "行星销", "confidence": "low",
-                 "reason": "销类零件命名多义，建议人工复核"},
-                {"selector": "PGB-OIL-SEAL", "term": "油封", "confidence": "high", "reason": ""},
-            ], "filled": 2})
+            names = {**GEARBOX_NAMES, **VISE_NAMES, **VALVE_NAMES}
+            pid = (body or {}).get("project") or "gearbox"
+            plan = (PROJECTS.get(pid, {}).get("data") or {}).get("plan") or {}
+            sugg = []
+            low = {"PGB-PLANET-PIN", "VISE-THRUST-COLLAR", "BV-PACKING"}
+            for t in plan.get("terms", []):
+                sel = t.get("selector", "")
+                if (t.get("term") or "").strip():
+                    continue
+                term = names.get(sel) or (sel.split("-")[-1].title() + " 件")
+                sugg.append({"selector": sel, "term": term,
+                             "confidence": "low" if sel in low else "high",
+                             "reason": "命名多义，建议人工复核" if sel in low else ""})
+            return self._send(200, {"suggestions": sugg, "filled": len(sugg)})
         return self._err(404, "未实现的 POST：%s" % path)
 
     # ---- PUT ----

@@ -16,6 +16,7 @@ export const state = {
   plan: null,
   validate: null,       // 服务器 validate 结果 {ok, issues}
   render: null,         // 最近一次渲染结果
+  renderStale: false,   // plan/术语改过、当前结果已过期（需重新出图、锁定导出）
   rendering: false,
   candidates: [],       // F2-lite 候选分图
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
@@ -141,6 +142,7 @@ let saveTimer = null;
 export function mutate(fn) {
   fn(state.plan);
   state.saveState = 'dirty';
+  if (state.render) { state.renderStale = true; bus.emit('render-stale'); }   // 改计划即标旧结果过期
   bus.emit('plan');
   bus.emit('save-state');
   clearTimeout(saveTimer);
@@ -186,6 +188,8 @@ export async function boot(projectId) {
   state.render = data.render;
   state.rendering = false;
   state.candidates = data.candidates || [];
+  state.candidatesUnsupported = !!data.candidates_unsupported;   // 旧后端无候选分图
+  state.homeUrl = data.home_url || null;
   state.llm = data.llm || null;
   state.structure = data.structure || null;
   const planRes = await api.getPlan(projectId);

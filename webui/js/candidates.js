@@ -36,7 +36,17 @@ function candCard(c) {
 function render() {
   const cands = state.candidates || [];
   const head = `<div class="panel-head"><span class="seal">候选</span>候选分图
-    <button class="btn-min head-btn" data-resuggest>重新给候选</button></div>`;
+    ${state.candidatesUnsupported ? '' : '<button class="btn-min head-btn" data-resuggest>重新给候选</button>'}</div>`;
+  if (state.candidatesUnsupported) {
+    root.innerHTML = `${head}
+      <div class="cand-empty">
+        <p class="stamp-run">需要新版后端</p>
+        <p>当前连接的是现有工作台后端，<b>还没有候选分图</b>功能。</p>
+        <p>照旧流程也能出图：在 3D 里框选要申请的一组零件（按 <kbd>B</kbd>），
+          到「图纸」页点「＋新建图」，或在结构树里用某个结构组一键建图。</p>
+      </div>`;
+    return;
+  }
   if (!cands.length) {
     // 建议为空：明确提示「请框选分组」并给三步示意（不假装零点击）
     root.innerHTML = `${head}

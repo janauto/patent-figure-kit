@@ -1,0 +1,338 @@
+{
+  "schema": "patent-assembly/1",
+  "source": {
+    "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-ball-valve.stp",
+    "sha256": "7d07a043f93d736fdbf657846d490635acce071edeed9fc0703123c8a28c42cc",
+    "instances": 18,
+    "distinct": 9
+  },
+  "units": "mm",
+  "bbox": {
+    "lo": [
+      -66.0,
+      -48.0,
+      -48.0
+    ],
+    "hi": [
+      96.0,
+      48.0,
+      119.0
+    ],
+    "size": [
+      162.0,
+      96.0,
+      167.0
+    ]
+  },
+  "parts": [
+    {
+      "name": "VALVE-BALL",
+      "instances": 1,
+      "bbox_size": [
+        50.0,
+        50.0,
+        49.679
+      ],
+      "max_dim": 50.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          -0.160536
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-BALL"
+    },
+    {
+      "name": "VALVE-BODY",
+      "instances": 1,
+      "bbox_size": [
+        88.0,
+        96.0,
+        120.0
+      ],
+      "max_dim": 120.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          12.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-BODY"
+    },
+    {
+      "name": "VALVE-FLANGE-BOLT",
+      "instances": 8,
+      "bbox_size": [
+        41.0,
+        16.166,
+        14.0
+      ],
+      "max_dim": 41.0,
+      "centers": [
+        [
+          -45.5,
+          -26.870058,
+          -26.870058
+        ],
+        [
+          -45.5,
+          -26.870058,
+          26.870058
+        ],
+        [
+          -45.5,
+          26.870058,
+          -26.870058
+        ],
+        [
+          -45.5,
+          26.870058,
+          26.870058
+        ],
+        [
+          45.5,
+          -26.870058,
+          -26.870058
+        ],
+        [
+          45.5,
+          -26.870058,
+          26.870058
+        ],
+        [
+          45.5,
+          26.870058,
+          -26.870058
+        ],
+        [
+          45.5,
+          26.870058,
+          26.870058
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-FLANGE-BOLT"
+    },
+    {
+      "name": "VALVE-GLAND-NUT",
+      "instances": 1,
+      "bbox_size": [
+        34.0,
+        39.26,
+        14.0
+      ],
+      "max_dim": 39.26,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          79.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-STEM-ASM/VALVE-GLAND-NUT"
+    },
+    {
+      "name": "VALVE-HANDLE",
+      "instances": 1,
+      "bbox_size": [
+        111.0,
+        30.0,
+        16.0
+      ],
+      "max_dim": 111.0,
+      "centers": [
+        [
+          40.5,
+          0.0,
+          107.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-HANDLE"
+    },
+    {
+      "name": "VALVE-HANDLE-NUT",
+      "instances": 1,
+      "bbox_size": [
+        16.0,
+        18.475,
+        7.0
+      ],
+      "max_dim": 18.475,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          115.5
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-HANDLE-NUT"
+    },
+    {
+      "name": "VALVE-PACKING-RING",
+      "instances": 2,
+      "bbox_size": [
+        24.0,
+        24.0,
+        5.0
+      ],
+      "max_dim": 24.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          63.5
+        ],
+        [
+          0.0,
+          0.0,
+          68.5
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-STEM-ASM/VALVE-PACKING-RING"
+    },
+    {
+      "name": "VALVE-SEAT",
+      "instances": 2,
+      "bbox_size": [
+        8.0,
+        52.0,
+        52.0
+      ],
+      "max_dim": 52.0,
+      "centers": [
+        [
+          -26.0,
+          0.0,
+          0.0
+        ],
+        [
+          26.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-SEAT"
+    },
+    {
+      "name": "VALVE-STEM",
+      "instances": 1,
+      "bbox_size": [
+        14.0,
+        14.0,
+        100.0
+      ],
+      "max_dim": 100.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          68.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VALVE-ASSY/VALVE-STEM-ASM/VALVE-STEM"
+    }
+  ],
+  "principal_axis": {
+    "vector": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "nearest": "z",
+    "spread_ratio": 1.922
+  },
+  "coaxial_groups": [
+    {
+      "id": "g1",
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "origin": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "members": [
+        "VALVE-SEAT"
+      ],
+      "instances": 2,
+      "extent": [
+        -30.0,
+        30.0
+      ]
+    },
+    {
+      "id": "g2",
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "origin": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "members": [
+        "VALVE-PACKING-RING",
+        "VALVE-STEM"
+      ],
+      "instances": 3,
+      "extent": [
+        18.0,
+        118.0
+      ]
+    }
+  ],
+  "stack_order": [
+    "VALVE-BALL",
+    "VALVE-FLANGE-BOLT",
+    "VALVE-SEAT",
+    "VALVE-BODY",
+    "VALVE-PACKING-RING",
+    "VALVE-STEM",
+    "VALVE-GLAND-NUT",
+    "VALVE-HANDLE",
+    "VALVE-HANDLE-NUT"
+  ],
+  "size_tiers": [
+    {
+      "tier": "large",
+      "members": [
+        "VALVE-BODY",
+        "VALVE-HANDLE",
+        "VALVE-STEM"
+      ]
+    },
+    {
+      "tier": "medium",
+      "members": [
+        "VALVE-BALL",
+        "VALVE-FLANGE-BOLT",
+        "VALVE-SEAT"
+      ]
+    },
+    {
+      "tier": "small",
+      "members": [
+        "VALVE-GLAND-NUT",
+        "VALVE-HANDLE-NUT",
+        "VALVE-PACKING-RING"
+      ]
+    }
+  ],
+  "split_suggestions": [],
+  "warnings": []
+}

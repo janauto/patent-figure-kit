@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>{name} · 工程列表</title>
 <meta name="description" content="从 STEP 到按国家知识产权局形式要求排版的说明书附图。">
-<link rel="stylesheet" href="./tokens.css">
-<link rel="stylesheet" href="./home.css">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/home.css">
 </head>
 <body class="home">
   <header id="hbar">
@@ -34,7 +35,7 @@
         <li><span class="seal">01</span><b>载入 / 上传</b><span>示例或 Creo / SolidWorks 导出的 STEP</span></li>
         <li><span class="seal">02</span><b>看懂 · 框选</b><span>结构树 ↔ 3D 联动，按机构框选入图</span></li>
         <li><span class="seal">03</span><b>出图 · 过闸</b><span>程序发标号与版面，13 项 QA 把关</span></li>
-        <li><span class="seal">04</span><b>导出递交包</b><span>递交版 PDF + 交底版 Word</span></li>
+        <li><span class="seal">04</span><b>导出附图包</b><span>递交版 PDF + 交底版 Word</span></li>
       </ol>
       <a class="no-step" id="no-step">我没有 STEP 怎么办？</a>
     </section>
@@ -138,6 +139,6 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
   <div id="toast" class="toast" hidden></div>
 
-  <script type="module" src="./js/home.js"></script>
+  <script type="module" src="/static/js/home.js"></script>
 </body>
 </html>

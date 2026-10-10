@@ -1,6 +1,6 @@
 // 规划台装配入口：顶栏、三屏切换（规划 / 出图与 QA / 导出）、键盘金路径、AI 起名浮条。
 // three.js 只在进入「规划台」时动态 import()，首页零 three.js（硬约束）。
-import { boot, bus, state, setSelection, flush, setView, displayName, aiName } from './state.js';
+import { boot, bus, state, setSelection, flush, setView, displayName, mutate } from './state.js';
 import { api, readOnly } from './api.js';
 import { applyBrand } from './brand.js';
 
@@ -39,6 +39,18 @@ export function toast(msg, kind = '') {
 // ---------------------------------------------------------------- 顶栏
 function renderToolbar() {
   $('#tb-proj').textContent = `${state.title || projectId} · ${state.step || ''}`;
+  const homeLink = $('.tb-home');
+  if (homeLink) {
+    if (api.isLegacy) {
+      const base = state.homeUrl || '/';
+      const tok = new URLSearchParams(location.search).get('token')
+        || (() => { try { return sessionStorage.getItem('studio-token') || ''; } catch { return ''; } })();
+      homeLink.href = (base.includes('token=') || !tok) ? base
+        : `${base}${base.includes('?') ? '&' : '?'}token=${encodeURIComponent(tok)}`;
+    } else {
+      homeLink.href = `./home.html${new URLSearchParams(location.search).has('static') ? '?static' : ''}`;
+    }
+  }
   const llm = state.llm || {};
   const badge = $('#ai-badge');
   if (!llm.configured) { badge.classList.add('off'); badge.textContent = 'AI 未接入'; }
@@ -59,13 +71,17 @@ function showStage(stage) {
   if (stage === 'plan' && !plansMounted) mountPlan();
   if (stage === 'qa') import('./qa.js').then((m) => m.mountQa($('#qa-host')));
   if (stage === 'export') import('./export.js').then((m) => m.mountExport($('#export-host')));
-  try {                                   // 保留 state / static 开关（四态截图与静态站用）
-    const keep = new URLSearchParams();
-    keep.set('project', projectId); keep.set('stage', stage);
-    if (forceState) keep.set('state', forceState);
-    if (params.has('static')) keep.set('static', '');
-    history.replaceState(null, '', `?${keep.toString()}`);
-  } catch { /* */ }
+  // legacy 入口是 /p/{id}/?token=，工程在挂载里、token 在 URL——绝不能重写掉（否则新开标签 401）
+  if (!api.isLegacy) {
+    try {                                 // 保留 state / static 开关（四态截图与静态站用），保留 token
+      const keep = new URLSearchParams(location.search);
+      keep.set('project', projectId); keep.set('stage', stage);
+      if (forceState) keep.set('state', forceState); else keep.delete('state');
+      history.replaceState(null, '', `?${keep.toString()}`);
+    } catch { /* */ }
+  } else {
+    try { history.replaceState(null, '', location.pathname + location.search); } catch { /* */ }
+  }
 }
 
 function initStageNav() {
@@ -84,8 +100,15 @@ async function mountPlan() {
   const { initCandidates } = await import('./candidates.js');
   initCandidates($('#candidates'));
   initFigures($('#figures'));
-  initTerms($('#terms'));
+  initTerms($('#terms'), $('#params'));   // 参数页：layout.view / density / 版心预设 等（QA 修复入口指向这里）
   initParts($('#parts'));
+  // 方法流程图：正式后端（legacy）可用；mock/静态站无此后端，给出可达但诚实的说明
+  if (api.flowchartsSupported()) {
+    import('./flowcharts.js').then((m) => m.initFlowcharts($('#flows')));
+  } else {
+    $('#flows').innerHTML = `<div class="pane-note"><p class="stamp-run">需要后端</p>
+      <p>方法专利的流程图（S101 步骤号）由后端生成，mock 未实现——在正式工作台里可用。</p></div>`;
+  }
   initRightTabs();
   initAiFloatbar();
   bus.emit('booted');   // 让各面板首渲
@@ -186,15 +209,36 @@ function updateFloatbar() {
 async function aiNameSelection() {
   const bar = $('#ai-floatbar');
   bar.querySelector('#afb-name').outerHTML = '<span class="hint"><i class="spin"></i> 正在读代号、起中文名…</span>';
+  const selected = new Set(state.selection);
   try {
     const res = await api.draftTerms(projectId);
     const sugg = {};
     (res.suggestions || []).forEach((s) => { sugg[s.selector] = s; });
     state.aiSuggestions = { ...state.aiSuggestions, ...sugg };
-    bus.emit('ai-suggestions'); bus.emit('plan');
+    let filled = 0;
+    if (res.server_applied && res.plan) {
+      // 旧后端已把名称写进 plan 并保存：以服务端 plan 为准
+      state.plan = res.plan;
+      filled = res.filled || 0;
+      bus.emit('plan'); bus.emit('validate');
+    } else {
+      // 新后端只返回建议：前端把建议写入「选中且空白」的术语行（人工填过的不动）
+      mutate((plan) => {
+        (res.suggestions || []).forEach((s) => {
+          const row = (plan.terms || []).find((t) => t.selector === s.selector);
+          const hitSelected = selected.has(s.selector)
+            || [...selected].some((n) => n === s.selector);
+          if (row && !(row.term || '').trim() && (hitSelected || !selected.size)) {
+            row.term = s.term; filled += 1;
+          }
+        });
+      });
+    }
+    bus.emit('ai-suggestions');
     const low = (res.suggestions || []).filter((s) => s.confidence === 'low').length;
-    toast(`AI 起草完成：填了 ${res.filled || 0} 个零件名`
-      + (low ? `（${low} 个把握低，已标黄，请核对）` : '') + '。人工填过的未改动。', 'ok');
+    toast(filled ? `AI 起草完成：填了 ${filled} 个零件名`
+        + (low ? `（${low} 个把握低，已标黄，请核对）` : '') + '。人工填过的未改动。'
+      : 'AI 没有可填的空白件（选中的都已命名）。', filled ? 'ok' : '');
     updateFloatbar();
   } catch (err) {
     toast('AI 起草失败：' + (err.hint || err.message), 'bad');

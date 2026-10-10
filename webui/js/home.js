@@ -1,12 +1,16 @@
 // 首页：工程列表（屏①）与新建/上传（屏②）。对 mock 开发；四态由数据与 ?scene/?upload 开关驱动。
-import { api, readOnly } from './api.js';
+import { api, readOnly, isLegacy, token } from './api.js';
 import { applyBrand, DISPLAY_NAME } from './brand.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const params = new URLSearchParams(location.search);
 const scene = params.get('scene') || '';          // empty | loading | error | ''
-const toStudio = (id) => `./index.html?project=${encodeURIComponent(id)}`;
+const keepStatic = params.has('static');
+// 导航 URL 保留后端形态：legacy 走正式 /p/{id}/（带 token）；live/static 走开发入口（保留 ?static）。
+const toStudio = (id) => (isLegacy
+  ? `/p/${encodeURIComponent(id)}/${token ? `?token=${encodeURIComponent(token)}` : ''}`
+  : `./index.html?project=${encodeURIComponent(id)}${keepStatic ? '&static' : ''}`);
 
 applyBrand();
 
@@ -214,14 +218,10 @@ function openUploadIdle(dragging) {
       </div>
     </div>`;
   const drop = $('#up-drop'); const file = $('#up-file');
-  const titleFromFile = (name) => name.replace(/\.(stp|step)$/i, '');
   const pick = () => file.click();
   $('#up-browse').addEventListener('click', (e) => { e.stopPropagation(); pick(); });
   drop.addEventListener('click', (e) => { if (!e.target.closest('button')) pick(); });
-  file.addEventListener('change', () => {
-    const f = file.files[0];
-    if (f) startUpload($('#up-title').value.trim() || titleFromFile(f.name));
-  });
+  file.addEventListener('change', () => { const f = file.files[0]; if (f) startUpload(f); });
   ['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => {
     e.preventDefault(); e.stopPropagation(); drop.classList.add('over');
   }));
@@ -229,7 +229,7 @@ function openUploadIdle(dragging) {
   drop.addEventListener('drop', (e) => {
     e.preventDefault(); e.stopPropagation(); drop.classList.remove('over');
     const f = e.dataTransfer?.files?.[0];
-    startUpload($('#up-title').value.trim() || (f ? titleFromFile(f.name) : '（我的）新工程'));
+    if (f) startUpload(f); else toast('没检测到文件', 'bad');
   });
   $('#up-ex-gearbox').addEventListener('click', () => startExample('gearbox'));
   $('#up-ex-vise').addEventListener('click', () => startExample('vise'));
@@ -286,22 +286,55 @@ function runImportJob(jobId, projectId, title) {
 
 function bindUploadRun(projectId, title) {
   $('#up-enter')?.addEventListener('click', () => { location.href = toStudio(projectId); });
-  $('#up-retry')?.addEventListener('click', () => startUpload(title));
+  $('#up-retry')?.addEventListener('click', () => { if (pendingFile) startUpload(pendingFile, title); else openUploadIdle(); });
 }
 
-async function startUpload(title) {
+let pendingFile = null;   // 失败重试保留原文件
+
+function validateStep(file) {
+  if (!file) return '请选择 STEP 文件';
+  if (!/\.(stp|step)$/i.test(file.name)) return '只收 .stp / .step 装配体——其它格式先从 CAD 导出 STEP';
+  if (file.size === 0) return '文件是空的，请重新导出';
+  if (file.size > 200 * 1024 * 1024) return `文件 ${(file.size / 1048576).toFixed(0)} MB，超过 200 MB 上限`;
+  return '';
+}
+
+async function startUpload(file, titleOverride) {
+  const err0 = validateStep(file);
+  if (err0) { toast(err0, 'bad'); return; }
+  pendingFile = file;
+  const title = (titleOverride || $('#up-title')?.value?.trim() || file.name.replace(/\.(stp|step)$/i, ''));
+  const ai = $('#up-ai') ? $('#up-ai').checked : true;
   try {
-    const res = await api.createProject({ fail: params.get('fail') });
-    runImportJob(res.job_id, res.project_id, title || '（我的）新工程');
-  } catch (err) { toast('新建失败：' + err.message, 'bad'); }
+    const res = await api.createProject({ file, title, ai }, params.get('fail'));
+    if (isLegacy) {                 // 旧后端：后台解析，回列表轮询到就绪
+      closeUpload(); pendingFile = null;
+      toast(`已上传「${title}」，正在后台解析，就绪后可打开`, 'ok');
+      loadList();
+      return;
+    }
+    runImportJob(res.job_id, res.project_id, title);
+  } catch (err) {
+    openUpload();
+    $('#upload-body').innerHTML = `<div class="up-progress"><h2 class="up-title">${esc(title)}</h2>
+      <div class="banner error"><div><b>上传失败</b><p class="hint">${esc(err.hint || err.message)}</p></div>
+      <button class="btn" id="up-retry">重试（保留原文件）</button></div></div>`;
+    bindUploadRun(res?.project_id, title);
+  }
 }
 
 async function startExample(ex) {
+  if (isLegacy) {                   // 旧后端的示例已在列表里，直接打开
+    const p = cachedProjects.find((x) => x.example) || cachedProjects[0];
+    if (p) { location.href = toStudio(p.project_id); return; }
+    toast('示例工程正在准备，请稍候刷新', '');
+    return;
+  }
   try {
     const res = await api.fromExample(ex);
     const title = { gearbox: '行星齿轮减速器', vise: '台虎钳', valve: '球阀' }[ex];
     runImportJob(res.job_id, res.project_id, `载入示例 · ${title}`);
-  } catch (err) { toast('载入示例失败：' + err.message, 'bad'); }
+  } catch (err) { toast('载入示例失败：' + (err.hint || err.message), 'bad'); }
 }
 
 // 四态截图用：?upload=idle|running|done|fail 强制冻结上传屏
@@ -330,6 +363,17 @@ function openCmdk() {
   paintCmdk('');
 }
 function closeCmdk() { $('#cmdk').hidden = true; }
+// 统一执行：先关命令面板再执行动作，并把焦点移到新界面首个控件（finding 10）
+function execCmdk(i) {
+  const it = cmdkItems[i];
+  if (!it) return;
+  closeCmdk();
+  it.go();
+  requestAnimationFrame(() => {
+    const first = document.querySelector('#upload:not([hidden]) #up-browse, #upload:not([hidden]) button, dialog[open] button, .empty-acts button');
+    first?.focus();
+  });
+}
 let cmdkIdx = 0; let cmdkItems = [];
 function paintCmdk(q) {
   const ql = q.trim().toLowerCase();
@@ -347,7 +391,7 @@ function paintCmdk(q) {
     <span>${esc(it.label)}</span><span class="mono muted">${esc(it.meta)}</span></li>`).join('')
     || '<li class="empty">没有匹配项</li>';
   $('#cmdk-list').querySelectorAll('[data-i]').forEach((li) => li.addEventListener('click',
-    () => cmdkItems[Number(li.dataset.i)]?.go()));
+    () => execCmdk(Number(li.dataset.i))));
 }
 
 // ---------------------------------------------------------------- 对话框与全局键
@@ -358,8 +402,7 @@ function initDialogs() {
       e.preventDefault();
       if (t === 'drop' && $('#upload').hidden && !readOnly) {
         const f = e.dataTransfer.files[0];
-        openUpload();
-        startUpload(f ? f.name.replace(/\.(stp|step)$/i, '') : '（我的）新工程');
+        if (f) { openUploadIdle(); startUpload(f); }
       }
     }
   }));
@@ -384,7 +427,7 @@ function initDialogs() {
     if (!$('#cmdk').hidden) {
       if (e.key === 'ArrowDown') { e.preventDefault(); cmdkIdx = Math.min(cmdkIdx + 1, cmdkItems.length - 1); paintCmdk($('#cmdk-input').value); }
       if (e.key === 'ArrowUp') { e.preventDefault(); cmdkIdx = Math.max(cmdkIdx - 1, 0); paintCmdk($('#cmdk-input').value); }
-      if (e.key === 'Enter') { e.preventDefault(); cmdkItems[cmdkIdx]?.go(); }
+      if (e.key === 'Enter') { e.preventDefault(); execCmdk(cmdkIdx); }
     }
   });
   $('#cmdk-input').addEventListener('input', (e) => { cmdkIdx = 0; paintCmdk(e.target.value); });

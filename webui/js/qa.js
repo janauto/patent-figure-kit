@@ -11,17 +11,25 @@ const params = new URLSearchParams(location.search);
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const VARIANTS = { annotated: '交底版 · 图号＋件号表', filing: '递交版 · 仅图号', raw: '原始出图' };
 
-// 每条 QA 失败 → 直达哪个修复入口（去规划台的哪一页）
-const FIX_ROUTE = {
-  text_height_mm: ['terms', '去术语页把标准件设「不标」'],
-  text_slot_ratio: ['terms', '去术语页把该件设「不标」'],
-  labels_per_figure: ['figures', '去图纸页拆分本图'],
-  leader_crossing: ['figures', '去图纸页拆分本图'],
-  label_overlap_pairs: ['terms', '去术语页减少标记'],
-  part_bbox_overlap_pairs: ['figures', '去图纸页把本图改为分解图'],
-  geometry_occupancy: ['figures', '去图纸页调整版面'],
-  sheet_fill: ['figures', '去图纸页换视图或拆图'],
+// 13 项 QA 的前端静态映射：中文名 + 白话建议（面向不碰 JSON 的用户）+ 直达入口。
+// 后端若提供 hint_plain，优先用后端的（见下）。
+const QA_MAP = {
+  geometry_occupancy: { name: '几何占版', plain: '图里非几何的东西（表格/说明）占太多，图本身太小。到参数页调小明细表或把版面调紧。', route: ['params', '去参数页调整版面'] },
+  sheet_fill: { name: '纸面填充', plain: '图没把纸填满，看起来空。到参数页让系统自动求最优角度，或换个视图/拆图。', route: ['params', '去参数页换视图/角度'] },
+  text_height_mm: { name: '标号字高', plain: '标号字太小，多半是被标的零件在图上太小。把螺钉等标准件设成「不标」，或拆成更细的分图。', route: ['terms', '去术语页把标准件设「不标」'] },
+  text_slot_ratio: { name: '标号与件比例', plain: '某个被标的零件相对字号太小。把它设成「不标」，或单独拆一张放大图。', route: ['terms', '去术语页设「不标」'] },
+  label_overlap_pairs: { name: '标号相撞', plain: '标号互相压在一起。减少本图标号数（标准件设「不标」），或拆图。', route: ['terms', '去术语页减少标号'] },
+  leader_hits_numeral_box: { name: '引线压数字', plain: '引线压住了数字。减少标号数或拆图。', route: ['figures', '去图纸页拆分本图'] },
+  leader_crossing: { name: '引线交叉', plain: '引线互相交叉，读图者分不清指谁。减少本图标号数，或拆成多张。', route: ['figures', '去图纸页拆分本图'] },
+  leader_anchor_gap: { name: '引线落点', plain: '引线没落在它指的零件轮廓上。换个视图或调整零件分组。', route: ['params', '去参数页换视图'] },
+  part_bbox_overlap_pairs: { name: '零件压叠', plain: '零件在图面上叠在一起。把本图改成分解图，或把版面调松。', route: ['params', '去参数页调松版面'] },
+  labels_per_figure: { name: '单图标号数', plain: '一张图塞了太多标号。按建议把它拆成几张分图，或对标准件设「不标」。', route: ['figures', '去图纸页拆分本图'] },
+  non_numeral_text_ratio: { name: '多余文字', plain: '图面出现了不该有的文字。专利附图只允许几何、引线、标号与图题。', route: ['terms', '去术语页检查'] },
+  non_continuous: { name: '线型连续性', plain: '这不是计划的问题，是写出端的问题，请把结果交给维护者。', route: null },
+  forbidden_text: { name: '禁用文字', plain: '术语里出现了内部件号/图号形状的字符串，改成中文技术名词。', route: ['terms', '去术语页改中文名'] },
+  file_readable: { name: '文件可读', plain: '这张图没写出来，确认渲染真的产出了文件。', route: null },
 };
+const qaName = (id) => QA_MAP[id]?.name || id;
 
 // ?state=fail 的客户端演示：把真实 QA 的三项翻成失败（沿用 qa.py 的真实 hint）。
 function applyFailOverride(fig) {
@@ -57,20 +65,24 @@ function grid(fig) {
   const checks = fig.qa?.checks || [];
   return `<div class="qa-grid" role="list">${checks.map((c) => `
     <button class="qa-cell ${c.pass ? 'pass' : 'fail'}" data-chk="${esc(c.id)}"
-      title="${esc(c.id)} · 实测 ${esc(c.value)} · 阈值 ${esc(c.threshold)} · ${c.pass ? '通过' : '超限'}">
+      title="${esc(qaName(c.id))}（${esc(c.id)}） · 实测 ${esc(c.value)} · 阈值 ${esc(c.threshold)} · ${c.pass ? '通过' : '超限'}">
       <span class="qa-cell-mark">${c.pass ? '✓' : '✕'}</span>
-      <span class="qa-cell-id mono">${esc(c.id)}</span></button>`).join('')}</div>`;
+      <span class="qa-cell-name">${esc(qaName(c.id))}</span></button>`).join('')}</div>`;
 }
 
 function failItems(fig) {
   const fails = (fig.qa?.checks || []).filter((c) => !c.pass);
   if (!fails.length) return '';
   return `<div class="qa-fixes"><h4>需要修的 ${fails.length} 项</h4>${fails.map((c) => {
-    const route = FIX_ROUTE[c.id];
+    const map = QA_MAP[c.id] || {};
+    const route = map.route;
+    const plain = c.hint_plain || map.plain || '';     // 后端若给白话 hint，优先用后端的
     return `<div class="qa-fix">
-      <div class="qa-fix-head"><span class="mono">${esc(c.id)}</span>
+      <div class="qa-fix-head"><b>${esc(map.name || c.id)}</b>
         <span class="qa-fix-val mono">实测 ${esc(c.value)} · 阈值 ${esc(c.threshold)}</span></div>
-      <p class="qa-fix-hint">${esc(c.hint || '')}</p>
+      <p class="qa-fix-hint">${esc(plain)}</p>
+      ${c.hint ? `<details class="qa-tech"><summary>技术细节</summary>
+        <p class="mono">${esc(c.id)}</p><p>${esc(c.hint)}</p></details>` : ''}
       ${route ? `<button class="btn ghost sm" data-goto="${route[0]}">${esc(route[1])} →</button>` : ''}
     </div>`;
   }).join('')}</div>`;
@@ -107,14 +119,19 @@ function render() {
   const seg = vlist.length > 1 ? `<div class="seg">${vlist.map((v) =>
     `<button class="seg-btn ${v === variant ? 'on' : ''}" data-variant="${v}">${VARIANTS[v]}</button>`).join('')}</div>` : '';
 
+  const stale = state.renderStale;
   host.innerHTML = `
+    ${stale ? `<div class="stale-bar">计划已修改，下面的预览可能过期——请重新出图后再导出。
+      <button class="btn sm" id="rerender-stale">重新出图</button></div>` : ''}
     <div class="qa-top">
       <div class="qa-tabs">${tabs}</div>
       ${seg}
       <div class="qa-top-right">
+        <button class="btn ghost sm" id="rerender">↻ 重新出图</button>
         <label class="switch sm"><input type="checkbox" id="only-fail" ${onlyFail ? 'checked' : ''}> 仅看失败项</label>
-        <span class="qa-gate ${allPass ? 'ok' : 'bad'}">
-          ${allPass ? '13 项全过 · 导出已解锁' : `${figs.filter((f) => !f.pass).length} 张未过，导出禁用`}</span>
+        <span class="qa-gate ${allPass && !stale ? 'ok' : 'bad'}">
+          ${stale ? '结果已过期，需重新出图'
+            : (allPass ? '13 项全过 · 导出已解锁' : `${figs.filter((f) => !f.pass).length} 张未过，导出禁用`)}</span>
       </div>
     </div>
     <div class="qa-body">
@@ -129,10 +146,12 @@ function render() {
           <span class="qa-sum mono">${cur?.qa?.summary?.passed ?? (cur?.qa?.checks?.filter((c) => c.pass).length)}/${cur?.qa?.checks?.length} 项通过</span></div>
         ${grid(cur)}
         ${failItems(cur)}
-        ${!onlyFail && cur?.pass ? `<p class="hint pad">13 项全部通过。到「导出」页打包递交件。</p>` : ''}
+        ${!onlyFail && cur?.pass ? `<p class="hint pad">13 项全部通过。到「导出」页打包附图包。</p>` : ''}
       </aside>
     </div>`;
 
+  host.querySelector('#rerender')?.addEventListener('click', () => startRender());
+  host.querySelector('#rerender-stale')?.addEventListener('click', () => startRender());
   host.querySelectorAll('[data-fig]').forEach((b) => b.addEventListener('click', () => { activeFig = b.dataset.fig; render(); }));
   host.querySelectorAll('[data-variant]').forEach((b) => b.addEventListener('click', () => { variant = b.dataset.variant; render(); }));
   host.querySelector('#only-fail')?.addEventListener('change', (e) => { onlyFail = e.target.checked; render(); });
@@ -171,6 +190,26 @@ async function loadSvg(fig) {
   } catch { pane.innerHTML = '<p class="hint pad">预览加载失败</p>'; }
 }
 
+async function applyResult(d) {
+  // 读权威结果：优先作业 done 带回的 result，否则回工程/状态取一次
+  let result = (d && d.result && d.result.figures) ? d.result : null;
+  if (!result) {
+    try { result = await api.getRenderResult(state.projectId); }
+    catch (err) { rendering = false; toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return; }
+  }
+  state.render = result || null;
+  state.renderStale = false;
+  rendering = false;
+  activeFig = null;
+  bus.emit('rendered');
+  const figs = result?.figures || [];
+  const allPass = result?.ok && figs.length && figs.every((f) => f.pass);
+  toast(allPass ? `渲染完成，${figs.length} 张图 13 项 QA 全过`
+    : `渲染完成，但有 ${figs.filter((f) => !f.pass).length} 张未过闸——按提示修改后重渲`,
+    allPass ? 'ok' : 'bad');
+  render();
+}
+
 async function startRender() {
   rendering = true; logs.length = 0; render();
   try {
@@ -178,8 +217,15 @@ async function startRender() {
     sub = api.jobEvents(job_id, {
       log(d) { logs.push(d.line); render(); },
       stage(d) { if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
-      done() { rendering = false; toast('渲染完成，13 项 QA 全过', 'ok'); render(); },
-      fail(d) { rendering = false; toast('渲染未过闸：' + d.message, 'bad'); render(); },
+      done(d) { applyResult(d); },
+      fail(d) {                       // 作业失败（崩溃/异常）：尝试载入失败结果，给具体原因
+        rendering = false;
+        toast('出图未完成：' + (d.message || '渲染进程失败'), 'bad');
+        api.getRenderResult(state.projectId).then((r) => { if (r) { state.render = r; bus.emit('rendered'); } render(); }).catch(() => render());
+      },
+      disconnect() {                  // 传输断线：不当作失败，用 getJob 校准终态
+        api.getJob(job_id).then((j) => { if (j.state === 'succeeded') applyResult({ result: j.result }); }).catch(() => {});
+      },
     });
   } catch (err) { rendering = false; toast('无法开始渲染：' + (err.hint || err.message), 'bad'); render(); }
 }
@@ -187,5 +233,13 @@ async function startRender() {
 export function mountQa(el) {
   host = el;
   render();
-  if (!host._bound) { bus.on('rendered', render); host._bound = true; }
+  if (!host._bound) {
+    bus.on('rendered', render);
+    bus.on('render-stale', () => { if (!$stageHidden()) render(); });
+    host._bound = true;
+  }
+}
+function $stageHidden() {
+  const s = document.querySelector('.stage-qa');
+  return !s || s.hidden;
 }

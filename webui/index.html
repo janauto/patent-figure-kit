@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>{name} · 规划台</title>
 <link rel="stylesheet" href="./tokens.css">
 <link rel="stylesheet" href="./app.css">
@@ -81,13 +82,17 @@
 
       <aside id="right">
         <nav id="rtabs">
-          <button class="rtab on" data-tab="candidates">候选分图</button>
+          <button class="rtab on" data-tab="candidates">候选</button>
           <button class="rtab" data-tab="figures">图纸</button>
           <button class="rtab" data-tab="terms">术语</button>
+          <button class="rtab" data-tab="params">参数</button>
+          <button class="rtab" data-tab="flows">流程图</button>
         </nav>
         <section class="rpane" data-pane="candidates" id="candidates"></section>
         <section class="rpane" data-pane="figures" id="figures" hidden></section>
         <section class="rpane" data-pane="terms" id="terms" hidden></section>
+        <section class="rpane" data-pane="params" id="params" hidden></section>
+        <section class="rpane" data-pane="flows" id="flows" hidden></section>
       </aside>
     </section>
 

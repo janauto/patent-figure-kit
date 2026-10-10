@@ -82,16 +82,18 @@ kbd { font: var(--t-mono); border: 1px solid var(--hair-strong); border-bottom-w
   background: var(--surface-1); border: 1px solid var(--hair); border-radius: var(--r-2);
   box-shadow: var(--e-1);
 }
-.pipeline { list-style: none; display: flex; gap: var(--s-3); flex: 1; flex-wrap: wrap; }
+.pipeline { list-style: none; display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s-3); flex: 1; }
 .pipeline li {
   display: grid; grid-template-columns: auto 1fr; grid-template-areas: "seal name" "seal desc";
   gap: 0 var(--s-2); align-items: center; padding-right: var(--s-4);
-  position: relative; min-width: 190px;
+  position: relative; min-width: 0;
 }
 .pipeline li:not(:last-child)::after {
   content: "→"; position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
   color: var(--ink-faint); font-size: 13px;
 }
+.no-step { font: var(--t-body-sm); white-space: nowrap; align-self: flex-start; padding-top: 2px; }
+@media (max-width: 900px) { .pipeline { grid-template-columns: repeat(2, 1fr); } .onboard { flex-direction: column; align-items: stretch; } }
 .pipeline .seal { grid-area: seal; align-self: center; margin-right: var(--s-2); }
 .pipeline b { grid-area: name; font-family: var(--font-sans); font-weight: 600; font-size: 14px; }
 .pipeline span:not(.seal) { grid-area: desc; font: var(--t-caption); color: var(--ink-muted); }

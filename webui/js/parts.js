@@ -193,10 +193,25 @@ function bind() {
 // 结构识别：起一个 suggest 作业演示进度（mock 的结构已预置，作业完成后沿用现有结构）。
 async function analyze() {
   try {
-    const { job_id } = await api.suggest(state.projectId, false);
     state.structureJob = { running: true };
     render();
-    api.jobEvents(job_id, {
+    const res = await api.analyzeStructure(state.projectId);   // legacy → /api/structure/analyze；live → suggest 作业
+    if (api.isLegacy) {
+      // 旧后端：轮询 /api/structure 直到识别作业结束
+      const poll = async () => {
+        const r = await api.getStructure();
+        state.structureJob = r.job || null;
+        if (r.job?.running) { render(); setTimeout(poll, 3000); return; }
+        if (r.structure) { state.structure = r.structure; indexStructure(); }
+        if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
+        bus.emit('structure'); render();
+        if (r.job?.error) toast('结构识别失败：' + r.job.error, 'bad');
+        else toast(`结构识别完成：${state.structure?.groups?.length || 0} 个结构组`, 'ok');
+      };
+      setTimeout(poll, 3000);
+      return;
+    }
+    api.jobEvents(res.job_id, {
       done() {
         state.structureJob = null;
         if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
@@ -205,7 +220,7 @@ async function analyze() {
       },
       fail(d) { state.structureJob = { error: d.message }; render(); toast('结构识别失败：' + d.message, 'bad'); },
     });
-  } catch (err) { toast('无法开始识别：' + (err.hint || err.message), 'bad'); }
+  } catch (err) { state.structureJob = null; render(); toast('无法开始识别：' + (err.hint || err.message), 'bad'); }
 }
 
 // 把结构里的中文名填进术语表的空行（人工填过的不覆盖），本地完成后保存 plan。

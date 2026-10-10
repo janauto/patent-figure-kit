@@ -11,7 +11,7 @@ const params = new URLSearchParams(location.search);
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 
 const FORMATS = [
-  { k: 'pdf', name: '递交版 PDF', what: '每图一页 PDF，可直接作为 CPC 递交稿附图', tag: '递交' },
+  { k: 'pdf', name: '递交版 PDF', what: '每图一页 PDF，按形式要求排版的说明书附图文档（最终以受理为准）', tag: '递交' },
   { k: 'docx', name: '交底版 Word', what: '附图 + 件号名称表 + 附图说明，交代理所', tag: '交底' },
   { k: 'dxf', name: 'DXF', what: '矢量源文件，供在 CAD 里再编辑', tag: '源文件' },
   { k: 'dwg', name: 'DWG', what: 'AutoCAD 源文件，供在 CAD 里再编辑', tag: '源文件' },
@@ -19,6 +19,7 @@ const FORMATS = [
 
 function gatePassed() {
   if (params.get('state') === 'empty') return false;
+  if (state.renderStale) return false;      // 计划改过、结果过期 → 锁定导出直到重渲
   const r = state.render;
   return !!(r && r.ok && r.figures?.length && r.figures.every((f) => f.pass));
 }
@@ -32,11 +33,12 @@ function render() {
       manifest: ['递交版_图1.pdf', '递交版_图2.pdf', '交底版_说明书附图.docx', 'fig1.dxf', 'fig2.dxf', '附图说明.txt', '核对清单.txt'] };
   }
   if (!gatePassed() && force !== 'done') {
+    const stale = state.renderStale && state.render;
     host.innerHTML = `<div class="exp-blank">
       <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
       <p class="stamp-fail">导出锁定</p>
-      <h2>还有图未过 QA，不能导出</h2>
-      <p class="muted">未过闸的图不进交付目录——这是红线。请先到「出图与 QA」按提示修改并重渲，全过后再来导出。</p>
+      <h2>${stale ? '计划改过，结果已过期' : '还有图未过 QA，不能导出'}</h2>
+      <p class="muted">未过闸的图不进交付目录——这是红线。请先到「出图与 QA」${stale ? '重新出图并过闸' : '按提示修改并重渲，全过后'}再来导出。</p>
       <button class="btn big" id="to-qa">去出图与 QA →</button></div>`;
     host.querySelector('#to-qa')?.addEventListener('click', () => document.querySelector('.stage-tab[data-stage="qa"]').click());
     return;
@@ -57,26 +59,30 @@ function render() {
       <section class="exp-sec">
         <h3>② 格式</h3>
         <div class="fmt-grid">${FORMATS.map((f) => {
-          const disabled = f.k === 'dwg' && !dwgOk;
+          const noPdf = f.k === 'pdf' && api.isLegacy;        // 旧后端不产出 PDF（F1 属后续工作包）
+          const noDwg = f.k === 'dwg' && !dwgOk;
+          const disabled = noPdf || noDwg;
           const on = picked.has(f.k) && !disabled;
+          const why = noPdf ? '现有后端不产出 PDF——接线后由新版提供'
+            : (noDwg ? '本机未检出 DWG 转换器（ODA / LibreDWG），不可用' : '');
           return `<label class="fmt-card ${on ? 'on' : ''} ${disabled ? 'disabled' : ''}">
             <input type="checkbox" data-fmt="${f.k}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
             <div class="fmt-head"><b>${f.name}</b><span class="fmt-tag ${f.tag === '源文件' ? 'src' : ''}">${f.tag}</span></div>
             <p class="fmt-what">${f.what}</p>
-            ${disabled ? '<p class="fmt-why">本机未检出 DWG 转换器（ODA / LibreDWG），不可用</p>' : ''}
+            ${why ? `<p class="fmt-why">${why}</p>` : ''}
           </label>`;
         }).join('')}</div>
         <div class="reco">
           <span class="reco-mark">推荐组合</span>
           <b>递交版 PDF + 交底版 Word</b>
-          <span class="muted">递交版只放图号，直接进 CPC 递交稿；交底版带件号表，给代理所核对。
+          <span class="muted">递交版只放图号，按形式要求排版，供代理所用于递交稿（最终以受理为准）；交底版带件号表，给代理所核对。
             DXF/DWG 是给要再编辑的人的源文件，不用于递交。</span>
         </div>
       </section>
 
       <section class="exp-sec">
         <button class="btn primary big" id="do-pack" ${packing ? 'disabled' : ''}>
-          ${packing ? '<i class="spin"></i> 打包中…' : '打包交付件'}</button>
+          ${packing ? '<i class="spin"></i> 打包中…' : '打包附图包'}</button>
         ${packing ? `<div class="pack-bar"><i id="pack-fill"></i></div>
           <p class="hint" id="pack-log">正在隔离目录渲染…</p>` : ''}
       </section>
@@ -96,7 +102,7 @@ function render() {
 function renderDone() {
   const items = result.items || [];
   host.innerHTML = `<div class="exp-done">
-    <p class="ok-line"><span class="stamp-pass big">完成</span>交付包已打包好。</p>
+    <p class="ok-line"><span class="stamp-pass big">完成</span>附图包已打包好。</p>
     <div class="fmt-result">${items.map((it) => `<div class="fr-row ${it.status}">
       <span class="fr-mark">${it.status === 'ok' ? '✓' : (it.status === 'skip' ? '—' : '✕')}</span>
       <b>${esc(it.label)}</b>
@@ -106,7 +112,7 @@ function renderDone() {
       <div><b class="mono">${esc(result.zip)}</b>
         <ul class="manifest">${(result.manifest || []).map((m) => `<li class="mono">${esc(m)}</li>`).join('')}</ul></div>
       <div class="exp-zip-acts">
-        <a class="btn primary" href="${api.previewUrl(result.download_url || '#')}" download>⬇ 下载交付包</a>
+        <a class="btn primary" href="${api.previewUrl(result.download_url || '#')}" download>⬇ 下载附图包</a>
         <button class="btn ghost sm" id="copy-path" title="仅本机可达">复制本机路径</button>
         <button class="btn ghost sm" id="pack-again">重新打包</button>
       </div>
@@ -141,6 +147,7 @@ async function doPack() {
 
 export async function mountExport(el) {
   host = el;
+  if (api.isLegacy) picked.delete('pdf');     // 旧后端不产出 PDF，默认不勾
   try { const llm = await api.llmStatus(); dwgOk = llm.dwg_available !== false; } catch { /* 默认可用 */ }
   render();
 }
