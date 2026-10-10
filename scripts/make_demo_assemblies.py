@@ -367,6 +367,41 @@ def ball_valve(out: Path) -> Tuple[Path, int]:
     return A.write(out), A.count
 
 
+# --------------------------------------------------------------------------- #
+# 4. 参数化规模装配体（给 scripts/bench.py 做 50/200/1000 实例三档，固定种子 → 可复现）  #
+# --------------------------------------------------------------------------- #
+
+def scaled_assembly(out: Path, n_instances: int, seed: int = 12345) -> Tuple[Path, int]:
+    """Deterministic assembly of exactly ``n_instances`` part instances for benchmarking.
+
+    Mixed primitives (plate / cylinder / sphere / torus / hex screw) laid on a square grid,
+    with prototype choice and small rotations drawn from a *seeded* PRNG — so the same
+    (n, seed) always yields byte-identical geometry and the before/after benchmark compares
+    like with like. Not a realistic product; a controlled HLR workload with a known size.
+    """
+    import random
+    rng = random.Random(seed)
+    A = Assy("SCALED-%d" % n_instances)
+    protos = {
+        "PLATE": box(16, 16, 3),
+        "PIN": cyl(3, 14),
+        "DISC": cyl(9, 2.5),
+        "BALL": sphere(5),
+        "RING": torus(7, 2.0),
+        "SCREW": screw(4, 12),
+    }
+    names = sorted(protos)
+    side = max(1, int(math.ceil(math.sqrt(n_instances))))
+    pitch = 28.0
+    for i in range(n_instances):
+        gx, gy = i % side, i // side
+        name = names[rng.randrange(len(names))]
+        rot = rng.choice((0.0, 15.0, 30.0, 45.0, 60.0))
+        at = (gx * pitch, gy * pitch, (i % 3) * 4.0)
+        A.add(A.root, "%s-%04d" % (name, i), protos[name], loc(at, Z, rot))
+    return A.write(out), A.count
+
+
 BUILDERS: List[Tuple[str, str, Callable[[Path], Tuple[Path, int]]]] = [
     ("demo-planetary-gearbox.stp", "行星齿轮减速器", planetary_gearbox),
     ("demo-bench-vise.stp", "台虎钳", bench_vise),
@@ -378,7 +413,16 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-o", "--outdir", type=Path, required=True)
+    ap.add_argument("--scaled", type=int, action="append", default=None,
+                    help="改为生成指定实例数的参数化装配体（可重复，如 --scaled 50 --scaled 200）；"
+                         "固定种子，可复现。缺省则生成三个固定示例。")
+    ap.add_argument("--seed", type=int, default=12345)
     args = ap.parse_args(argv)
+    if args.scaled:
+        for n in args.scaled:
+            path, count = scaled_assembly(args.outdir / ("scaled-%d.stp" % n), n, seed=args.seed)
+            print("%-20s 零件实例 %5d  %8.1f KB" % (path.name, count, path.stat().st_size / 1024))
+        return 0
     for fname, title, build in BUILDERS:
         path, n = build(args.outdir / fname)
         print("%-28s %-8s 零件实例 %2d  %7.1f KB" % (fname, title, n, path.stat().st_size / 1024))
