@@ -20,13 +20,24 @@ impl-contract §2). Three legacy behaviours are deliberately changed:
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import math
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple
 
 import numpy as np
+
+try:                                    # Python 3.8+: stdlib; never optional on 3.9
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+except Exception:                       # pragma: no cover - importlib.metadata always present
+    PackageNotFoundError = Exception    # type: ignore
+
+    def _pkg_version(_name):            # type: ignore
+        raise PackageNotFoundError
 
 from OCP.BRepAdaptor import BRepAdaptor_Curve
 from OCP.BRepBndLib import BRepBndLib
@@ -59,6 +70,10 @@ __all__ = [
     "file_sha256",
     "export_glb",
     "hlr_drop_stats",
+    "reset_hlr_drop_stats",
+    "add_hlr_drop_stats",
+    "occt_version",
+    "ALGO_VERSION",
 ]
 
 
@@ -112,27 +127,78 @@ VISIBLE_COMPOUNDS = ("VCompound", "Rg1LineVCompound", "OutLineVCompound")
 HIDDEN_COMPOUNDS = ("HCompound", "Rg1LineHCompound", "OutLineHCompound")
 #: Cache array naming produced by ``np.savez(fh, *arrays)``.
 CACHE_ARRAY_PREFIX = "arr_"
+#: Extra npz entry (keyword, so it never collides with ``arr_*``) carrying the per-entry
+#: HLR drop delta ``[edges, compounds]``. Replayed on a hit so the gate is cache-independent.
+CACHE_META_DROPS = "meta_drops"
 #: Read block size for the file digest.
 SHA_BLOCK = 1 << 20
+#: HLR / discretisation algorithm version. Bump whenever a change to ``_edges`` /
+#: ``_run_hlr`` / the compound list could alter the cached curves. Folded into the cache
+#: namespace so an old cache written by a different algorithm can never be read back as a
+#: hit (Codex R0 S1-05). Independent of the OCCT build string below.
+ALGO_VERSION = 2
+#: Cache on-disk layout revision (unique-temp + verify + meta payload). Also in the
+#: namespace, so a cache written by the pre-WP1 layout is simply not found, never misread.
+CACHE_FORMAT = 2
+#: Seconds the advisory single-flight lock waits for a peer before computing anyway. The
+#: lock only saves duplicate work; correctness comes from unique-temp + verify + os.replace,
+#: so a stale lock can never corrupt a result — at worst two workers both compute (Codex
+#: R0 S0-03, resolved per the architect's advisory-lock ruling).
+SINGLE_FLIGHT_TIMEOUT_S = 30.0
+#: Poll interval while waiting on the single-flight lock.
+SINGLE_FLIGHT_POLL_S = 0.05
+
+
+def occt_version() -> str:
+    """Best-effort OCCT binding version, sanitised for a path segment.
+
+    Uses the installed ``cadquery-ocp`` distribution version (impl-contract §1 pins
+    7.7.2). Folded into the cache namespace so a different binding — which can change HLR
+    floating-point output — cannot serve a stale hit (Codex R0 S1-05 / baseline §3).
+    Never probes OCP internals for a string whose existence cannot be guaranteed.
+    """
+    try:
+        raw = _pkg_version("cadquery-ocp")
+    except PackageNotFoundError:
+        raw = "unknown"
+    return "".join(c if (c.isalnum() or c in "._") else "-" for c in str(raw))
 
 
 class OccBackendError(RuntimeError):
     """STEP loading or HLR failed in a way the caller has to report, not paper over."""
 
 
-# Diagnostic only, never read on any output-affecting path: OCCT occasionally refuses to
-# discretise a single edge, and the legacy script swallowed that silently. The counters
-# make the loss visible without changing any frozen signature. Downstream, an empty curve
-# list is caught by layout.py, which raises naming the piece key (impl-contract §11.8).
+# OCCT occasionally refuses to discretise a single edge, and the legacy script swallowed
+# that silently. The counters make the loss visible. Historically this was "diagnostic
+# only"; WP1 feeds it into the render gate (impl-contract §5.5 / §8): a figure whose HLR
+# dropped any edge is downgraded rather than published, because a missing silhouette line
+# is a correctness defect the layout checks cannot see. To keep that gate decision
+# independent of cache warmth, the per-entry drop delta is stored in the cache payload and
+# replayed on a hit (see ``GeometryCache``), so a warm run reports the same drops a cold
+# run did — "a hit is bit-identical to a recompute" now covers the drop count too.
 _HLR_DROPPED = {"edges": 0, "compounds": 0}
 
 
 def hlr_drop_stats() -> dict:
-    """Cumulative count of edges/compounds HLR could not turn into polylines.
-
-    Diagnostics only — nothing in the rendered output depends on it.
-    """
+    """Cumulative count of edges/compounds HLR could not turn into polylines."""
     return dict(_HLR_DROPPED)
+
+
+def reset_hlr_drop_stats() -> None:
+    """Zero the cumulative drop counters.
+
+    The resident worker (``scripts/patent_figure/worker.py``) calls this before every
+    task so one task's dropped edges cannot bleed into the next task's gate decision; a
+    fresh subprocess starts at zero on its own.
+    """
+    _HLR_DROPPED["edges"] = 0
+    _HLR_DROPPED["compounds"] = 0
+
+
+def add_hlr_drop_stats(edges: int, compounds: int) -> None:
+    """Replay a cached drop delta into the global counters (cache-hit path)."""
+    _HLR_DROPPED["edges"] += int(edges)
+    _HLR_DROPPED["compounds"] += int(compounds)
 
 
 # --------------------------------------------------------------------------- view frame
@@ -537,20 +603,41 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+#: Monotonic counter making each process's temp file names unique without ``random`` /
+#: ``uuid`` (which §7 bans on output paths — a temp *name* is not output, but this keeps
+#: the module import-time dependency-free and still collision-proof across threads).
+_PUT_SEQ = 0
+
+
 class GeometryCache:
     """On-disk npz cache of HLR curve sets, keyed by STEP digest, view and deflection.
 
-    Layout (impl-contract §5.1)::
+    Layout (impl-contract §5.1, extended by WP1 for concurrency + versioning)::
 
-        <root>/<step_sha[:12]>/<view.key>_<deflection>/<sha1(part_key)>.npz
+        <root>/<namespace>/<step_sha[:12]>/<view.key>_<deflection>/<sha1(part_key)>.npz
+
+    where ``<namespace>`` is ``fmt<CACHE_FORMAT>_algo<ALGO_VERSION>_ocp<occt_version>``.
+    Folding the algorithm and binding versions into the key is Codex R0 S1-05: a cache
+    written by a different OCCT build or a different HLR algorithm can change the curves,
+    so it must miss rather than serve a stale hit. The step sha already pins the input
+    geometry and the view/deflection segment already pins the sampling parameters.
 
     Arrays are stored uncompressed as ``arr_0..arr_n`` and read back in numeric index
-    order, so a hit is bit-identical to a recompute — not merely close. Loading the
-    reference assembly takes 24 s, which makes this mandatory rather than an
-    optimisation.
+    order, so a hit is bit-identical to a recompute — not merely close. A companion
+    ``meta_drops`` entry carries the per-entry HLR drop delta so a warm run reports the
+    same dropped-edge count a cold run did.
 
-    A file that exists but holds no arrays is a legitimate hit for an empty curve list;
-    only a missing (or unreadable) file is a miss.
+    **Concurrency (Codex R0 S0-03).** Two workers rendering the same part (duplicate
+    instances, or two projects over the same STEP) used to write the same ``<key>.npz.tmp``
+    and could tear each other's file. Now every write goes to a *unique* temp name,
+    is verified by reloading it, and is published with ``os.replace`` — atomic on POSIX
+    and Windows — so a reader only ever sees a complete old or complete new file, and a
+    process killed mid-write leaves only an orphan ``.tmp`` that no reader consults.
+    ``single_flight`` adds a best-effort cross-process lock that merely avoids the
+    duplicate compute; correctness never depends on it.
+
+    A file that exists but holds no curve arrays is a legitimate hit for an empty curve
+    list; only a missing or unreadable file is a miss.
     """
 
     def __init__(self, root: Path, step_sha: str) -> None:
@@ -559,37 +646,69 @@ class GeometryCache:
         if not self.step_sha:
             raise ValueError("GeometryCache：step_sha 不能为空")
         self.prefix = self.step_sha[:STEP_SHA_PREFIX]
+        self.namespace = "fmt%d_algo%d_ocp%s" % (CACHE_FORMAT, ALGO_VERSION, occt_version())
 
     # -- paths ---------------------------------------------------------------
     def _view_dir(self, view: ViewFrame, deflection: float) -> Path:
         # repr() of a float is round-trippable and platform-stable, so two different
         # deflections can never collide on one directory name.
-        return self.root / self.prefix / ("%s_%s" % (view.key, repr(float(deflection))))
+        return (self.root / self.namespace / self.prefix
+                / ("%s_%s" % (view.key, repr(float(deflection)))))
 
     def _path(self, part_key: str, view: ViewFrame, deflection: float) -> Path:
         stem = hashlib.sha1(str(part_key).encode("utf-8")).hexdigest()
         return self._view_dir(view, deflection) / (stem + ".npz")
 
+    def _lock_path(self, part_key: str, view: ViewFrame, deflection: float) -> Path:
+        return self._path(part_key, view, deflection).with_suffix(".npz.lock")
+
     # -- api -----------------------------------------------------------------
     def get(self, part_key: str, view: ViewFrame, deflection: float) -> Optional[list]:
         """Return the cached curves, or None on a miss."""
-        path = self._path(part_key, view, deflection)
-        if not path.is_file():
+        return self._read(self._path(part_key, view, deflection))[0]
+
+    def get_drops(self, part_key: str, view: ViewFrame,
+                  deflection: float) -> Optional[Tuple[int, int]]:
+        """Return the cached ``(dropped_edges, dropped_compounds)`` delta, or None on a miss.
+
+        A pre-WP1 entry that carried no ``meta_drops`` reads back as ``(0, 0)`` — unknown
+        is treated as "no drops", which is the only value an old namespace would have held
+        anyway; the new namespace means such files are never actually hit.
+        """
+        curves, drops = self._read(self._path(part_key, view, deflection))
+        if curves is None:
             return None
+        return drops
+
+    def _read(self, path: Path) -> Tuple[Optional[list], Tuple[int, int]]:
+        if not path.is_file():
+            return None, (0, 0)
         try:
             with np.load(str(path)) as data:
                 names = [n for n in data.files if n.startswith(CACHE_ARRAY_PREFIX)]
                 names.sort(key=lambda n: int(n[len(CACHE_ARRAY_PREFIX):]))
-                return [np.asarray(data[n], dtype=np.float64) for n in names]
+                curves = [np.asarray(data[n], dtype=np.float64) for n in names]
+                if CACHE_META_DROPS in data.files:
+                    meta = np.asarray(data[CACHE_META_DROPS]).reshape(-1)
+                    drops = (int(meta[0]), int(meta[1]))
+                else:
+                    drops = (0, 0)
+                return curves, drops
         except Exception:
             # A truncated or foreign file is treated as a miss; the caller recomputes
-            # and put() overwrites it.
-            return None
+            # and put() overwrites it (corrupted-cache recovery, S0-03 test).
+            return None, (0, 0)
 
     def put(self, part_key: str, view: ViewFrame, deflection: float,
-            curves: Sequence) -> None:
-        """Store a curve list. Written to a temp file and renamed, so a crash mid-write
-        cannot leave a half-file that later reads as a hit."""
+            curves: Sequence, drops: Tuple[int, int] = (0, 0)) -> None:
+        """Store a curve list (and its HLR drop delta).
+
+        Written to a *unique* temp file, verified by reloading, then published with
+        ``os.replace`` — so concurrent writers never tear one file and a crash mid-write
+        leaves only an orphan temp (Codex R0 S0-03). ``drops`` is the ``(edges, compounds)``
+        count this compute lost, replayed on a hit.
+        """
+        global _PUT_SEQ
         arrays = []
         for i, curve in enumerate(curves):
             arr = np.ascontiguousarray(np.asarray(curve, dtype=np.float64))
@@ -597,11 +716,77 @@ class GeometryCache:
                 raise ValueError("GeometryCache.put：曲线 %d 的形状 %r 非法，应为 (N, 2)"
                                  % (i, arr.shape))
             arrays.append(arr)
+        meta = np.asarray([int(drops[0]), int(drops[1])], dtype=np.int64)
         path = self._path(part_key, view, deflection)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        # Passing a file object, not a name: np.savez appends ".npz" to a name that does
-        # not already end in it, which would rename the temp file out from under us.
-        with open(str(tmp), "wb") as handle:
-            np.savez(handle, *arrays)
-        os.replace(str(tmp), str(path))
+        _PUT_SEQ += 1
+        token = "%d.%d.%s" % (os.getpid(), _PUT_SEQ, os.urandom(6).hex())
+        tmp = path.with_name(path.name + "." + token + ".tmp")
+        try:
+            # Passing a file object, not a name: np.savez appends ".npz" to a name that
+            # does not already end in it, which would rename the temp out from under us.
+            with open(str(tmp), "wb") as handle:
+                np.savez(handle, *arrays, **{CACHE_META_DROPS: meta})
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Verify the temp is a loadable npz with the expected array count before
+            # publishing it — a belt-and-suspenders check on top of the atomic replace.
+            verify, _vdrops = self._read(tmp)
+            if verify is None or len(verify) != len(arrays):
+                raise OccBackendError(
+                    "GeometryCache.put：临时缓存文件自检失败（写入 %d 条曲线，回读 %s）"
+                    % (len(arrays), "失败" if verify is None else "%d 条" % len(verify)))
+            os.replace(str(tmp), str(path))
+        finally:
+            # On success the temp is gone (replaced); on any failure, remove the orphan.
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
+    @contextlib.contextmanager
+    def single_flight(self, part_key: str, view: ViewFrame, deflection: float):
+        """Best-effort per-key cross-process lock around a compute.
+
+        Yields ``True`` if this caller holds the lock (it should compute and ``put``), or
+        ``False`` if it gave up waiting and should compute anyway. Either way, a cache
+        ``get`` after acquiring is the cheap win: the peer that held the lock has usually
+        published by then. The lock is advisory — a crashed holder just leaves a stale
+        lockfile that the next waiter times out on and then computes — so it can never
+        corrupt or block a result (S0-03, advisory-lock ruling).
+
+        Portable: uses ``os.open(O_CREAT | O_EXCL)``, not ``fcntl`` (which does not exist
+        on Windows), honouring the cross-platform red line.
+        """
+        lock = self._lock_path(part_key, view, deflection)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = None
+        deadline = time.monotonic() + SINGLE_FLIGHT_TIMEOUT_S
+        while True:
+            try:
+                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                break
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    # Gave up: compute anyway. unique-temp + os.replace keep it safe.
+                    yield False
+                    return
+                time.sleep(SINGLE_FLIGHT_POLL_S)
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EROFS):
+                    # Cannot even create a lockfile (read-only cache dir): skip the lock.
+                    yield False
+                    return
+                raise
+        try:
+            yield True
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                lock.unlink()
+            except OSError:
+                pass

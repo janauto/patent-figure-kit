@@ -172,8 +172,17 @@ class CurveSource:
         self.deflection = float(deflection)
         self.cache = cache
         self._memo: Dict[str, List[np.ndarray]] = {}
+        #: key -> (dropped_edges, dropped_compounds) for that curve-set, recorded once per
+        #: key whether it was computed or read from disk. Summing over the keys a figure
+        #: draws (``drops_for``) gives that figure's HLR loss regardless of cache warmth,
+        #: which is what lets the render gate downgrade a defective figure deterministically.
+        self._drops: Dict[str, Tuple[int, int]] = {}
         self.hits = 0
         self.misses = 0
+
+    @staticmethod
+    def scene_key(parts: Sequence["_occ.PartShape"]) -> str:
+        return SCENE_KEY_PREFIX + SCENE_KEY_SEP.join(sorted(p.key for p in parts))
 
     def _lookup(self, key: str):
         if key in self._memo:
@@ -184,14 +193,48 @@ class CurveSource:
             if cached is not None:
                 self.hits += 1
                 self._memo[key] = cached
+                drops = self.cache.get_drops(key, self.view, self.deflection) or (0, 0)
+                self._drops[key] = drops
                 return cached
         return None
 
-    def _store(self, key: str, curves: List[np.ndarray]) -> List[np.ndarray]:
+    def _compute(self, key: str, fn) -> List[np.ndarray]:
+        """Run ``fn`` (an HLR call), recording the drop delta it caused, under the
+        advisory single-flight lock so duplicate work across workers is avoided."""
+        self.misses += 1
+        if self.cache is not None:
+            # A peer may be computing the same key right now; grabbing the lock then
+            # re-checking the cache turns a duplicate compute into a cheap hit. The lock
+            # is advisory: if we time out we compute anyway (see GeometryCache).
+            with self.cache.single_flight(key, self.view, self.deflection):
+                cached = self.cache.get(key, self.view, self.deflection)
+                if cached is not None:
+                    self._memo[key] = cached
+                    self._drops[key] = (self.cache.get_drops(
+                        key, self.view, self.deflection) or (0, 0))
+                    return cached
+                return self._run_and_store(key, fn)
+        return self._run_and_store(key, fn)
+
+    def _run_and_store(self, key: str, fn) -> List[np.ndarray]:
+        before = _occ.hlr_drop_stats()
+        curves = fn()
+        after = _occ.hlr_drop_stats()
+        delta = (after["edges"] - before["edges"], after["compounds"] - before["compounds"])
+        self._drops[key] = delta
         self._memo[key] = curves
         if self.cache is not None:
-            self.cache.put(key, self.view, self.deflection, curves)
+            self.cache.put(key, self.view, self.deflection, curves, drops=delta)
         return curves
+
+    def drops_for(self, keys: Sequence[str]) -> Tuple[int, int]:
+        """Sum the HLR drop deltas over the distinct curve-sets a figure consumed."""
+        edges = compounds = 0
+        for key in sorted(set(keys)):
+            de, dc = self._drops.get(key, (0, 0))
+            edges += int(de)
+            compounds += int(dc)
+        return edges, compounds
 
     def part(self, part: "_occ.PartShape") -> List[np.ndarray]:
         """Per-part HLR. Legal only where the part is disjoint from the rest on the sheet.
@@ -210,19 +253,17 @@ class CurveSource:
         found = self._lookup(part.key)
         if found is not None:
             return found
-        self.misses += 1
-        return self._store(part.key, _occ.part_curves(part, self.view, self.deflection))
+        return self._compute(part.key,
+                             lambda: _occ.part_curves(part, self.view, self.deflection))
 
     def scene(self, parts: Sequence["_occ.PartShape"]) -> List[np.ndarray]:
         """Global HLR over several parts as one scene, so they occlude each other."""
-        keys = sorted(p.key for p in parts)
-        key = SCENE_KEY_PREFIX + SCENE_KEY_SEP.join(keys)
+        key = self.scene_key(parts)
         found = self._lookup(key)
         if found is not None:
             return found
-        self.misses += 1
-        visible, _hidden = _occ.scene_curves(parts, self.view, self.deflection, False)
-        return self._store(key, visible)
+        return self._compute(
+            key, lambda: _occ.scene_curves(parts, self.view, self.deflection, False)[0])
 
 
 # =============================================================================== §11.6.3
@@ -548,9 +589,13 @@ def render_figure(figure: dict, layout_cfg: Dict[str, Any], parts: Sequence["_oc
     rot_cs = _rotation(0.0 if solved["axis_angle"] is None
                        else _occ.roll_for_axis(axis3d, az, el, float(solved["axis_angle"])))
     geometry: List[np.ndarray] = []
+    # Keys of every curve-set this figure actually draws, so its HLR-drop share can be
+    # summed (``source.drops_for``) independently of what the cache already held.
+    drawn_keys: List[str] = [p.key for p in parts]
     if kind == "assembly":
         assert all(np.all(p.offset == 0.0) for p in pieces), \
             "layout_assembly 必须保持零位移；非零 offset 说明上游被改坏了"
+        drawn_keys.append(source.scene_key(parts))
         for curve in source.scene(parts):
             geometry.append(_to_mm(_rotate(curve, rot_cs), scale, shift))
     else:
@@ -563,6 +608,7 @@ def render_figure(figure: dict, layout_cfg: Dict[str, Any], parts: Sequence["_oc
                 curves = pieces_by_key[members[0]].placed()
             else:
                 members_parts = [parts_by_key[k] for k in sorted(members)]
+                drawn_keys.append(source.scene_key(members_parts))
                 curves = [_rotate(c, rot_cs) + offset for c in source.scene(members_parts)]
             for curve in curves:
                 geometry.append(_to_mm(curve, scale, shift))
@@ -658,6 +704,10 @@ def render_figure(figure: dict, layout_cfg: Dict[str, Any], parts: Sequence["_oc
         "anchor_hint_missing": sorted(r.key for r in requests if r.anchor_hint is None),
         "hlr_reused": source.hits - hits0,
         "hlr_computed": source.misses - misses0,
+        # HLR edges/compounds this figure's drawn geometry lost. Consumed by the render
+        # gate (§5.5 / §8): nonzero means a silhouette line is missing — a defect the
+        # layout checks cannot see — so the figure is downgraded, not published.
+        "hlr_dropped": list(source.drops_for(drawn_keys)),
     }
 
 
