@@ -1,0 +1,32 @@
+{
+  "schema": "patent-figure-plan/1",
+  "source": {
+    "step": "../../tests/fixtures/synthetic.stp",
+    "include": ["SYN-*"],
+    "exclude": []
+  },
+  "terms": [
+    {"selector": "SYN-A01",  "term": "底座"},
+    {"selector": "SYN-B02",  "term": "回转座"},
+    {"selector": "SYN-C03",  "term": "支撑轴"},
+    {"selector": "SYN-D04",  "term": "密封圈"},
+    {"selector": "SYN-E05",  "term": "调整垫片", "label": "once"},
+    {"selector": "SYN-F06",  "term": "球头", "label": "all"},
+    {"selector": "SYN-G07",  "term": "上盖"},
+    {"selector": "SYN-H08*", "term": "紧固螺钉", "label": "none"}
+  ],
+  "figures": [
+    {"id": "fig1", "caption": "整体结构示意图", "kind": "assembly", "members": ["*"]},
+    {"id": "fig2", "caption": "回转组件分解示意图", "kind": "exploded",
+     "members": ["SYN-A01", "SYN-B02", "SYN-C03", "SYN-G07"],
+     "layout": {"explode_axis": "z"}}
+  ],
+  "layout": {
+    "view": "iso",
+    "explode_axis": "auto",
+    "axis_angle": "auto",
+    "density": "normal",
+    "max_labels_per_figure": 20,
+    "engineering_table": false
+  }
+}

@@ -1,0 +1,11 @@
+interface:
+  display_name: "专利附图生成与 DWG 实线清理"
+  short_description: "从 STEP 装配体确定性出专利附图，或清理既有图：去件号明细表、统一实线、生成已审计 DWG"
+  default_prompt: |
+    Use $patent-drawing-dwg-cleanup.
+    Read SKILL.md for the workflow and docs/impl-contract.md as the single source of truth
+    (AGENTS.md is the same entry point for non-Claude runtimes; it lists the hard prohibitions).
+    Rules that override any habit: the only file you author is figure-plan.json — never a
+    rendering script, never a layout constant, never a numeral. A patent figure carries only
+    geometry, leaders, Arabic reference numerals and the caption: no parts table, no part names
+    or codes, no dimensions, no title block (references/patent-figure-spec.md A5 / A10 / A20).

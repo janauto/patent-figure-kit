@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://patent-figure/schemas/assembly.schema.json",
+  "title": "patent-assembly/1",
+  "description": "Output of scripts/analyze_assembly.py — impl-contract v2 §4.1. Lengths are in the unit named by `units` (millimetres for STEP/XCAF).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "source", "units", "bbox", "parts", "principal_axis",
+               "coaxial_groups", "stack_order", "size_tiers", "split_suggestions",
+               "warnings"],
+  "properties": {
+    "schema": {"const": "patent-assembly/1"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "sha256", "instances", "distinct"],
+      "properties": {
+        "step": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "instances": {"type": "integer", "minimum": 1},
+        "distinct": {"type": "integer", "minimum": 1}
+      }
+    },
+    "units": {"const": "mm"},
+    "bbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lo", "hi", "size"],
+      "properties": {
+        "lo": {"$ref": "#/$defs/vec3"},
+        "hi": {"$ref": "#/$defs/vec3"},
+        "size": {"$ref": "#/$defs/vec3"}
+      }
+    },
+    "parts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "instances", "bbox_size", "max_dim", "centers",
+                     "degenerate", "path_sample"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "instances": {"type": "integer", "minimum": 1},
+          "bbox_size": {"$ref": "#/$defs/vec3"},
+          "max_dim": {"type": "number", "minimum": 0},
+          "centers": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/vec3"}},
+          "degenerate": {"type": "boolean"},
+          "path_sample": {"type": "string"}
+        }
+      }
+    },
+    "principal_axis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vector", "nearest", "spread_ratio"],
+      "properties": {
+        "vector": {"$ref": "#/$defs/vec3"},
+        "nearest": {"enum": ["x", "y", "z"]},
+        "spread_ratio": {"type": "number", "minimum": 0}
+      }
+    },
+    "coaxial_groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "axis", "origin", "members", "instances", "extent"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^g[0-9]+$"},
+          "axis": {"$ref": "#/$defs/vec3"},
+          "origin": {"$ref": "#/$defs/vec3"},
+          "members": {"type": "array", "minItems": 1,
+                      "items": {"type": "string", "minLength": 1}},
+          "instances": {"type": "integer", "minimum": 2},
+          "extent": {"type": "array", "minItems": 2, "maxItems": 2,
+                     "items": {"type": "number"}}
+        }
+      }
+    },
+    "stack_order": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "size_tiers": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tier", "members"],
+        "properties": {
+          "tier": {"enum": ["large", "medium", "small"]},
+          "members": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "split_suggestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "strategy", "figures"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "strategy": {"enum": ["coaxial", "stack", "size"]},
+          "figures": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["caption_hint", "members", "labels"],
+              "properties": {
+                "caption_hint": {"type": "string", "minLength": 1},
+                "members": {"type": "array", "minItems": 1,
+                            "items": {"type": "string", "minLength": 1}},
+                "labels": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        }
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number"}
+    }
+  }
+}

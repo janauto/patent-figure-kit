@@ -1,0 +1,66 @@
+{
+  "schema": "patent-numerals/1",
+  "numerals": [
+    {
+      "numeral": 1,
+      "term": "底座",
+      "selector": "SYN-A01",
+      "figures": [
+        "fig1",
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 2,
+      "term": "回转座",
+      "selector": "SYN-B02",
+      "figures": [
+        "fig1",
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 3,
+      "term": "支撑轴",
+      "selector": "SYN-C03",
+      "figures": [
+        "fig1",
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 4,
+      "term": "密封圈",
+      "selector": "SYN-D04",
+      "figures": [
+        "fig1"
+      ]
+    },
+    {
+      "numeral": 5,
+      "term": "调整垫片",
+      "selector": "SYN-E05",
+      "figures": [
+        "fig1"
+      ]
+    },
+    {
+      "numeral": 6,
+      "term": "球头",
+      "selector": "SYN-F06",
+      "figures": [
+        "fig1"
+      ]
+    },
+    {
+      "numeral": 7,
+      "term": "上盖",
+      "selector": "SYN-G07",
+      "figures": [
+        "fig1",
+        "fig2"
+      ]
+    }
+  ],
+  "description_zh": "附图标记说明：1—底座；2—回转座；3—支撑轴；4—密封圈；5—调整垫片；6—球头；7—上盖。"
+}

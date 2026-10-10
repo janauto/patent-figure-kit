@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>图纸规划台 · Plan Studio</title>
+<link rel="stylesheet" href="./app.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
+  }
+}
+</script>
+</head>
+<body>
+  <header id="toolbar"></header>
+
+  <main id="layout">
+    <aside id="left">
+      <section id="parts"></section>
+      <section id="issues" hidden></section>
+    </aside>
+
+    <section id="stage">
+      <div id="view-tools">
+        <label class="vt" title="选中的零件始终实心；没选中时作用于全部零件">透明度
+          <input type="range" id="v-opacity" min="10" max="100" step="5" value="100"><output id="v-opacity-out">100%</output></label>
+        <label class="vt" title="只影响 3D 观察，不影响出图">爆炸
+          <input type="range" id="v-explode" min="0" max="100" step="2" value="0"><output id="v-explode-out">0%</output></label>
+        <select id="v-mode" title="爆炸方式">
+          <option value="group">按结构拉开</option><option value="radial">逐件径向</option><option value="axis">沿主轴</option></select>
+        <select id="v-color" title="着色方式">
+          <option value="structure">按结构着色</option><option value="figure">按图纸着色</option></select>
+        <button id="v-reset" class="btn-min" title="透明度、爆炸、隐藏全部复位">复位</button>
+        <button id="v-snap" class="btn-min" title="把当前 3D 视图存成图片，工作台首页的功能介绍会用它">存为展示图</button>
+      </div>
+      <div id="viewport">
+        <i class="reg reg-tl"></i><i class="reg reg-tr"></i>
+        <i class="reg reg-bl"></i><i class="reg reg-br"></i>
+      </div>
+      <div id="stage-tools">
+        <button id="btn-box" class="btn-min btn-box" title="拖框多选零件（快捷键 B）">⬚ 框选</button>
+        <button id="btn-frame" class="btn-min" title="framing">对准视图</button>
+        <label class="check-inline"><input type="checkbox" id="btn-isolate">只看当前图</label>
+        <span id="box-hint" class="hint" hidden>左→右拖 = 窗选（整件在框内）· 右→左拖 = 交叉选（碰到即选）· Shift 加选 · Alt 减选 · 框内被遮挡的零件也会选中</span>
+      </div>
+    </section>
+
+    <aside id="right">
+      <nav id="rtabs">
+        <button class="rtab on" data-tab="figures">图纸</button>
+        <button class="rtab" data-tab="terms">术语</button>
+        <button class="rtab" data-tab="flows">流程图</button>
+        <button class="rtab" data-tab="params">参数</button>
+      </nav>
+      <section class="rpane" data-pane="figures" id="figures"></section>
+      <section class="rpane" data-pane="terms" id="terms" hidden></section>
+      <section class="rpane" data-pane="flows" id="flows" hidden></section>
+      <section class="rpane" data-pane="params" id="params" hidden></section>
+    </aside>
+  </main>
+
+  <footer id="drawer"></footer>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
