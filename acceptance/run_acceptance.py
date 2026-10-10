@@ -401,7 +401,37 @@ def n14(ctx):
     return tail
 
 
-NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14]
+@node("N16", "过闸后原子发布 · 失败件不得进输出目录")
+def n16(ctx):
+    """故意制造一张过不了闸的图，断言它不会出现在输出目录，而是被隔离进 diag/。
+
+    证明的是交付链的一条硬不变量（Codex R0 S0-04）：渲染先写进暂存目录，只有过了 QA 闸门
+    的图才原子发布到输出目录；未过闸的图进 diag/ 供排查。用 --thresholds 把字高下限抬到
+    99 mm，强制每张图在 text_height_mm_min 这一项上判 FAIL——这是一个合法的审查口径旋钮，
+    给本节点一个确定性的失败杠杆，不依赖事后篡改 DXF。
+    """
+    out = ctx["tmp"] / "out_n16"
+    thr = ctx["tmp"] / "thresholds_fail.json"
+    thr.write_text(json.dumps({"text_height_mm_min": 99.0}), encoding="utf-8")
+    proc = run([SCRIPTS / "render_patent_figure.py", ctx["plan"],
+                "--assembly", ctx["assembly"], "-o", out,
+                "--thresholds", thr, "--cache", ctx["tmp"] / "cache_n16"])
+    assert proc.returncode == 1, \
+        "强制 QA 失败后退出码应为 1，实得 %d：\n%s" % (proc.returncode, (proc.stdout + proc.stderr)[-500:])
+    published = sorted(p.name for p in out.glob("*.dxf"))
+    assert not published, "输出目录竟出现了未过闸的图：%s（S0-04 不变量被破坏）" % published
+    diag = out / "diag"
+    assert diag.is_dir(), "失败件应被隔离进 diag/，但该目录不存在"
+    quarantined = sorted(p.name for p in diag.glob("*.dxf"))
+    assert quarantined, "diag/ 里应留有失败件的 DXF 供排查，实际为空"
+    # reference-numerals.json 是计划级产物，与单图过闸无关，照常发布。
+    assert (out / "reference-numerals.json").is_file(), "计划级的附图标记说明应照常发布"
+    # 暂存目录必须已清理。
+    assert not (out / "_work").exists(), "暂存目录 _work 未清理"
+    return "失败件 %d 张全部进 diag/，输出目录 0 张未过闸图（退出码 1）" % len(quarantined)
+
+
+NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n16]
 
 
 # ------------------------------------------------------------------ 主流程

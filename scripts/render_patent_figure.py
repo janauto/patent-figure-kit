@@ -22,6 +22,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -85,6 +87,17 @@ REPORT_SCHEMA = "patent-render/1"
 SIDECAR_SUFFIX = ".layout.json"
 
 NUMERALS_FILENAME = "reference-numerals.json"
+
+#: Atomic-publish staging (WP1 deliverable 2, Codex R0 S0-04). Figures are rendered into
+#: ``<out>/<WORK_SUBDIR>`` and only *published* into ``<out>`` once they pass the QA gate
+#: with no dropped HLR edges; a figure that fails is moved to ``<out>/<DIAG_SUBDIR>`` so the
+#: output directory never contains a sheet that did not clear the gate. Both are leaf
+#: subdirectories, so a non-recursive ``out.glob("*.dxf")`` still sees only published figures.
+WORK_SUBDIR = "_work"
+DIAG_SUBDIR = "diag"
+
+#: Per-figure artefact suffixes that travel together when a figure is published or quarantined.
+QA_SUFFIX = ".qa.json"
 
 #: Preview resolution; ``sheet.render_preview``'s own default, named here so the CLI flag
 #: and the function cannot drift.
@@ -839,6 +852,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", dest="json_out", default=None, help="把渲染 + QA 报告写到这个文件")
     p.add_argument("--deflection", type=float, default=_occ.DEFAULT_DEFLECTION,
                    help="HLR 弦高（默认 %(default)s，模型单位）")
+    p.add_argument("--thresholds", default=None,
+                   help="QA 阈值覆盖（JSON 文件，覆盖 qa.DEFAULT_THRESHOLDS 的对应项）。"
+                        "用于更严/更松的审查口径；缺省用契约冻结的阈值。")
     return p
 
 
@@ -858,6 +874,37 @@ def _print_qa_failures(figure_id: str, report: dict) -> None:
             _fail("      详情：%s" % detail)
         if hint:
             _fail("      修复：%s" % hint)
+
+
+def _publish_figure(figure_id: str, work_dir: Path, dest_dir: Path,
+                    info: Dict[str, Any]) -> Path:
+    """Move one figure's artefacts from the scratch dir to its final home atomically.
+
+    ``dest_dir`` is the output directory for a figure that cleared the gate, or ``diag/``
+    for one that did not. ``work_dir`` and ``dest_dir`` are both under the output directory,
+    so ``os.replace`` is a same-filesystem atomic rename. ``info`` paths are rewritten to
+    point at the published location. Returns ``dest_dir``.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    # Every artefact this figure may have produced, by basename. Globbing "<id>.*" plus the
+    # engineering copy catches dxf / layout.json / qa.json / png without hard-coding a list
+    # that could drift from render_figure's outputs.
+    names = set()
+    for p in sorted(work_dir.glob(figure_id + ".*")):
+        names.add(p.name)
+    eng = figure_id + _sheet.ENGINEERING_SUFFIX + ".dxf"
+    if (work_dir / eng).is_file():
+        names.add(eng)
+    for name in sorted(names):
+        src = work_dir / name
+        if src.is_file():
+            os.replace(str(src), str(dest_dir / name))
+    # Rewrite the info paths that pointed into the work dir.
+    for field in ("dxf", "png", "engineering_dxf", "sidecar"):
+        val = info.get(field)
+        if val:
+            info[field] = str(dest_dir / Path(val).name)
+    return dest_dir
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -936,8 +983,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.cache:
         cache = _occ.GeometryCache(Path(args.cache), step_sha)
 
+    thresholds = None
+    if args.thresholds:
+        tpath = Path(args.thresholds)
+        if not tpath.is_file():
+            _fail("用法错误：找不到 --thresholds 文件 %s" % tpath)
+            return EXIT_USAGE
+        try:
+            thresholds = json.loads(tpath.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _fail("用法错误：--thresholds 解析失败：%s" % exc)
+            return EXIT_USAGE
+        if not isinstance(thresholds, dict):
+            _fail("用法错误：--thresholds 必须是一个 JSON 对象（阈值名→数值）")
+            return EXIT_USAGE
+
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Atomic publish (§S0-04): render into a scratch dir, publish only what clears the gate.
+    work_dir = out_dir / WORK_SUBDIR
+    diag_dir = out_dir / DIAG_SUBDIR
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
     numeral_figures = _numeral_figures(plan_doc, assembly, num)
+    # reference-numerals.json is a property of the plan, not of any one figure, so it is
+    # always published directly to the output directory.
     numerals_doc, numeral_warnings = write_numerals(
         out_dir / NUMERALS_FILENAME, num, numeral_figures)
     for warning in numeral_warnings:
@@ -954,7 +1025,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         member_names = set(members)
         parts = [p for p in all_parts if p.name in member_names]
         try:
-            info = render_figure(figure, layout_cfg, parts, assembly, num, out_dir,
+            info = render_figure(figure, layout_cfg, parts, assembly, num, work_dir,
                                  sources, float(args.deflection), cache, bool(args.preview))
         except _labels.LabelError as exc:
             ok = False
@@ -977,20 +1048,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _fail("figure %s 渲染失败 [%s]：%s" % (figure_id, code, exc))
             continue
 
-        report = _qa.check_figure(Path(info["dxf"]), kind=info["kind"])
+        report = _qa.check_figure(Path(info["dxf"]), kind=info["kind"], thresholds=thresholds)
         info["qa"] = report
-        rendered.append(info)
-        qa_path = out_dir / (figure_id + ".qa.json")
+        # The HLR drop count (§5.5 / §8) is a gate the QA checks cannot see: a silhouette
+        # line OCCT refused to discretise is simply absent, so the drawing can pass every
+        # layout check and still be missing an edge. A figure that lost any edge is
+        # downgraded here and quarantined, never published.
+        dropped_edges, dropped_compounds = info.get("hlr_dropped", [0, 0])
+        drop_fail = (int(dropped_edges) + int(dropped_compounds)) > 0
+        qa_pass = bool(report.get("pass"))
+        gate_pass = qa_pass and not drop_fail
+        info["gate_pass"] = gate_pass
+
+        # Write the QA report next to its DXF in the work dir so it travels with the figure.
+        qa_path = work_dir / (figure_id + QA_SUFFIX)
         qa_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n",
                            encoding="utf-8")
-        status = "通过" if report.get("pass") else "未通过"
+
+        status = "通过" if gate_pass else "未通过"
         print("figure %s：%s，字高 %.1f mm，比例 %.4f，图面角 %s，%d 件 / %d 标记，QA %s"
               % (figure_id, Path(info["dxf"]).name, info["text_height_mm"], info["scale"],
                  info["axis_angle"], info["instances"], info["labels"], status))
-        if not report.get("pass"):
+
+        dest = _publish_figure(figure_id, work_dir, out_dir if gate_pass else diag_dir, info)
+        info["published_to"] = str(dest)
+        rendered.append(info)
+
+        if not gate_pass:
             ok = False
-            _fail("figure %s 的 QA 闸门未通过：" % figure_id)
-            _print_qa_failures(figure_id, report)
+            if drop_fail:
+                _fail("figure %s 的 HLR 丢失了 %d 条边 / %d 个外廓组——该图缺线，已降级到 %s/。"
+                      "修复：换 layout.view，或在 plan 的 source.exclude 里排除产生丢边的零件。"
+                      % (figure_id, int(dropped_edges), int(dropped_compounds), DIAG_SUBDIR))
+            if not qa_pass:
+                _fail("figure %s 的 QA 闸门未通过（已降级到 %s/）：" % (figure_id, DIAG_SUBDIR))
+                _print_qa_failures(figure_id, report)
+
+    # The scratch dir has served its purpose; everything in it was either published to the
+    # output directory or quarantined in diag/.
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
 
     if args.json_out:
         payload = {

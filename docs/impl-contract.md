@@ -547,9 +547,20 @@ python3 scripts/doctor.py [--json]
 python3 scripts/make_test_assembly.py -o tests/fixtures/synthetic.stp
 ```
 
-`render_patent_figure.py` writes `out/<figure id>.dxf`, `out/<figure id>.png` (with `--preview`),
-and `out/reference-numerals.json`. It runs the QA gate on each figure and exits 1 if any fails,
-printing the failing checks with their hints.
+`render_patent_figure.py` runs the QA gate on each figure and **publishes atomically after the
+gate** (WP1 deliverable 2 / Codex R0 S0-04): every figure is rendered into `out/_work/`, and only
+once it passes QA *and* its drawn geometry lost no HLR edge is it moved — with its `.dxf`,
+`.png` (with `--preview`), `.layout.json` and `.qa.json` — into `out/`. A figure that fails is
+moved to `out/diag/` instead, so `out/` never contains a sheet that did not clear the gate.
+`out/reference-numerals.json` is a plan-level product and is always published. The scratch
+`out/_work/` is removed at the end. It exits 1 if any figure failed, printing the failing checks
+with their hints. `--thresholds PATH` overrides individual `qa.DEFAULT_THRESHOLDS` entries (a JSON
+object) for a stricter or looser review pass; the frozen thresholds apply when it is omitted.
+
+The HLR drop count (`occ_backend.hlr_drop_stats`) is consumed by this gate: a dropped edge is a
+missing silhouette line that the layout/readability checks cannot see, so a figure with a nonzero
+drop is downgraded and quarantined exactly like a QA failure. The per-entry drop delta is stored in
+the geometry cache and replayed on a hit, so the gate decision does not depend on cache warmth.
 
 ## 7. Determinism rules (mandatory, testable)
 

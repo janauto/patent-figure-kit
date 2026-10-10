@@ -92,17 +92,28 @@ be `[]` — then the grouping is yours to choose.
 python3 scripts/validate_figure_plan.py plan.json --assembly assembly.json --json issues.json
 ```
 
-**A4 — render.** The QA gate runs inside; a figure that fails it does not ship.
+**A4 — render.** The QA gate runs inside, and publishing is **atomic after the gate**: each
+figure is rendered into a scratch dir and only *published* to the output directory once it
+passes QA with no dropped HLR edges. A figure that fails is moved to `out/diag/` instead, so
+the output directory never contains a sheet that did not clear the gate (the "过闸才落盘"
+guarantee, impl-contract §8).
 
 ```bash
 python3 scripts/render_patent_figure.py plan.json --assembly assembly.json -o out/ \
         --cache .cache/ --preview
 ```
 
-Writes `out/<figure id>.dxf`, `out/<figure id>.png` (with `--preview`), and
+Writes, **for every figure that passed**, `out/<figure id>.dxf`, `out/<figure id>.png`
+(with `--preview`), `out/<figure id>.layout.json`, `out/<figure id>.qa.json`, and always
 `out/reference-numerals.json` (the global numeral table plus the ready-to-paste
-「附图标记说明：1—底座；2—…」 sentence). Exits `1` if any figure fails QA, printing the failing
-checks with their hints. `--only fig2` re-renders a single figure while iterating.
+「附图标记说明：1—底座；2—…」 sentence — a plan-level product, published regardless). A figure
+that fails QA or whose HLR dropped an edge lands under `out/diag/` with the same artefacts for
+inspection. Exits `1` if any figure failed, printing the failing checks with their hints.
+`--only fig2` re-renders a single figure while iterating.
+
+`--thresholds overrides.json` tightens or loosens the QA gate (a JSON object of
+`qa.DEFAULT_THRESHOLDS` keys → values); omit it for the contract-frozen thresholds. Use it for
+a stricter review pass, e.g. `{"text_height_mm_min": 4.0}`.
 
 **A5 — re-check one DXF (optional, same checks as the gate in A4).**
 
