@@ -349,26 +349,32 @@ def check_txt_shx() -> dict:
 def check_plan_studio() -> dict:
     """Plan Studio's own dependencies — optional, and deliberately unpinned.
 
-    fastapi/uvicorn serve the browser UI, openpyxl reads .xlsx BOMs. None of them touches the
-    render chain, so a missing one never blocks a drawing and never changes a digest; it only
-    means the manual route is unavailable. Reporting them here saves the user from discovering
-    it as an ImportError at launch.
+    fastapi/uvicorn/httpx serve the browser UI and its optional LLM channel, openpyxl reads .xlsx
+    BOMs, python-docx writes the 说明书附图 Word export. None of them touches the render chain, so
+    a missing one never blocks a drawing and never changes a digest; it only means the manual
+    route is unavailable. Reporting them here saves the user from discovering it as an
+    ImportError at launch.
     """
+    modules = (("fastapi", "fastapi"), ("uvicorn", "uvicorn"), ("httpx", "httpx"),
+               ("openpyxl", "openpyxl"), ("docx", "python-docx"))
     missing = []
-    for module in ("fastapi", "uvicorn", "openpyxl"):
+    for module, _dist in modules:
         try:
             importlib.import_module(module)
         except Exception:
             missing.append(module)
-    fix = _pip_fix("fastapi", "uvicorn", "openpyxl")
+    fix = _pip_fix(*(dist for _module, dist in modules))
     if not missing:
         return _check("plan-studio-deps", STATUS_OK,
-                      "fastapi / uvicorn / openpyxl 齐备，可运行 scripts/plan_studio.py",
+                      "fastapi / uvicorn / httpx / openpyxl / python-docx 齐备，"
+                      "可运行 scripts/workbench.py 与 scripts/plan_studio.py",
                       required=False)
-    detail = ("缺 %s —— 人工点标界面（scripts/plan_studio.py）无法启动；"
+    detail = ("缺 %s —— 浏览器界面（scripts/workbench.py、scripts/plan_studio.py）无法完整使用；"
               "命令行出图链路不受影响" % "、".join(missing))
     if missing == ["openpyxl"]:
         detail = "缺 openpyxl —— Plan Studio 的「导入 BOM」只能读 .csv，读不了 .xlsx"
+    elif missing == ["docx"]:
+        detail = "缺 python-docx —— 导出时不会生成「说明书附图」Word 文件，其余文件照常生成"
     return _check("plan-studio-deps", STATUS_MISSING, detail, fix, required=False)
 
 
