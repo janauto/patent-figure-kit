@@ -1,0 +1,115 @@
+{
+  "schema": "patent-figure-qa/1",
+  "file": "fig1.dxf",
+  "pass": true,
+  "checks": [
+    {
+      "id": "geometry_occupancy",
+      "pass": true,
+      "value": 0.787967,
+      "threshold": ">=0.55",
+      "detail": "GEOM∪HIDDEN 包围盒 138.000×193.490=26701.7 mm²，全部实体包围盒 141.992×238.653=33886.8 mm²。",
+      "hint": "版面被非几何实体稀释了：把 layout.engineering_table 设为 false（明细表只允许出现在 <id>_engineering.dxf，见契约 §8），并删掉 TABLE / NOTE 图层上的说明文字；标记边槽过宽时改 figures[].layout 的字号来源（对标准件设 terms[].label=\"none\" 可减少标记）。"
+    },
+    {
+      "id": "sheet_fill",
+      "pass": true,
+      "value": 0.88757,
+      "threshold": ">=0.55",
+      "detail": "几何 138.000×193.490 mm，可用区 aw×ah=138.0×218.0 mm（h=7.00 mm（读自 NUM 图层 TEXT））",
+      "hint": "纸没填满：把 figures[].layout.axis_angle 改回 \"auto\"，让 renderer 逐图闭式求最优角；已经是 auto 时说明旋转救不回来——换 layout.view，或按 assembly.json:split_suggestions 拆图。"
+    },
+    {
+      "id": "text_height_mm",
+      "pass": true,
+      "value": 7.0,
+      "threshold": ">=3.5",
+      "detail": "NUM 图层最小字高 7.00 mm（共 6 个标记）",
+      "hint": "字太小意味着被标注件在图面上太小：对标准件设 terms[].label=\"none\"，按 assembly.json:split_suggestions 拆图，或把 layout.density 改成 \"compact\"。"
+    },
+    {
+      "id": "text_slot_ratio",
+      "pass": true,
+      "value": 0.036178,
+      "threshold": "<=0.6",
+      "detail": "最小被标注几何簇外廓 193.49 mm（锚点 16.0, 113.8），最小字高 7.00 mm，口径为「沿每条 LEADER 首点找几何连通簇取 max(w,h)」（§11.10 #4）。",
+      "hint": "被标注件相对字号太小：对该零件设 terms[].label=\"none\"，或按 assembly.json:split_suggestions 拆图。"
+    },
+    {
+      "id": "label_overlap_pairs",
+      "pass": true,
+      "value": 0,
+      "threshold": "<=0",
+      "detail": "0 对附图标记外接框相交（共 6 个标记）。外接框按 GB/T 14691 B 型字宽 CHAR_W=0.71（= h/√2 = 0.7071 向上取整）、水平留白 PAD_X=0.30·h、垂直留白 PAD_Y=0.20·h 还原，来源 §11.2.3。",
+      "hint": "标记互相碾压：减少本图标记数（对标准件设 terms[].label=\"none\"），或按 assembly.json:split_suggestions 拆图。"
+    },
+    {
+      "id": "leader_hits_numeral_box",
+      "pass": true,
+      "value": 0,
+      "threshold": "<=0",
+      "detail": "0 处引线段与附图标记外接框相交（引线 6 条）。",
+      "hint": "引线压住了数字：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图；若反复出现，说明本图标记密度已超载。"
+    },
+    {
+      "id": "leader_crossing",
+      "pass": true,
+      "value": 0,
+      "threshold": "<=0",
+      "detail": "0 对引线段真交叉（共端点与共线重合不计），引线 6 条。",
+      "hint": "引线交叉：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图。"
+    },
+    {
+      "id": "leader_anchor_gap",
+      "pass": true,
+      "value": 2.334,
+      "threshold": "<=2.377 mm",
+      "detail": "6 条引线的锚点离最近几何：中位 0.000 mm、最大 2.334 mm（上限 2.377 mm = 图幅对角 237.7 mm 的 1.0%）。",
+      "hint": "引线没有落在它所指的零件轮廓上，读图者无法判断标记指的是哪个件。若该零件在本视图里被遮挡，改用分解图标注它，或把它从本图的 members 中移除。"
+    },
+    {
+      "id": "part_bbox_overlap_pairs",
+      "pass": true,
+      "value": 0,
+      "threshold": "<=0",
+      "detail": "kind=assembly：总装图的零件本来就互相遮挡，本项只对 exploded 生效（§5.5）。",
+      "hint": "若本图应当是分解图，把 figures[].kind 改成 \"exploded\"。"
+    },
+    {
+      "id": "labels_per_figure",
+      "pass": true,
+      "value": 6,
+      "threshold": "<=20",
+      "detail": "本图有 6 个附图标记。",
+      "hint": "拆图：按 assembly.json:split_suggestions 把该 figure 拆成多张，或对标准件设 terms[].label=\"none\"。"
+    },
+    {
+      "id": "non_numeral_text_ratio",
+      "pass": true,
+      "value": 0.0,
+      "threshold": "<=0.1",
+      "detail": "0/7 条文字既不是附图标记也不是图题（CAPTION 图层按 §8 计入允许项）。",
+      "hint": "专利附图只允许几何、引线、附图标记与图题（契约 §8）：把 layout.engineering_table 设为 false，并删掉零件名 / 说明文字。"
+    },
+    {
+      "id": "non_continuous",
+      "pass": true,
+      "value": 0,
+      "threshold": "<=0",
+      "detail": "0 个实体的有效线型不是 CONTINUOUS（BYLAYER 已按图层线型解析）。",
+      "hint": "这一条不是 plan 的问题，是写出端的问题：sheet.py 必须把所有实体与图层写成 CONTINUOUS（契约 §5.4）。若线型来自导入的图块，请在 plan 的 source.exclude 里排除对应零件。"
+    },
+    {
+      "id": "forbidden_text",
+      "pass": true,
+      "value": 0,
+      "threshold": "==0",
+      "detail": "0 条文字命中内部件号 / 图号形状（共 7 条文字，3 条模式）。",
+      "hint": "plan 的 terms[].term 里出现了内部件号 / 图号形状的字符串，改成中文技术名词；并确认 layout.engineering_table 为 false（契约 §8 禁止附图出现件号）。"
+    }
+  ],
+  "summary": {
+    "failed": 0,
+    "passed": 13
+  }
+}

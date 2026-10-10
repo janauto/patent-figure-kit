@@ -1,0 +1,105 @@
+{
+  "schema": "patent-numerals/1",
+  "numerals": [
+    {
+      "numeral": 1,
+      "term": "电机壳体",
+      "selector": "PGB-MOTOR-HOUSING",
+      "figures": [
+        "fig1"
+      ]
+    },
+    {
+      "numeral": 2,
+      "term": "电机后盖",
+      "selector": "PGB-MOTOR-REAR-CAP",
+      "figures": [
+        "fig1"
+      ]
+    },
+    {
+      "numeral": 3,
+      "term": "安装法兰",
+      "selector": "PGB-MOUNT-FLANGE",
+      "figures": [
+        "fig1"
+      ]
+    },
+    {
+      "numeral": 4,
+      "term": "内齿圈",
+      "selector": "PGB-RING-GEAR",
+      "figures": [
+        "fig1",
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 5,
+      "term": "端盖",
+      "selector": "PGB-END-COVER",
+      "figures": [
+        "fig1",
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 6,
+      "term": "输出轴",
+      "selector": "PGB-OUTPUT-SHAFT",
+      "figures": [
+        "fig1",
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 7,
+      "term": "太阳轮",
+      "selector": "PGB-SUN-GEAR",
+      "figures": [
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 8,
+      "term": "行星轮",
+      "selector": "PGB-PLANET-GEAR",
+      "figures": [
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 9,
+      "term": "行星销",
+      "selector": "PGB-PLANET-PIN",
+      "figures": [
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 10,
+      "term": "行星架",
+      "selector": "PGB-PLANET-CARRIER",
+      "figures": [
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 11,
+      "term": "输出轴承",
+      "selector": "PGB-OUTPUT-BEARING",
+      "figures": [
+        "fig2"
+      ]
+    },
+    {
+      "numeral": 12,
+      "term": "油封",
+      "selector": "PGB-OIL-SEAL",
+      "figures": [
+        "fig2"
+      ]
+    }
+  ],
+  "description_zh": "附图标记说明：1—电机壳体；2—电机后盖；3—安装法兰；4—内齿圈；5—端盖；6—输出轴；7—太阳轮；8—行星轮；9—行星销；10—行星架；11—输出轴承；12—油封。"
+}

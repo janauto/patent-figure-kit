@@ -1,24 +1,21 @@
-// 装配入口：布局、工具条、键盘、右栏页签、校验问题面板、框选开关、AI 起草。
-import {
-  boot, bus, state, setSelection, flush, setView,
-} from './state.js';
-import { api } from './api.js';
-import { initViewer, setBoxMode, isBoxMode } from './viewer.js';
-import { initParts } from './parts.js';
-import { initFigures, addSelectionTo } from './figures.js';
-import { initTerms } from './terms.js';
-import { initPreview } from './preview.js';
-import { initFlowcharts } from './flowcharts.js';
+// 规划台装配入口：顶栏、三屏切换（规划 / 出图与 QA / 导出）、键盘金路径、AI 起名浮条。
+// three.js 只在进入「规划台」时动态 import()，首页零 three.js（硬约束）。
+import { boot, bus, state, setSelection, flush, setView, displayName, aiName } from './state.js';
+import { api, readOnly } from './api.js';
+import { applyBrand } from './brand.js';
 
-const $ = (sel) => document.querySelector(sel);
+const $ = (s, el = document) => el.querySelector(s);
+const params = new URLSearchParams(location.search);
+const projectId = params.get('project') || 'gearbox';
+const forceState = params.get('state') || '';     // empty|loading|ok|fail（四态截图用）
+let viewer = null;
+let viewerMod = null;
+let plansMounted = false;
+
+applyBrand();
 
 export function toast(msg, kind = '') {
-  let box = $('#toast');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'toast';
-    document.body.appendChild(box);
-  }
+  const box = $('#toast');
   box.className = `toast ${kind}`;
   box.textContent = msg;
   box.hidden = false;
@@ -26,95 +23,108 @@ export function toast(msg, kind = '') {
   box._t = setTimeout(() => { box.hidden = true; }, 3600);
 }
 
+// ---------------------------------------------------------------- 主题
+(function theme() {
+  let saved = null;
+  try { saved = localStorage.getItem('inkline-theme'); } catch { /* */ }
+  if (saved) document.documentElement.dataset.theme = saved;
+  $('#theme-toggle').addEventListener('click', () => {
+    const cur = document.documentElement.dataset.theme === 'dark' ? '' : 'dark';
+    if (cur) document.documentElement.dataset.theme = cur;
+    else document.documentElement.removeAttribute('data-theme');
+    try { localStorage.setItem('inkline-theme', cur); } catch { /* */ }
+  });
+})();
+
+// ---------------------------------------------------------------- 顶栏
 function renderToolbar() {
-  const stepName = state.step.split('/').pop();
-  const badge = {
-    clean: '', dirty: '未保存…', saving: '保存中…',
-    saved: '已保存 ✓', error: '保存失败！',
-  }[state.saveState];
-  const v = state.validate;
-  const errs = (v?.issues || []).filter((i) => i.severity === 'error').length;
-  const warns = (v?.issues || []).length - errs;
+  $('#tb-proj').textContent = `${state.title || projectId} · ${state.step || ''}`;
   const llm = state.llm || {};
-  const llmOk = llm.provider && llm.provider !== 'none';
-  const home = state.homeUrl
-    ? `<a class="tb-home" href="${state.homeUrl}" title="回到工作台首页">← 工作台</a>` : '';
-  $('#toolbar').innerHTML = `
-    ${home}
-    <div class="brand">图纸规划台 <span class="brand-sub">Plan Studio</span></div>
-    <div class="tb-step mono" title="${state.step}">${stepName}</div>
-    <button class="btn-ai" data-ai ${llmOk && !state.aiBusy ? '' : 'disabled'}
-            title="${llm.provider_label || ''}">
-      ${state.aiBusy ? '<span class="spin dark"></span> AI 起草中…' : '✦ AI 起草零件名'}</button>
-    <span class="tb-llm ${llmOk ? '' : 'off'}" title="${llm.provider_label || ''}">
-      ${llmOk ? (llm.provider === 'deepseek' ? 'DeepSeek' : 'CodeBuddy·DeepSeek') : 'AI 未配置'}</span>
-    <div class="tb-validate ${errs ? 'v-err' : (warns ? 'v-warn' : 'v-ok')}"
-         title="服务器校验（与模型路线同一套错误码）">
-      ${errs ? `${errs} 错` : ''}${errs && warns ? ' · ' : ''}${warns ? `${warns} 提示` : ''}
-      ${!errs && !warns ? '计划可渲染' : ''}
-    </div>
-    <div class="tb-save ${state.saveState}">${badge}</div>`;
-  $('#toolbar [data-ai]')?.addEventListener('click', aiDraft);
+  const badge = $('#ai-badge');
+  if (!llm.configured) { badge.classList.add('off'); badge.textContent = 'AI 未接入'; }
+  else { badge.classList.remove('off'); badge.textContent = `AI · ${llm.provider_label || '已接入'}`; }
+  const sv = {
+    clean: '', dirty: '未保存…', saving: '保存中…', saved: '已保存 ✓',
+    error: '保存失败', conflict: 'plan 冲突，请重载', readonly: '只读演示站',
+  }[state.saveState] || '';
+  const el = $('#tb-save');
+  el.textContent = sv;
+  el.className = `tb-save ${['error', 'conflict'].includes(state.saveState) ? 'bad' : ''}`;
 }
 
-async function aiDraft() {
-  if (state.aiBusy) return;
-  await flush();
-  state.aiBusy = true; renderToolbar();
-  try {
-    const res = await api.draftTerms({ apply: true });
-    state.plan = res.plan;
-    state.validate = res.validate;
-    const filled = res.applied?.filled?.length || 0;
-    const added = res.applied?.added?.length || 0;
-    const low = (res.suggestions || []).filter((s) => s.confidence === 'low').length;
-    bus.emit('plan'); bus.emit('validate');
-    toast(`AI 起草完成：填了 ${filled + added} 个零件名`
-      + (low ? `（${low} 个把握低，已在术语页标出，请核对）` : '')
-      + '。人工填过的名字未改动。', 'ok');
-    state.aiSuggestions = Object.fromEntries((res.suggestions || []).map((s) => [s.selector, s]));
-    bus.emit('ai-suggestions');
-  } catch (err) {
-    toast(`AI 起草失败：${err.message}`, 'bad');
-  } finally {
-    state.aiBusy = false; renderToolbar();
-  }
+// ---------------------------------------------------------------- 屏切换
+function showStage(stage) {
+  document.querySelectorAll('.stage-tab').forEach((b) => b.classList.toggle('on', b.dataset.stage === stage));
+  document.querySelectorAll('#stage-host > section').forEach((s) => { s.hidden = s.dataset.stage !== stage; });
+  if (stage === 'plan' && !plansMounted) mountPlan();
+  if (stage === 'qa') import('./qa.js').then((m) => m.mountQa($('#qa-host')));
+  if (stage === 'export') import('./export.js').then((m) => m.mountExport($('#export-host')));
+  try {                                   // 保留 state / static 开关（四态截图与静态站用）
+    const keep = new URLSearchParams();
+    keep.set('project', projectId); keep.set('stage', stage);
+    if (forceState) keep.set('state', forceState);
+    if (params.has('static')) keep.set('static', '');
+    history.replaceState(null, '', `?${keep.toString()}`);
+  } catch { /* */ }
 }
 
-function renderIssues() {
-  const list = state.validate?.issues || [];
-  const el = $('#issues');
-  if (!list.length) { el.innerHTML = ''; el.hidden = true; return; }
-  el.hidden = false;
-  el.innerHTML = `<div class="panel-head sub"><span class="stamp">检</span>校验问题
-    <span class="head-count">${list.length}</span></div>
-    <ul class="issue-list">${list.map((it) => `
-      <li class="issue ${it.severity}">
-        <b class="mono">${it.code}</b> ${it.message}
-        ${it.hint ? `<div class="qa-hint">↳ ${it.hint}</div>` : ''}
-      </li>`).join('')}</ul>`;
-}
-
-function initTabs() {
-  document.querySelectorAll('.rtab').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.rtab').forEach((b) => b.classList.toggle('on', b === btn));
-      document.querySelectorAll('.rpane').forEach((p) => {
-        p.hidden = p.dataset.pane !== btn.dataset.tab;
-      });
-    });
+function initStageNav() {
+  $('#stage-nav').addEventListener('click', (e) => {
+    const btn = e.target.closest('.stage-tab');
+    if (btn) showStage(btn.dataset.stage);
   });
 }
 
-function syncBoxButton() {
-  const btn = $('#btn-box');
-  if (!btn) return;
-  btn.classList.toggle('on', isBoxMode());
-  btn.innerHTML = isBoxMode() ? '⬚ 框选中（B 退出）' : '⬚ 框选';
-  $('#box-hint').hidden = !isBoxMode();
+// ---------------------------------------------------------------- 规划台（屏③）
+async function mountPlan() {
+  plansMounted = true;
+  const { initParts } = await import('./parts.js');
+  const { initFigures } = await import('./figures.js');
+  const { initTerms } = await import('./terms.js');
+  const { initCandidates } = await import('./candidates.js');
+  initCandidates($('#candidates'));
+  initFigures($('#figures'));
+  initTerms($('#terms'));
+  initParts($('#parts'));
+  initRightTabs();
+  initAiFloatbar();
+  bus.emit('booted');   // 让各面板首渲
+
+  if (forceState === 'loading') { showViewportSkeleton(); return; }
+  if (forceState === 'fail') { showViewportError('模型（GLB）解码失败：文件缺失或损坏'); return; }
+  // 动态载入 three.js + viewer（首屏之外的 1.2MB 就挡在这里）
+  showViewportSkeleton();
+  try {
+    viewerMod = await import('./viewer.js');
+    viewer = await viewerMod.initViewer($('#viewport'));
+    clearViewportOverlay();
+    initViewTools();
+  } catch (err) {
+    showViewportError('3D 视口初始化失败：' + err.message);
+  }
 }
 
-function initViewTools(viewer) {
+function showViewportSkeleton() {
+  $('#viewport-overlay').innerHTML = `<div class="vp-skeleton">
+    <i class="spin"></i><p>正在载入 3D 模型…<br><span class="hint">可交互骨架优先，模型就位后可拖转</span></p></div>`;
+  $('#viewport-overlay').hidden = false;
+}
+function showViewportError(msg) {
+  $('#viewport-overlay').innerHTML = `<div class="vp-error">
+    <p class="stamp-fail">视口</p><p>${msg}</p>
+    <button class="btn" onclick="location.reload()">重试</button></div>`;
+  $('#viewport-overlay').hidden = false;
+}
+function clearViewportOverlay() { $('#viewport-overlay').hidden = true; $('#viewport-overlay').innerHTML = ''; }
+
+function initRightTabs() {
+  document.querySelectorAll('.rtab').forEach((btn) => btn.addEventListener('click', () => {
+    document.querySelectorAll('.rtab').forEach((b) => b.classList.toggle('on', b === btn));
+    document.querySelectorAll('.rpane').forEach((p) => { p.hidden = p.dataset.pane !== btn.dataset.tab; });
+  }));
+}
+
+function initViewTools() {
   const op = $('#v-opacity'); const ex = $('#v-explode');
   const mode = $('#v-mode'); const col = $('#v-color');
   const sync = () => {
@@ -127,76 +137,111 @@ function initViewTools(viewer) {
   };
   op.addEventListener('input', () => setView({ opacity: Number(op.value) / 100 }));
   ex.addEventListener('input', () => setView({ explode: Number(ex.value) / 100 }));
-  ex.addEventListener('change', () => viewer.frameAll());
-  mode.addEventListener('change', () => { setView({ explodeMode: mode.value }); viewer.frameAll(); });
+  ex.addEventListener('change', () => viewer?.frameAll());
+  mode.addEventListener('change', () => { setView({ explodeMode: mode.value }); viewer?.frameAll(); });
   col.addEventListener('change', () => setView({ colorBy: col.value }));
   $('#v-reset').addEventListener('click', () => {
     setView({ opacity: 1, explode: 0, hiddenGroups: new Set(), soloGroup: null });
-    viewer.frameAll();
+    viewer?.frameAll();
   });
-  $('#v-snap').addEventListener('click', async () => {
-    const v = state.view;
-    const guess = v.explode > 0.05 ? 'explode' : (v.opacity < 0.95 || state.selection.size ? 'xray' : 'view');
-    const name = window.prompt('存为展示图的名字（explode=爆炸视图，xray=透明看内部，其他名字也可以）', guess);
-    if (!name) return;
-    try {
-      const res = await api.snapshot(name.trim(), viewer.snapshot());
-      toast(`已保存展示图 ${res.name}（${Math.round(res.bytes / 1024)} KB），工作台首页会用到`, 'ok');
-    } catch (err) { toast('保存失败：' + err.message, 'bad'); }
-  });
+  document.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click',
+    () => viewerMod?.setPreset(b.dataset.preset)));
+  $('#btn-frame').addEventListener('click', () => viewer?.frameAll());
+  $('#btn-isolate').addEventListener('change', (e) => viewer?.setIsolate(e.target.checked));
+  $('#btn-box').addEventListener('click', () => toggleBox());
   bus.on('view', sync);
   sync();
 }
 
+function toggleBox() {
+  if (!viewerMod) return;
+  const on = !viewerMod.isBoxMode();
+  viewerMod.setBoxMode(on);
+  const btn = $('#btn-box');
+  btn.classList.toggle('on', on);
+  $('#box-hint').hidden = !on;
+}
+
+// ---------------------------------------------------------------- AI 起名浮条（F9）
+function initAiFloatbar() {
+  bus.on('selection', updateFloatbar);
+  updateFloatbar();
+}
+function updateFloatbar() {
+  const bar = $('#ai-floatbar');
+  const sel = [...state.selection];
+  const blanks = sel.filter((n) => !displayName(n));
+  if (!sel.length) { bar.hidden = true; return; }
+  const llmOk = state.llm?.configured;
+  bar.hidden = false;
+  bar.innerHTML = `
+    <span class="afb-mark">AI</span>
+    <span class="afb-text">已选 <b>${sel.length}</b> 件${blanks.length ? ` · <b>${blanks.length}</b> 件待起名` : '，均已命名'}</span>
+    ${blanks.length && llmOk ? `<button class="btn primary sm" id="afb-name">为 ${blanks.length} 个空白件起名</button>`
+      : (!llmOk ? '<span class="hint">AI 未接入，可在术语页手填</span>' : '')}
+    <button class="btn ghost sm" id="afb-clear">清空选择</button>`;
+  $('#afb-clear')?.addEventListener('click', () => setSelection([]));
+  $('#afb-name')?.addEventListener('click', aiNameSelection);
+}
+async function aiNameSelection() {
+  const bar = $('#ai-floatbar');
+  bar.querySelector('#afb-name').outerHTML = '<span class="hint"><i class="spin"></i> 正在读代号、起中文名…</span>';
+  try {
+    const res = await api.draftTerms(projectId);
+    const sugg = {};
+    (res.suggestions || []).forEach((s) => { sugg[s.selector] = s; });
+    state.aiSuggestions = { ...state.aiSuggestions, ...sugg };
+    bus.emit('ai-suggestions'); bus.emit('plan');
+    const low = (res.suggestions || []).filter((s) => s.confidence === 'low').length;
+    toast(`AI 起草完成：填了 ${res.filled || 0} 个零件名`
+      + (low ? `（${low} 个把握低，已标黄，请核对）` : '') + '。人工填过的未改动。', 'ok');
+    updateFloatbar();
+  } catch (err) {
+    toast('AI 起草失败：' + (err.hint || err.message), 'bad');
+    updateFloatbar();
+  }
+}
+
+// ---------------------------------------------------------------- 键盘金路径
 function initKeyboard() {
   document.addEventListener('keydown', (e) => {
-    if (e.target.matches('input, select, textarea')) return;
+    if (e.target.matches?.('input, select, textarea')) {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
     if (e.key === 'Escape') {
-      if (isBoxMode()) setBoxMode(false);
+      if (viewerMod?.isBoxMode()) toggleBox();
       setSelection([]);
     }
-    if (e.key === 'b' || e.key === 'B') setBoxMode(!isBoxMode());
-    const n = Number(e.key);
-    if (n >= 1 && n <= 9 && state.selection.size) {
-      const fig = state.plan.figures[n - 1];
-      if (fig) addSelectionTo(fig.id);
+    if (e.key === 'b' || e.key === 'B') toggleBox();
+    if (e.key === 'f' || e.key === 'F') viewer?.frameAll();
+    if (e.key === 'i' || e.key === 'I') {
+      const cb = $('#btn-isolate'); cb.checked = !cb.checked; viewer?.setIsolate(cb.checked);
     }
+    // 1/2/3 = 机位预设（硬约束，优先于「归入图」）；归入图改到图卡按钮 + Shift+数字
+    if (e.key === '1') viewerMod?.setPreset('front');
+    if (e.key === '2') viewerMod?.setPreset('top');
+    if (e.key === '3') viewerMod?.setPreset('iso');
+    if (e.key === '/' ) { /* 聚焦结构树搜索 */ const s = $('#parts .search'); if (s) { e.preventDefault(); s.focus(); } }
   });
   window.addEventListener('beforeunload', flush);
 }
 
+// ---------------------------------------------------------------- 启动
 async function start() {
+  initStageNav();
+  initKeyboard();
+  if (readOnly) document.body.classList.add('is-static');
   try {
-    await boot();
+    await boot(projectId);
   } catch (err) {
-    document.body.innerHTML = `<div class="fatal">连接不上 Plan Studio 服务器：${err.message}
-      <br>请从终端打印的完整地址（含 token）进入，或回到工作台首页重新打开工程。</div>`;
+    document.body.innerHTML = `<div class="fatal">载入工程失败：${err.message}
+      <br><a href="./home.html">← 回到工程列表</a></div>`;
     return;
   }
-  renderToolbar(); renderIssues();
-  initParts($('#parts'));
-  initFigures($('#figures'));
-  initTerms($('#terms'), $('#params'));
-  initPreview($('#drawer'));
-  initFlowcharts($('#flows'));
-  initTabs(); initKeyboard();
-  bus.emit('booted');
-
-  const viewer = await initViewer($('#viewport'));
-  $('#btn-frame').addEventListener('click', () => viewer.frameAll());
-  $('#btn-isolate').addEventListener('change', (e) => viewer.setIsolate(e.target.checked));
-  $('#btn-box').addEventListener('click', () => setBoxMode(!isBoxMode()));
-  bus.on('box-mode', syncBoxButton);
-  bus.on('box-selected', ({ count, crossing }) => {
-    toast(`${crossing ? '交叉选' : '窗选'}：框到 ${count} 种零件`
-      + (count ? '——在图卡上点「加入所选」或按数字键 1–9 归入对应的图' : ''));
-  });
-  syncBoxButton();
-  initViewTools(viewer);
-
-  ['save-state', 'validate', 'booted'].forEach((evt) => bus.on(evt, () => {
-    renderToolbar(); renderIssues();
-  }));
+  renderToolbar();
+  ['save-state', 'booted'].forEach((evt) => bus.on(evt, renderToolbar));
+  const stage = params.get('stage') || 'plan';
+  showStage(stage);
 }
-
 start();

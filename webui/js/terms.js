@@ -50,13 +50,11 @@ function renderTerms() {
   }).join('');
 
   root.innerHTML = `
-    <div class="panel-head"><span class="stamp">03</span>术语与标记
+    <div class="panel-head"><span class="stamp">标记</span>术语与标记
       <span class="head-btn-group">
-        <button class="btn-min" data-import-bom title="用结构 BOM 预填空白术语（不覆盖已填）">导入 BOM</button>
         <button class="btn-min" data-bulk>小件批量不标…</button>
         <button class="btn-min" data-prune title="删除术语为空的行">清理空行</button>
       </span></div>
-    <input type="file" data-bom-file accept=".xlsx,.xlsm,.csv,.tsv" hidden>
     <p class="hint pad">行序即发号顺序；号码由脚本发放，此处仅预演。术语必须是中文技术名词，
     件号形态会被校验器拒绝。</p>
     <table class="terms"><thead>
@@ -89,25 +87,6 @@ function renderTerms() {
     if (!empty) { window.alert('没有空术语行'); return; }
     if (!window.confirm(`删除 ${empty} 行空术语？（这些零件仍会出图，只是不标号）`)) return;
     mutate((plan) => { plan.terms = plan.terms.filter((t) => (t.term || '').trim()); });
-  });
-  const bomFile = root.querySelector('[data-bom-file]');
-  root.querySelector('[data-import-bom]').addEventListener('click', () => bomFile.click());
-  bomFile.addEventListener('change', async () => {
-    const file = bomFile.files[0];
-    if (!file) return;
-    bomFile.value = '';
-    await flush();                        // 先落盘本地改动，避免与服务器写 plan 相互覆盖
-    try {
-      const res = await api.importBom(file);
-      state.plan = res.plan;              // 服务器改了 plan，以它为准
-      state.validate = res.validate;
-      state.saveState = 'saved';
-      bus.emit('plan'); bus.emit('validate'); bus.emit('save-state');
-      const r = res.report;
-      window.alert(`BOM ${r.bom_rows} 行 · 对上 ${r.matched_parts} 种零件\n`
-        + `预填术语 ${r.filled} 条（已填的 ${r.kept_human} 条未动）\n`
-        + `未匹配零件 ${r.unmatched_count} 种${r.unmatched_count ? '：\n' + r.unmatched_parts.join('、') : ''}`);
-    } catch (err) { window.alert('导入失败：' + err.message); }
   });
   root.querySelector('[data-bulk]').addEventListener('click', () => {
     const raw = window.prompt('最大外形尺寸小于多少毫米的零件设为「不标」？（标准件如螺钉垫片）', '8');
@@ -195,7 +174,7 @@ function renderParams(el) {
 
 export function initTerms(termsEl, paramsEl) {
   root = termsEl;
-  const params = () => renderParams(paramsEl);
+  const params = () => { if (paramsEl) renderParams(paramsEl); };
   ['booted', 'plan', 'validate', 'ai-suggestions', 'structure'].forEach((evt) => bus.on(evt, renderTerms));
   ['booted'].forEach((evt) => bus.on(evt, params));
   bus.on('plan-layout', params);

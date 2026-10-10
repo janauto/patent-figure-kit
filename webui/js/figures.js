@@ -65,7 +65,8 @@ function render() {
     <div class="panel-head"><span class="stamp">02</span>图纸
       <button class="btn-min head-btn" data-new>＋ 新建图</button></div>
     <div class="cards">${cards}</div>
-    <p class="hint pad">快捷键：选中零件后按 <b>1–9</b> 直接归入第 N 张图；<b>Esc</b> 清空选择。</p>
+    <p class="hint pad">框选零件后点图卡上「加入所选」归图；<b>B</b> 框选 · <b>F</b> 对准 · <b>I</b> 只看当前图 ·
+    <b>1/2/3</b> 机位 · <b>Esc</b> 清空。</p>
   `;
 
   root.querySelector('[data-new]').addEventListener('click', () => {

@@ -1,76 +1,161 @@
-// 与 Plan Studio 服务器的全部通信。路径一律相对：单工程模式挂在 /，工作台里挂在 /p/<id>/。
-// token 来自地址栏 ?token=，存进 sessionStorage，页内跳转后仍可用。
-const fromUrl = new URLSearchParams(location.search).get('token');
+// 数据适配器：两种后端形态走同一组方法。
+//   live   —— 连本地工作台（新 §6 /v1/* 契约；保留少量旧 /api/* 只读兼容）。
+//   static —— 读版本化 manifest.json，供 GitHub Pages 等静态演示站只读运行（S2-16）。
+// 选择：URL 带 ?static 或页面在 file:// 下 → static；否则 live。
+// 无 token 不 fatal：live 无 token 时首页进入只读/引导态，不抛错（S2-16）。
+
+const params = new URLSearchParams(location.search);
+const forcedStatic = params.has('static') || location.protocol === 'file:';
+
+const fromUrl = params.get('token');
 if (fromUrl) { try { sessionStorage.setItem('studio-token', fromUrl); } catch { /* 隐私模式 */ } }
 export const token = fromUrl || (() => {
   try { return sessionStorage.getItem('studio-token') || ''; } catch { return ''; }
 })();
 
-async function call(method, path, body) {
+export const MODE = forcedStatic ? 'static' : 'live';
+export const readOnly = MODE === 'static';
+// 相对路径根：static 站挂在 Pages 子路径时用相对 URL（不得用 /static 绝对路径）。
+const base = new URL('.', location.href).pathname.replace(/\/js\/?$/, '/');
+
+function rel(p) { return (p || '').replace(/^\//, ''); }
+
+class ApiError extends Error {
+  constructor(message, status, code, hint) {
+    super(message); this.status = status; this.code = code; this.hint = hint;
+  }
+}
+
+async function call(method, path, body, headers = {}) {
   const res = await fetch(path, {
     method,
     headers: {
-      'X-Studio-Token': token,
+      ...(token ? { 'X-Studio-Token': token, Authorization: `Bearer ${token}` } : {}),
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...headers,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch { /* 保底用 statusText */ }
-    const err = new Error(detail);
-    err.status = res.status;
-    throw err;
+    let msg = res.statusText; let code = 'error'; let hint = '';
+    try {
+      const j = await res.json();
+      msg = (j.error && j.error.message) || j.detail || msg;
+      code = (j.error && j.error.code) || code;
+      hint = (j.error && j.error.hint) || '';
+    } catch { /* 保底用 statusText */ }
+    throw new ApiError(msg, res.status, code, hint);
   }
-  return res.json();
+  return { body: await res.json().catch(() => ({})), etag: res.headers.get('ETag') };
 }
 
-async function upload(path, file) {
-  const res = await fetch(`${path}?name=${encodeURIComponent(file.name)}&token=${encodeURIComponent(token)}`, {
-    method: 'POST', headers: { 'X-Studio-Token': token }, body: file,
-  });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch { /* 保底 */ }
-    throw new Error(detail);
-  }
-  return res.json();
+// -------------------------------------------------------------- static 适配
+let _manifest = null;
+async function manifest() {
+  if (_manifest) return _manifest;
+  const res = await fetch(`${base}dev/manifest.json`);
+  if (!res.ok) throw new ApiError('静态 manifest 缺失', 404, 'no_manifest');
+  _manifest = await res.json();
+  api._manifestSync = _manifest;        // 供 modelUrl 等同步取用
+  return _manifest;
 }
 
-// 服务器返回的预览地址形如 /api/preview/x.svg —— 去掉开头的 / 变成相对路径
-const rel = (p) => (p || '').replace(/^\//, '');
-const withToken = (p) => `${rel(p)}${p.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
-
+// -------------------------------------------------------------- 统一接口
 export const api = {
-  state: () => call('GET', 'api/state'),
-  importBom: (file) => upload('api/bom', file),
-  savePlan: (plan) => call('PUT', 'api/plan', { plan }),
-  render: () => call('POST', 'api/render'),
-  renderStatus: () => call('GET', 'api/render/status'),
-  exportAll: (dwg) => call('POST', 'api/export', { dwg }),
-  exportUrl: (zip) => withToken(`api/export-file/${zip}`),
-  modelUrl: () => withToken('api/model.glb'),
-  previewUrl: (p) => withToken(p),
-  // AI
-  llmStatus: () => call('GET', 'api/llm/status'),
-  draftTerms: (opts) => call('POST', 'api/llm/draft-terms', opts || { apply: true }),
-  snapshot: async (name, dataUrl) => {
-    const blob = await (await fetch(dataUrl)).blob();
-    const res = await fetch(`api/snapshot?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}`,
-      { method: 'POST', headers: { 'X-Studio-Token': token }, body: blob });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
-    return res.json();
+  mode: MODE,
+  readOnly,
+
+  async listProjects(scene) {
+    if (MODE === 'static') {
+      const m = await manifest();
+      return { projects: m.projects.map((p) => p.summary), llm: m.llm,
+        data_dir: m.data_dir, display_name: m.display_name, static: true };
+    }
+    const q = scene ? `?scene=${encodeURIComponent(scene)}` : '';
+    return (await call('GET', `${base}v1/projects${q}`)).body;
   },
-  // 结构识别
-  structure: () => call('GET', 'api/structure'),
-  analyzeStructure: () => call('POST', 'api/structure/analyze'),
-  renameGroups: (groups) => call('PUT', 'api/structure', { groups }),
-  applyStructureNames: (overwrite) => call('POST', 'api/structure/apply-names', { overwrite: !!overwrite }),
-  // 流程图
-  flowcharts: () => call('GET', 'api/flowcharts'),
-  newFlowchart: (spec) => call('POST', 'api/flowcharts', spec ? { spec } : {}),
-  saveFlowchart: (id, spec) => call('PUT', `api/flowcharts/${id}`, { spec }),
-  renderFlowchart: (id) => call('POST', `api/flowcharts/${id}/render`),
-  deleteFlowchart: (id) => call('DELETE', `api/flowcharts/${id}`),
-  aiFlowchart: (text, title, id) => call('POST', 'api/flowcharts-ai', { text, title, id }),
+
+  async getProject(id) {
+    if (MODE === 'static') {
+      const m = await manifest();
+      const p = m.projects.find((x) => x.id === id);
+      if (!p) throw new ApiError('静态站没有这个工程', 404, 'not_found');
+      return p.detail;
+    }
+    return (await call('GET', `${base}v1/projects/${id}`)).body;
+  },
+
+  async getPlan(id) {
+    if (MODE === 'static') {
+      const p = (await manifest()).projects.find((x) => x.id === id);
+      return { plan: p?.detail?.plan, etag: p?.detail?.plan_etag };
+    }
+    const { body, etag } = await call('GET', `${base}v1/projects/${id}/plan`);
+    return { plan: body.plan, etag };
+  },
+
+  async putPlan(id, plan, etag) {
+    if (MODE === 'static') throw new ApiError('静态演示站只读，改动不保存', 0, 'read_only');
+    const { body, etag: newEtag } = await call('PUT', `${base}v1/projects/${id}/plan`,
+      { plan }, etag ? { 'If-Match': etag } : {});
+    return { ...body, etag: newEtag };
+  },
+
+  async suggest(id, labelStandardParts = false) {
+    return (await call('POST', `${base}v1/projects/${id}/plan/suggest`,
+      { label_standard_parts: labelStandardParts })).body;
+  },
+  async render(id, opts = {}) {
+    const q = opts.fail ? `?fail=${opts.fail}` : '';
+    return (await call('POST', `${base}v1/projects/${id}/render${q}`,
+      { plan_etag: opts.etag })).body;
+  },
+  async export(id, opts) {
+    return (await call('POST', `${base}v1/projects/${id}/export`, opts)).body;
+  },
+  async getJob(jobId) { return (await call('GET', `${base}v1/jobs/${jobId}`)).body; },
+  async getExport(exportId) { return (await call('GET', `${base}v1/exports/${exportId}`)).body; },
+  async cancelJob(jobId) { return (await call('DELETE', `${base}v1/jobs/${jobId}`)).body; },
+  async fromExample(ex) {
+    return (await call('POST', `${base}v1/projects/from-example`, { example: ex })).body;
+  },
+  async createProject(opts = {}) {
+    const q = opts.fail ? `?fail=${opts.fail}` : '';
+    return (await call('POST', `${base}v1/projects${q}`, {})).body;
+  },
+  async draftTerms(id) {
+    return (await call('POST', `${base}v1/ai/draft-terms`, { project: id })).body;
+  },
+  async llmStatus() {
+    if (MODE === 'static') return (await manifest()).llm;
+    return (await call('GET', `${base}v1/llm/status`)).body;
+  },
+
+  // ---- 资源 URL（相对，static 与 live 都可用）----
+  modelUrl(id) { return MODE === 'static'
+    ? `${base}${rel((this._m(id) || {}).model_url || `v1/projects/${id}/model.glb`)}`
+    : `${base}v1/projects/${id}/model.glb`; },
+  previewUrl(p) { return `${base}${rel(p)}`; },
+  _manifestSync: null,
+  _m(id) { return (this._manifestSync?.projects || []).find((x) => x.id === id)?.detail; },
+
+  // ---- SSE：返回一个可关闭的订阅；static 下立即「已完成」----
+  jobEvents(jobId, handlers = {}) {
+    if (MODE === 'static') {
+      setTimeout(() => handlers.done && handlers.done({}), 0);
+      return { close() {} };
+    }
+    const es = new EventSource(`${base}v1/jobs/${jobId}/events`);
+    const on = (name, fn) => fn && es.addEventListener(name, (e) => {
+      let d = {}; try { d = JSON.parse(e.data); } catch { /* 空事件 */ } fn(d, e.lastEventId);
+    });
+    on('stage', handlers.stage);
+    on('log', handlers.log);
+    on('done', (d, id) => { handlers.done && handlers.done(d, id); es.close(); });
+    on('error', (d, id) => { handlers.fail && handlers.fail(d, id); es.close(); });
+    es.onerror = () => { handlers.disconnect && handlers.disconnect(); };
+    return { close() { es.close(); } };
+  },
 };
+
+export { ApiError };

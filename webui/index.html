@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>图纸规划台 · Plan Studio</title>
+<title>{name} · 规划台</title>
+<link rel="stylesheet" href="./tokens.css">
 <link rel="stylesheet" href="./app.css">
 <script type="importmap">
 {
@@ -15,55 +16,93 @@
 </script>
 </head>
 <body>
-  <header id="toolbar"></header>
+  <header id="toolbar">
+    <a class="tb-home" href="./home.html" title="回到工程列表">←</a>
+    <div class="brand-mark sm">
+      <span class="brand-glyph" aria-hidden="true" data-brand-slot="glyph">墨</span>
+      <span class="brand-text"><b class="brand-name" data-brand-slot="display-name">墨线</b></span>
+    </div>
+    <div class="tb-proj mono" id="tb-proj"></div>
 
-  <main id="layout">
-    <aside id="left">
-      <section id="parts"></section>
-      <section id="issues" hidden></section>
-    </aside>
+    <nav class="stage-nav" id="stage-nav">
+      <button class="stage-tab on" data-stage="plan"><span class="seal">03</span>规划台</button>
+      <button class="stage-tab" data-stage="qa"><span class="seal">04</span>出图与 QA</button>
+      <button class="stage-tab" data-stage="export"><span class="seal">05</span>导出</button>
+    </nav>
 
-    <section id="stage">
-      <div id="view-tools">
-        <label class="vt" title="选中的零件始终实心；没选中时作用于全部零件">透明度
-          <input type="range" id="v-opacity" min="10" max="100" step="5" value="100"><output id="v-opacity-out">100%</output></label>
-        <label class="vt" title="只影响 3D 观察，不影响出图">爆炸
-          <input type="range" id="v-explode" min="0" max="100" step="2" value="0"><output id="v-explode-out">0%</output></label>
-        <select id="v-mode" title="爆炸方式">
-          <option value="group">按结构拉开</option><option value="radial">逐件径向</option><option value="axis">沿主轴</option></select>
-        <select id="v-color" title="着色方式">
-          <option value="structure">按结构着色</option><option value="figure">按图纸着色</option></select>
-        <button id="v-reset" class="btn-min" title="透明度、爆炸、隐藏全部复位">复位</button>
-        <button id="v-snap" class="btn-min" title="把当前 3D 视图存成图片，工作台首页的功能介绍会用它">存为展示图</button>
-      </div>
-      <div id="viewport">
-        <i class="reg reg-tl"></i><i class="reg reg-tr"></i>
-        <i class="reg reg-bl"></i><i class="reg reg-br"></i>
-      </div>
-      <div id="stage-tools">
-        <button id="btn-box" class="btn-min btn-box" title="拖框多选零件（快捷键 B）">⬚ 框选</button>
-        <button id="btn-frame" class="btn-min" title="framing">对准视图</button>
-        <label class="check-inline"><input type="checkbox" id="btn-isolate">只看当前图</label>
-        <span id="box-hint" class="hint" hidden>左→右拖 = 窗选（整件在框内）· 右→左拖 = 交叉选（碰到即选）· Shift 加选 · Alt 减选 · 框内被遮挡的零件也会选中</span>
-      </div>
+    <div class="tb-right">
+      <span id="ai-badge" class="ai-badge" title="AI 通道状态">AI</span>
+      <button class="icon-btn" id="theme-toggle" title="切换深浅外壳（图纸恒白）" aria-label="切换主题">◐</button>
+      <span class="tb-save" id="tb-save"></span>
+    </div>
+  </header>
+
+  <main id="stage-host">
+    <!-- 屏③ 规划台 -->
+    <section class="stage-plan" data-stage="plan">
+      <aside id="left">
+        <div class="panel-head"><span class="seal">结构</span>零件
+          <button class="btn ghost sm" id="parts-mode" title="结构组 / 平铺切换">平铺</button></div>
+        <section id="parts"></section>
+      </aside>
+
+      <section id="stage">
+        <div id="view-tools">
+          <label class="vt">透明度
+            <input type="range" id="v-opacity" min="10" max="100" step="5" value="100">
+            <output id="v-opacity-out" class="mono">100%</output></label>
+          <label class="vt">爆炸
+            <input type="range" id="v-explode" min="0" max="100" step="2" value="0">
+            <output id="v-explode-out" class="mono">0%</output></label>
+          <select id="v-mode" class="sel-sm" title="爆炸方式">
+            <option value="group">按结构拉开</option><option value="radial">逐件径向</option><option value="axis">沿主轴</option></select>
+          <select id="v-color" class="sel-sm" title="着色方式">
+            <option value="structure">按结构着色</option><option value="figure">按图纸着色</option></select>
+          <div class="view-presets" title="机位预设（1 前 / 2 顶 / 3 轴测）">
+            <button class="btn ghost sm" data-preset="front">前 <kbd>1</kbd></button>
+            <button class="btn ghost sm" data-preset="top">顶 <kbd>2</kbd></button>
+            <button class="btn ghost sm" data-preset="iso">轴测 <kbd>3</kbd></button>
+          </div>
+          <button class="btn ghost sm" id="v-reset">复位</button>
+        </div>
+        <div id="viewport">
+          <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
+          <div class="viewport-overlay" id="viewport-overlay"></div>
+        </div>
+        <div id="stage-tools">
+          <button class="btn ghost sm btn-box" id="btn-box" title="拖框多选（B）">⬚ 框选 <kbd>B</kbd></button>
+          <button class="btn ghost sm" id="btn-frame" title="对准视图（F）">◎ 对准 <kbd>F</kbd></button>
+          <label class="switch sm"><input type="checkbox" id="btn-isolate"> 只看当前图 <kbd>I</kbd></label>
+          <span id="box-hint" class="hint" hidden>左→右 窗选 · 右→左 交叉选 · Shift 加选 · Alt 减选</span>
+        </div>
+        <!-- AI 起名浮条（F9）：框选后出现，中性「AI」标记，不覆盖人工 -->
+        <div class="ai-floatbar" id="ai-floatbar" hidden></div>
+      </section>
+
+      <aside id="right">
+        <nav id="rtabs">
+          <button class="rtab on" data-tab="candidates">候选分图</button>
+          <button class="rtab" data-tab="figures">图纸</button>
+          <button class="rtab" data-tab="terms">术语</button>
+        </nav>
+        <section class="rpane" data-pane="candidates" id="candidates"></section>
+        <section class="rpane" data-pane="figures" id="figures" hidden></section>
+        <section class="rpane" data-pane="terms" id="terms" hidden></section>
+      </aside>
     </section>
 
-    <aside id="right">
-      <nav id="rtabs">
-        <button class="rtab on" data-tab="figures">图纸</button>
-        <button class="rtab" data-tab="terms">术语</button>
-        <button class="rtab" data-tab="flows">流程图</button>
-        <button class="rtab" data-tab="params">参数</button>
-      </nav>
-      <section class="rpane" data-pane="figures" id="figures"></section>
-      <section class="rpane" data-pane="terms" id="terms" hidden></section>
-      <section class="rpane" data-pane="flows" id="flows" hidden></section>
-      <section class="rpane" data-pane="params" id="params" hidden></section>
-    </aside>
+    <!-- 屏④ 出图与 QA -->
+    <section class="stage-qa" data-stage="qa" hidden>
+      <div id="qa-host"></div>
+    </section>
+
+    <!-- 屏⑤ 导出 -->
+    <section class="stage-export" data-stage="export" hidden>
+      <div id="export-host"></div>
+    </section>
   </main>
 
-  <footer id="drawer"></footer>
-
+  <div id="toast" class="toast" hidden></div>
   <script type="module" src="./js/main.js"></script>
 </body>
 </html>

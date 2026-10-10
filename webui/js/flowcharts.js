@@ -59,7 +59,7 @@ function render() {
       <div class="row"><input data-title placeholder="图名（可选），如：箱体温度控制方法的流程图"
         value="${esc(state.flowDraftTitle || '')}">
       <button class="btn-ai" data-ai ${busy || !state.llm || state.llm.provider === 'none' ? 'disabled' : ''}>
-        ${busy === 'ai' ? '<span class="spin dark"></span> 生成中…' : '✦ AI 生成流程图'}</button></div>
+        ${busy === 'ai' ? '<span class="spin dark"></span> 生成中…' : 'AI 生成流程图'}</button></div>
       <p class="hint">AI 只整理步骤与走向；S101 步骤号、框与连线的位置都由程序计算。图号接在结构附图之后。</p>
     </div>
     <div class="flow-list">${cards || '<p class="hint pad">还没有流程图</p>'}</div>

@@ -30,6 +30,22 @@ let tip = null;
 const samples = new Map();        // 零件名 -> 世界坐标采样点 Float32Array（框选用，载入后算一次）
 const SAMPLE_PER_MESH = 360;
 
+// ---- 按需渲染（research §8.2 #1）：只在变化时渲染，不再每帧空转 ----
+let needsRender = false;
+let fullPixelRatio = 1;
+let dragging = false;             // 拖转时降 pixelRatio 到 1，停手恢复
+let renderCount = 0;              // 仅用于性能自测（按需渲染前后对比）
+export function requestRender() {
+  if (!needsRender && renderer) { needsRender = true; requestAnimationFrame(renderFrame); }
+}
+function renderFrame() {
+  needsRender = false;
+  const still = controls.update();            // damping 仍在滑动时返回 true
+  renderer.render(scene, camera);
+  renderCount += 1;
+  if (controls.enableDamping && still) requestRender();   // 让惯性滑完
+}
+
 function collectMeshes(rootObj) {
   // GLTFLoader 会给重名对象追加 _1/_2 后缀（同一零件的节点与 mesh 同名也算重名），
   // 所以 mesh 名不能直接当零件名用。以 assembly.json 的零件表为权威做归一：
@@ -107,6 +123,7 @@ export function repaint() {
       }
     });
   });
+  requestRender();
 }
 
 export function flashParts(names, ms = 1600) {
@@ -134,6 +151,37 @@ export function frameAll(padding = 1.35) {
   camera.near = size / 200; camera.far = size * 20;
   camera.updateProjectionMatrix();
   controls.update();
+  requestRender();
+}
+
+// ---- 机位预设（F5-lite：1 前 / 2 顶 / 3 轴测）；320ms 缓动，走按需渲染 ----
+export function setPreset(which) {
+  if (!controls) return;
+  scene.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  meshesByName.forEach((meshes) => meshes.forEach((m) => { if (m.visible) box.expandByObject(m); }));
+  if (box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3()).length();
+  const center = box.getCenter(new THREE.Vector3());
+  const dirs = { front: [0, 0, 1], top: [0, 1, 0.001], iso: [1, -0.7, 0.8] };
+  const d = new THREE.Vector3(...(dirs[which] || dirs.iso)).normalize();
+  const target = center.clone().addScaledVector(d, size * 1.35);
+  const from = camera.position.clone();
+  const fromTgt = controls.target.clone();
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const dur = reduce ? 0 : 320;
+  const t0 = performance.now();
+  const ease = (x) => 1 - (1 - x) ** 3;
+  const step = (now) => {
+    const k = dur ? Math.min(1, (now - t0) / dur) : 1;
+    const e = ease(k);
+    camera.position.lerpVectors(from, target, e);
+    controls.target.lerpVectors(fromTgt, center, e);
+    controls.update();
+    renderer.render(scene, camera);
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function pick(event) {
@@ -315,7 +363,8 @@ function attachMarquee(container) {
 
 export async function initViewer(container) {
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  fullPixelRatio = Math.min(window.devicePixelRatio, 2);
+  renderer.setPixelRatio(fullPixelRatio);
   container.appendChild(renderer.domElement);
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(40, 1, 0.1, 5000);
@@ -331,7 +380,7 @@ export async function initViewer(container) {
   rim.position.set(-2, 1.5, -1);
   scene.add(rim);
 
-  const gltf = await new GLTFLoader().loadAsync(api.modelUrl());
+  const gltf = await new GLTFLoader().loadAsync(api.modelUrl(state.projectId));
   scene.add(gltf.scene);
   collectMeshes(gltf.scene);
   frameAll();
@@ -346,16 +395,29 @@ export async function initViewer(container) {
 
   const resize = () => {
     const { clientWidth: w, clientHeight: h } = container;
+    if (!w || !h) return;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    requestRender();
   };
   new ResizeObserver(resize).observe(container);
   resize();
 
   let downAt = null;
-  renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    downAt = [e.clientX, e.clientY];
+    if (!boxMode) {                           // 拖转开始：降 pixelRatio 到 1 保帧率
+      dragging = true;
+      renderer.setPixelRatio(1);
+    }
+  });
   renderer.domElement.addEventListener('pointerup', (e) => {
+    if (dragging) {                           // 停手：恢复像素比并重绘一帧高清
+      dragging = false;
+      renderer.setPixelRatio(fullPixelRatio);
+      requestRender();
+    }
     if (!downAt || boxMode) { downAt = null; return; }
     const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
     downAt = null;
@@ -363,31 +425,35 @@ export async function initViewer(container) {
     const name = pick(e);
     if (name) toggleSelect(name);
   });
+  // 拾取/悬停：rAF 合帧，仅在 hover 目标变化时重绘（research §8.2 #2）
+  let pickPending = null;
   renderer.domElement.addEventListener('pointermove', (e) => {
     if (boxMode && e.buttons) return;
-    const name = pick(e);
-    showTip(e, name);
-    if (name !== hovered) {
-      hovered = name;
-      container.style.cursor = name ? 'pointer' : 'grab';
-      container.dispatchEvent(new CustomEvent('part-hover', { detail: name }));
-      repaint();
-    }
+    pickPending = e;
+    if (pickPending._scheduled) return;
+    pickPending._scheduled = true;
+    requestAnimationFrame(() => {
+      const ev = pickPending; pickPending = null;
+      if (!ev) return;
+      const name = pick(ev);
+      showTip(ev, name);
+      if (name !== hovered) {
+        hovered = name;
+        container.style.cursor = name ? 'pointer' : 'grab';
+        container.dispatchEvent(new CustomEvent('part-hover', { detail: name }));
+        repaint();                            // repaint 内部 requestRender
+      }
+    });
   });
 
-  const animate = () => {
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-  };
-  animate();
+  controls.addEventListener('change', requestRender);   // 拖转/缩放时按需重绘
 
   bus.on('plan', repaint);
   bus.on('view', () => { applyExplode(); repaint(); });
   bus.on('structure', () => { applyExplode(); repaint(); });
   bus.on('selection', repaint);
   bus.on('active-figure', repaint);
-  repaint();   // 初次上色：viewer 在 booted 事件之后才建好，错过了那班车
+  repaint();   // 初次上色 + 首帧渲染：viewer 在 booted 事件之后才建好，错过了那班车
   const handle = {
     setIsolate(on) { isolate = on; repaint(); frameAll(); },
     setBoxMode,
@@ -416,7 +482,9 @@ export async function initViewer(container) {
     },
     frameAll,
     partCount: meshesByName.size,
-    meshesByName, scene, camera,   // 本地调试句柄（单机工具，无隐私面）
+    get renderCount() { return renderCount; },   // 性能自测：按需渲染下空闲应为 0 增长
+    get pixelRatio() { return renderer.getPixelRatio(); },
+    meshesByName, scene, camera, renderer,   // 本地调试句柄（单机工具，无隐私面）
   };
   window.planStudioViewer = handle;
   return handle;

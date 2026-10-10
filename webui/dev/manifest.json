@@ -1,0 +1,2519 @@
+{
+ "schema": "inkline-static-manifest/1",
+ "version": "2026-10-11",
+ "display_name": "墨线",
+ "data_dir": "（静态演示站 · 预计算展示）",
+ "llm": {
+  "provider": "deepseek",
+  "provider_label": "DeepSeek V3.2（API）",
+  "configured": true
+ },
+ "projects": [
+  {
+   "id": "gearbox",
+   "summary": {
+    "project_id": "gearbox",
+    "title": "行星齿轮减速器",
+    "description": "电机 + 行星齿轮系 + 轴承端盖，同轴堆叠",
+    "step_name": "demo-planetary-gearbox.stp",
+    "example": true,
+    "status": "ready",
+    "message": "",
+    "plan_etag": "W/\"gearbox-1\"",
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true
+    },
+    "figures": 2,
+    "figures_pass": 2,
+    "flowcharts": 0,
+    "thumb": "dev/fixtures/gearbox/fig1_annotated.svg"
+   },
+   "detail": {
+    "project_id": "gearbox",
+    "title": "行星齿轮减速器",
+    "description": "电机 + 行星齿轮系 + 轴承端盖，同轴堆叠",
+    "step_name": "demo-planetary-gearbox.stp",
+    "example": true,
+    "status": "ready",
+    "message": "",
+    "plan_etag": "W/\"gearbox-1\"",
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true
+    },
+    "figures": 2,
+    "figures_pass": 2,
+    "flowcharts": 0,
+    "thumb": "dev/fixtures/gearbox/fig1_annotated.svg",
+    "assembly": {
+     "schema": "patent-assembly/1",
+     "source": {
+      "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-planetary-gearbox.stp",
+      "sha256": "b3f786bc8ba867bb2b91c7ec0029d5f27a921e58a34bf2812b8b128b88c565d0",
+      "instances": 27,
+      "distinct": 15
+     },
+     "units": "mm",
+     "bbox": {
+      "lo": [
+       -46.0,
+       -46.0,
+       -68.0
+      ],
+      "hi": [
+       46.0,
+       46.0,
+       92.0
+      ],
+      "size": [
+       92.0,
+       92.0,
+       160.0
+      ]
+     },
+     "parts": [
+      {
+       "name": "PGB-END-COVER",
+       "instances": 1,
+       "bbox_size": [
+        92.0,
+        92.0,
+        18.0
+       ],
+       "max_dim": 92.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         45.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-END-COVER"
+      },
+      {
+       "name": "PGB-MOTOR-HOUSING",
+       "instances": 1,
+       "bbox_size": [
+        61.0,
+        61.161,
+        62.0
+       ],
+       "max_dim": 62.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         -29.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-MOTOR-ASM/PGB-MOTOR-HOUSING"
+      },
+      {
+       "name": "PGB-MOTOR-REAR-CAP",
+       "instances": 1,
+       "bbox_size": [
+        60.0,
+        60.0,
+        8.0
+       ],
+       "max_dim": 60.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         -64.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-MOTOR-ASM/PGB-MOTOR-REAR-CAP"
+      },
+      {
+       "name": "PGB-MOTOR-SHAFT",
+       "instances": 1,
+       "bbox_size": [
+        8.0,
+        8.0,
+        30.0
+       ],
+       "max_dim": 30.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         7.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-MOTOR-ASM/PGB-MOTOR-SHAFT"
+      },
+      {
+       "name": "PGB-MOUNT-FLANGE",
+       "instances": 1,
+       "bbox_size": [
+        84.0,
+        84.0,
+        10.0
+       ],
+       "max_dim": 84.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         7.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-MOUNT-FLANGE"
+      },
+      {
+       "name": "PGB-OIL-SEAL",
+       "instances": 1,
+       "bbox_size": [
+        44.0,
+        44.0,
+        5.0
+       ],
+       "max_dim": 44.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         56.5
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-OIL-SEAL"
+      },
+      {
+       "name": "PGB-OUTPUT-BEARING",
+       "instances": 1,
+       "bbox_size": [
+        44.0,
+        44.0,
+        10.0
+       ],
+       "max_dim": 44.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         45.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-OUTPUT-BEARING"
+      },
+      {
+       "name": "PGB-OUTPUT-SHAFT",
+       "instances": 1,
+       "bbox_size": [
+        22.0,
+        20.0,
+        52.0
+       ],
+       "max_dim": 52.0,
+       "centers": [
+        [
+         1.0,
+         0.0,
+         66.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-OUTPUT-SHAFT"
+      },
+      {
+       "name": "PGB-PLANET-CARRIER",
+       "instances": 1,
+       "bbox_size": [
+        64.0,
+        64.0,
+        16.0
+       ],
+       "max_dim": 64.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         42.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-CARRIER-ASM/PGB-PLANET-CARRIER"
+      },
+      {
+       "name": "PGB-PLANET-GEAR",
+       "instances": 3,
+       "bbox_size": [
+        29.945,
+        30.0,
+        14.0
+       ],
+       "max_dim": 30.0,
+       "centers": [
+        [
+         -11.25,
+         -19.485572,
+         25.0
+        ],
+        [
+         -11.25,
+         19.485572,
+         25.0
+        ],
+        [
+         22.5,
+         0.0,
+         25.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-CARRIER-ASM/PGB-PLANET-GEAR"
+      },
+      {
+       "name": "PGB-PLANET-PIN",
+       "instances": 3,
+       "bbox_size": [
+        6.0,
+        6.0,
+        22.0
+       ],
+       "max_dim": 22.0,
+       "centers": [
+        [
+         -11.25,
+         -19.485572,
+         27.0
+        ],
+        [
+         -11.25,
+         19.485572,
+         27.0
+        ],
+        [
+         22.5,
+         0.0,
+         27.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-CARRIER-ASM/PGB-PLANET-PIN"
+      },
+      {
+       "name": "PGB-RING-GEAR",
+       "instances": 1,
+       "bbox_size": [
+        92.0,
+        92.0,
+        24.0
+       ],
+       "max_dim": 92.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         24.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-RING-GEAR"
+      },
+      {
+       "name": "PGB-SCREW-M5",
+       "instances": 6,
+       "bbox_size": [
+        8.0,
+        8.0,
+        30.5
+       ],
+       "max_dim": 30.5,
+       "centers": [
+        [
+         -42.0,
+         0.0,
+         33.25
+        ],
+        [
+         -21.0,
+         -36.373067,
+         33.25
+        ],
+        [
+         -21.0,
+         36.373067,
+         33.25
+        ],
+        [
+         21.0,
+         -36.373067,
+         33.25
+        ],
+        [
+         21.0,
+         36.373067,
+         33.25
+        ],
+        [
+         42.0,
+         0.0,
+         33.25
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-SCREW-M5"
+      },
+      {
+       "name": "PGB-SCREW-M6",
+       "instances": 4,
+       "bbox_size": [
+        9.6,
+        9.6,
+        19.4
+       ],
+       "max_dim": 19.4,
+       "centers": [
+        [
+         -32.526912,
+         -32.526912,
+         7.7
+        ],
+        [
+         -32.526912,
+         32.526912,
+         7.7
+        ],
+        [
+         32.526912,
+         -32.526912,
+         7.7
+        ],
+        [
+         32.526912,
+         32.526912,
+         7.7
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-SCREW-M6"
+      },
+      {
+       "name": "PGB-SUN-GEAR",
+       "instances": 1,
+       "bbox_size": [
+        20.926,
+        20.926,
+        16.0
+       ],
+       "max_dim": 20.926,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         24.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-PGB-ASSY/PGB-SUN-GEAR"
+      }
+     ],
+     "principal_axis": {
+      "vector": [
+       0.0,
+       0.0,
+       1.0
+      ],
+      "nearest": "z",
+      "spread_ratio": 1.513
+     },
+     "coaxial_groups": [
+      {
+       "id": "g1",
+       "axis": [
+        0.0,
+        0.0,
+        1.0
+       ],
+       "origin": [
+        0.0,
+        0.0,
+        0.0
+       ],
+       "members": [
+        "PGB-END-COVER",
+        "PGB-MOTOR-REAR-CAP",
+        "PGB-MOTOR-SHAFT",
+        "PGB-MOUNT-FLANGE",
+        "PGB-OIL-SEAL",
+        "PGB-OUTPUT-BEARING",
+        "PGB-PLANET-CARRIER",
+        "PGB-RING-GEAR",
+        "PGB-SUN-GEAR"
+       ],
+       "instances": 9,
+       "extent": [
+        -68.0,
+        59.0
+       ]
+      },
+      {
+       "id": "g2",
+       "axis": [
+        0.0,
+        0.0,
+        1.0
+       ],
+       "origin": [
+        -11.25,
+        -19.485572,
+        0.0
+       ],
+       "members": [
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN"
+       ],
+       "instances": 2,
+       "extent": [
+        16.0,
+        38.0
+       ]
+      },
+      {
+       "id": "g3",
+       "axis": [
+        0.0,
+        0.0,
+        1.0
+       ],
+       "origin": [
+        -11.25,
+        19.485572,
+        0.0
+       ],
+       "members": [
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN"
+       ],
+       "instances": 2,
+       "extent": [
+        16.0,
+        38.0
+       ]
+      },
+      {
+       "id": "g4",
+       "axis": [
+        0.0,
+        0.0,
+        1.0
+       ],
+       "origin": [
+        22.5,
+        0.0,
+        0.0
+       ],
+       "members": [
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN"
+       ],
+       "instances": 2,
+       "extent": [
+        16.0,
+        38.0
+       ]
+      }
+     ],
+     "stack_order": [
+      "PGB-MOTOR-REAR-CAP",
+      "PGB-MOTOR-HOUSING",
+      "PGB-MOTOR-SHAFT",
+      "PGB-MOUNT-FLANGE",
+      "PGB-SCREW-M6",
+      "PGB-RING-GEAR",
+      "PGB-SUN-GEAR",
+      "PGB-PLANET-GEAR",
+      "PGB-PLANET-PIN",
+      "PGB-SCREW-M5",
+      "PGB-PLANET-CARRIER",
+      "PGB-END-COVER",
+      "PGB-OUTPUT-BEARING",
+      "PGB-OIL-SEAL",
+      "PGB-OUTPUT-SHAFT"
+     ],
+     "size_tiers": [
+      {
+       "tier": "large",
+       "members": [
+        "PGB-END-COVER",
+        "PGB-MOTOR-HOUSING",
+        "PGB-MOUNT-FLANGE",
+        "PGB-PLANET-CARRIER",
+        "PGB-RING-GEAR"
+       ]
+      },
+      {
+       "tier": "medium",
+       "members": [
+        "PGB-MOTOR-REAR-CAP",
+        "PGB-OIL-SEAL",
+        "PGB-OUTPUT-BEARING",
+        "PGB-OUTPUT-SHAFT",
+        "PGB-SCREW-M5"
+       ]
+      },
+      {
+       "tier": "small",
+       "members": [
+        "PGB-MOTOR-SHAFT",
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN",
+        "PGB-SCREW-M6",
+        "PGB-SUN-GEAR"
+       ]
+      }
+     ],
+     "split_suggestions": [],
+     "warnings": []
+    },
+    "structure": {
+     "source": "ai",
+     "provider": "DeepSeek V3.2",
+     "created": "2026-10-11 10:22",
+     "groups": [
+      {
+       "id": "g-motor",
+       "name": "电机子装配",
+       "role": "提供旋转动力",
+       "parts": [
+        "PGB-MOTOR-HOUSING",
+        "PGB-MOTOR-REAR-CAP",
+        "PGB-MOUNT-FLANGE"
+       ]
+      },
+      {
+       "id": "g-gear",
+       "name": "行星齿轮系",
+       "role": "减速与扭矩放大",
+       "parts": [
+        "PGB-SUN-GEAR",
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN",
+        "PGB-PLANET-CARRIER",
+        "PGB-RING-GEAR"
+       ]
+      },
+      {
+       "id": "g-output",
+       "name": "输出与密封",
+       "role": "输出轴承、端盖与密封",
+       "parts": [
+        "PGB-OUTPUT-SHAFT",
+        "PGB-OUTPUT-BEARING",
+        "PGB-END-COVER",
+        "PGB-OIL-SEAL"
+       ]
+      },
+      {
+       "id": "g-std",
+       "name": "标准件",
+       "role": "紧固螺钉（默认不发标记）",
+       "parts": [
+        "PGB-SCREW-M3",
+        "PGB-SCREW-M4"
+       ]
+      }
+     ],
+     "names": {
+      "PGB-MOTOR-HOUSING": {
+       "name": "电机壳体",
+       "confidence": "high"
+      },
+      "PGB-MOTOR-REAR-CAP": {
+       "name": "电机后盖",
+       "confidence": "high"
+      },
+      "PGB-MOUNT-FLANGE": {
+       "name": "安装法兰",
+       "confidence": "high"
+      },
+      "PGB-RING-GEAR": {
+       "name": "内齿圈",
+       "confidence": "high"
+      },
+      "PGB-END-COVER": {
+       "name": "端盖",
+       "confidence": "high"
+      },
+      "PGB-OUTPUT-SHAFT": {
+       "name": "输出轴",
+       "confidence": "high"
+      },
+      "PGB-SUN-GEAR": {
+       "name": "太阳轮",
+       "confidence": "high"
+      },
+      "PGB-PLANET-GEAR": {
+       "name": "行星轮",
+       "confidence": "high"
+      },
+      "PGB-PLANET-PIN": {
+       "name": "行星销",
+       "confidence": "low"
+      },
+      "PGB-PLANET-CARRIER": {
+       "name": "行星架",
+       "confidence": "high"
+      },
+      "PGB-OUTPUT-BEARING": {
+       "name": "输出轴承",
+       "confidence": "high"
+      },
+      "PGB-OIL-SEAL": {
+       "name": "油封",
+       "confidence": "high"
+      }
+     }
+    },
+    "candidates": [
+     {
+      "fig_id": "fig1",
+      "caption": "整体结构示意图",
+      "kind": "assembly",
+      "members": [
+       "电机子装配",
+       "输出与密封",
+       "内齿圈"
+      ],
+      "status": "pass",
+      "reason": "字高 7.0 mm、占用 0.79，13 项 QA 全过",
+      "labels": 6
+     },
+     {
+      "fig_id": "fig2",
+      "caption": "齿轮系分解示意图",
+      "kind": "exploded",
+      "members": [
+       "行星齿轮系",
+       "输出轴"
+      ],
+      "status": "pass",
+      "reason": "沿轴 121.9° 爆炸，9 个标记无交叉，13 项 QA 全过",
+      "labels": 9
+     }
+    ],
+    "render": {
+     "ok": true,
+     "figures": [
+      {
+       "id": "fig1",
+       "number": 1,
+       "pass": true,
+       "caption": "行星齿轮减速器整体结构示意图",
+       "kind": "assembly",
+       "qa": {
+        "schema": "patent-figure-qa/1",
+        "file": "fig1.dxf",
+        "pass": true,
+        "checks": [
+         {
+          "id": "geometry_occupancy",
+          "pass": true,
+          "value": 0.787967,
+          "threshold": ">=0.55",
+          "detail": "GEOM∪HIDDEN 包围盒 138.000×193.490=26701.7 mm²，全部实体包围盒 141.992×238.653=33886.8 mm²。",
+          "hint": "版面被非几何实体稀释了：把 layout.engineering_table 设为 false（明细表只允许出现在 <id>_engineering.dxf，见契约 §8），并删掉 TABLE / NOTE 图层上的说明文字；标记边槽过宽时改 figures[].layout 的字号来源（对标准件设 terms[].label=\"none\" 可减少标记）。"
+         },
+         {
+          "id": "sheet_fill",
+          "pass": true,
+          "value": 0.88757,
+          "threshold": ">=0.55",
+          "detail": "几何 138.000×193.490 mm，可用区 aw×ah=138.0×218.0 mm（h=7.00 mm（读自 NUM 图层 TEXT））",
+          "hint": "纸没填满：把 figures[].layout.axis_angle 改回 \"auto\"，让 renderer 逐图闭式求最优角；已经是 auto 时说明旋转救不回来——换 layout.view，或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "text_height_mm",
+          "pass": true,
+          "value": 7.0,
+          "threshold": ">=3.5",
+          "detail": "NUM 图层最小字高 7.00 mm（共 6 个标记）",
+          "hint": "字太小意味着被标注件在图面上太小：对标准件设 terms[].label=\"none\"，按 assembly.json:split_suggestions 拆图，或把 layout.density 改成 \"compact\"。"
+         },
+         {
+          "id": "text_slot_ratio",
+          "pass": true,
+          "value": 0.036178,
+          "threshold": "<=0.6",
+          "detail": "最小被标注几何簇外廓 193.49 mm（锚点 16.0, 113.8），最小字高 7.00 mm，口径为「沿每条 LEADER 首点找几何连通簇取 max(w,h)」（§11.10 #4）。",
+          "hint": "被标注件相对字号太小：对该零件设 terms[].label=\"none\"，或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "label_overlap_pairs",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 对附图标记外接框相交（共 6 个标记）。外接框按 GB/T 14691 B 型字宽 CHAR_W=0.71（= h/√2 = 0.7071 向上取整）、水平留白 PAD_X=0.30·h、垂直留白 PAD_Y=0.20·h 还原，来源 §11.2.3。",
+          "hint": "标记互相碾压：减少本图标记数（对标准件设 terms[].label=\"none\"），或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "leader_hits_numeral_box",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 处引线段与附图标记外接框相交（引线 6 条）。",
+          "hint": "引线压住了数字：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图；若反复出现，说明本图标记密度已超载。"
+         },
+         {
+          "id": "leader_crossing",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 对引线段真交叉（共端点与共线重合不计），引线 6 条。",
+          "hint": "引线交叉：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "leader_anchor_gap",
+          "pass": true,
+          "value": 2.334,
+          "threshold": "<=2.377 mm",
+          "detail": "6 条引线的锚点离最近几何：中位 0.000 mm、最大 2.334 mm（上限 2.377 mm = 图幅对角 237.7 mm 的 1.0%）。",
+          "hint": "引线没有落在它所指的零件轮廓上，读图者无法判断标记指的是哪个件。若该零件在本视图里被遮挡，改用分解图标注它，或把它从本图的 members 中移除。"
+         },
+         {
+          "id": "part_bbox_overlap_pairs",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "kind=assembly：总装图的零件本来就互相遮挡，本项只对 exploded 生效（§5.5）。",
+          "hint": "若本图应当是分解图，把 figures[].kind 改成 \"exploded\"。"
+         },
+         {
+          "id": "labels_per_figure",
+          "pass": true,
+          "value": 6,
+          "threshold": "<=20",
+          "detail": "本图有 6 个附图标记。",
+          "hint": "拆图：按 assembly.json:split_suggestions 把该 figure 拆成多张，或对标准件设 terms[].label=\"none\"。"
+         },
+         {
+          "id": "non_numeral_text_ratio",
+          "pass": true,
+          "value": 0.0,
+          "threshold": "<=0.1",
+          "detail": "0/7 条文字既不是附图标记也不是图题（CAPTION 图层按 §8 计入允许项）。",
+          "hint": "专利附图只允许几何、引线、附图标记与图题（契约 §8）：把 layout.engineering_table 设为 false，并删掉零件名 / 说明文字。"
+         },
+         {
+          "id": "non_continuous",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 个实体的有效线型不是 CONTINUOUS（BYLAYER 已按图层线型解析）。",
+          "hint": "这一条不是 plan 的问题，是写出端的问题：sheet.py 必须把所有实体与图层写成 CONTINUOUS（契约 §5.4）。若线型来自导入的图块，请在 plan 的 source.exclude 里排除对应零件。"
+         },
+         {
+          "id": "forbidden_text",
+          "pass": true,
+          "value": 0,
+          "threshold": "==0",
+          "detail": "0 条文字命中内部件号 / 图号形状（共 7 条文字，3 条模式）。",
+          "hint": "plan 的 terms[].term 里出现了内部件号 / 图号形状的字符串，改成中文技术名词；并确认 layout.engineering_table 为 false（契约 §8 禁止附图出现件号）。"
+         }
+        ],
+        "summary": {
+         "failed": 0,
+         "passed": 13
+        }
+       },
+       "svg": "dev/fixtures/gearbox/fig1.svg",
+       "variants": {
+        "annotated": "dev/fixtures/gearbox/fig1_annotated.svg",
+        "filing": "dev/fixtures/gearbox/fig1_filing.svg",
+        "raw": "dev/fixtures/gearbox/fig1.svg"
+       },
+       "annotation": {
+        "table": {
+         "rows": [
+          {
+           "numeral": 1,
+           "name": "电机壳体"
+          },
+          {
+           "numeral": 2,
+           "name": "电机后盖"
+          },
+          {
+           "numeral": 3,
+           "name": "安装法兰"
+          },
+          {
+           "numeral": 4,
+           "name": "内齿圈"
+          },
+          {
+           "numeral": 5,
+           "name": "端盖"
+          },
+          {
+           "numeral": 6,
+           "name": "输出轴"
+          }
+         ],
+         "corner": "左下",
+         "blocks": 1
+        },
+        "warnings": []
+       }
+      },
+      {
+       "id": "fig2",
+       "number": 2,
+       "pass": true,
+       "caption": "行星齿轮减速器齿轮系分解示意图",
+       "kind": "exploded",
+       "qa": {
+        "schema": "patent-figure-qa/1",
+        "file": "fig2.dxf",
+        "pass": true,
+        "checks": [
+         {
+          "id": "geometry_occupancy",
+          "pass": true,
+          "value": 0.79751,
+          "threshold": ">=0.55",
+          "detail": "GEOM∪HIDDEN 包围盒 142.000×221.955=31517.6 mm²，全部实体包围盒 161.612×244.536=39520.0 mm²。",
+          "hint": "版面被非几何实体稀释了：把 layout.engineering_table 设为 false（明细表只允许出现在 <id>_engineering.dxf，见契约 §8），并删掉 TABLE / NOTE 图层上的说明文字；标记边槽过宽时改 figures[].layout 的字号来源（对标准件设 terms[].label=\"none\" 可减少标记）。"
+         },
+         {
+          "id": "sheet_fill",
+          "pass": true,
+          "value": 0.999797,
+          "threshold": ">=0.55",
+          "detail": "几何 142.000×221.955 mm，可用区 aw×ah=142.0×222.0 mm（h=3.50 mm（读自 NUM 图层 TEXT））",
+          "hint": "纸没填满：把 figures[].layout.axis_angle 改回 \"auto\"，让 renderer 逐图闭式求最优角；已经是 auto 时说明旋转救不回来——换 layout.view，或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "text_height_mm",
+          "pass": true,
+          "value": 3.5,
+          "threshold": ">=3.5",
+          "detail": "NUM 图层最小字高 3.50 mm（共 9 个标记）",
+          "hint": "字太小意味着被标注件在图面上太小：对标准件设 terms[].label=\"none\"，按 assembly.json:split_suggestions 拆图，或把 layout.density 改成 \"compact\"。"
+         },
+         {
+          "id": "text_slot_ratio",
+          "pass": true,
+          "value": 0.406915,
+          "threshold": "<=0.6",
+          "detail": "最小被标注几何簇外廓 8.60 mm（锚点 93.0, 95.0），最小字高 3.50 mm，口径为「沿每条 LEADER 首点找几何连通簇取 max(w,h)」（§11.10 #4）。",
+          "hint": "被标注件相对字号太小：对该零件设 terms[].label=\"none\"，或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "label_overlap_pairs",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 对附图标记外接框相交（共 9 个标记）。外接框按 GB/T 14691 B 型字宽 CHAR_W=0.71（= h/√2 = 0.7071 向上取整）、水平留白 PAD_X=0.30·h、垂直留白 PAD_Y=0.20·h 还原，来源 §11.2.3。",
+          "hint": "标记互相碾压：减少本图标记数（对标准件设 terms[].label=\"none\"），或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "leader_hits_numeral_box",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 处引线段与附图标记外接框相交（引线 9 条）。",
+          "hint": "引线压住了数字：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图；若反复出现，说明本图标记密度已超载。"
+         },
+         {
+          "id": "leader_crossing",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 对引线段真交叉（共端点与共线重合不计），引线 9 条。",
+          "hint": "引线交叉：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "leader_anchor_gap",
+          "pass": true,
+          "value": 0.0,
+          "threshold": "<=2.635 mm",
+          "detail": "9 条引线的锚点离最近几何：中位 0.000 mm、最大 0.000 mm（上限 2.635 mm = 图幅对角 263.5 mm 的 1.0%）。",
+          "hint": "引线没有落在它所指的零件轮廓上，读图者无法判断标记指的是哪个件。若该零件在本视图里被遮挡，改用分解图标注它，或把它从本图的 members 中移除。"
+         },
+         {
+          "id": "part_bbox_overlap_pairs",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 对 body 图面包围盒重叠（共 9 个 body，容差 3.0e-04 mm = OVERLAP_TOL_REL×几何对角）；口径：sidecar fig2.layout.json（9 个 body）",
+          "hint": "零件在图面上压叠：把 layout.density 改成 \"loose\"，或换 figures[].layout.explode_axis / layout.view；仍不行就按 assembly.json:split_suggestions 拆图。"
+         },
+         {
+          "id": "labels_per_figure",
+          "pass": true,
+          "value": 9,
+          "threshold": "<=20",
+          "detail": "本图有 9 个附图标记。",
+          "hint": "拆图：按 assembly.json:split_suggestions 把该 figure 拆成多张，或对标准件设 terms[].label=\"none\"。"
+         },
+         {
+          "id": "non_numeral_text_ratio",
+          "pass": true,
+          "value": 0.0,
+          "threshold": "<=0.1",
+          "detail": "0/10 条文字既不是附图标记也不是图题（CAPTION 图层按 §8 计入允许项）。",
+          "hint": "专利附图只允许几何、引线、附图标记与图题（契约 §8）：把 layout.engineering_table 设为 false，并删掉零件名 / 说明文字。"
+         },
+         {
+          "id": "non_continuous",
+          "pass": true,
+          "value": 0,
+          "threshold": "<=0",
+          "detail": "0 个实体的有效线型不是 CONTINUOUS（BYLAYER 已按图层线型解析）。",
+          "hint": "这一条不是 plan 的问题，是写出端的问题：sheet.py 必须把所有实体与图层写成 CONTINUOUS（契约 §5.4）。若线型来自导入的图块，请在 plan 的 source.exclude 里排除对应零件。"
+         },
+         {
+          "id": "forbidden_text",
+          "pass": true,
+          "value": 0,
+          "threshold": "==0",
+          "detail": "0 条文字命中内部件号 / 图号形状（共 10 条文字，3 条模式）。",
+          "hint": "plan 的 terms[].term 里出现了内部件号 / 图号形状的字符串，改成中文技术名词；并确认 layout.engineering_table 为 false（契约 §8 禁止附图出现件号）。"
+         }
+        ],
+        "summary": {
+         "failed": 0,
+         "passed": 13
+        }
+       },
+       "svg": "dev/fixtures/gearbox/fig2.svg",
+       "variants": {
+        "annotated": "dev/fixtures/gearbox/fig2_annotated.svg",
+        "filing": "dev/fixtures/gearbox/fig2_filing.svg",
+        "raw": "dev/fixtures/gearbox/fig2.svg"
+       },
+       "annotation": {
+        "table": {
+         "rows": [
+          {
+           "numeral": 4,
+           "name": "内齿圈"
+          },
+          {
+           "numeral": 5,
+           "name": "端盖"
+          },
+          {
+           "numeral": 6,
+           "name": "输出轴"
+          },
+          {
+           "numeral": 7,
+           "name": "太阳轮"
+          },
+          {
+           "numeral": 8,
+           "name": "行星轮"
+          },
+          {
+           "numeral": 9,
+           "name": "行星销"
+          },
+          {
+           "numeral": 10,
+           "name": "行星架"
+          },
+          {
+           "numeral": 11,
+           "name": "输出轴承"
+          },
+          {
+           "numeral": 12,
+           "name": "油封"
+          }
+         ],
+         "corner": "左下",
+         "blocks": 1
+        },
+        "warnings": []
+       }
+      }
+     ],
+     "numerals": {
+      "schema": "patent-numerals/1",
+      "numerals": [
+       {
+        "numeral": 1,
+        "term": "电机壳体",
+        "selector": "PGB-MOTOR-HOUSING",
+        "figures": [
+         "fig1"
+        ],
+        "parts": [
+         "PGB-MOTOR-HOUSING"
+        ]
+       },
+       {
+        "numeral": 2,
+        "term": "电机后盖",
+        "selector": "PGB-MOTOR-REAR-CAP",
+        "figures": [
+         "fig1"
+        ],
+        "parts": [
+         "PGB-MOTOR-REAR-CAP"
+        ]
+       },
+       {
+        "numeral": 3,
+        "term": "安装法兰",
+        "selector": "PGB-MOUNT-FLANGE",
+        "figures": [
+         "fig1"
+        ],
+        "parts": [
+         "PGB-MOUNT-FLANGE"
+        ]
+       },
+       {
+        "numeral": 4,
+        "term": "内齿圈",
+        "selector": "PGB-RING-GEAR",
+        "figures": [
+         "fig1",
+         "fig2"
+        ],
+        "parts": [
+         "PGB-RING-GEAR"
+        ]
+       },
+       {
+        "numeral": 5,
+        "term": "端盖",
+        "selector": "PGB-END-COVER",
+        "figures": [
+         "fig1",
+         "fig2"
+        ],
+        "parts": [
+         "PGB-END-COVER"
+        ]
+       },
+       {
+        "numeral": 6,
+        "term": "输出轴",
+        "selector": "PGB-OUTPUT-SHAFT",
+        "figures": [
+         "fig1",
+         "fig2"
+        ],
+        "parts": [
+         "PGB-OUTPUT-SHAFT"
+        ]
+       },
+       {
+        "numeral": 7,
+        "term": "太阳轮",
+        "selector": "PGB-SUN-GEAR",
+        "figures": [
+         "fig2"
+        ],
+        "parts": [
+         "PGB-SUN-GEAR"
+        ]
+       },
+       {
+        "numeral": 8,
+        "term": "行星轮",
+        "selector": "PGB-PLANET-GEAR",
+        "figures": [
+         "fig2"
+        ],
+        "parts": [
+         "PGB-PLANET-GEAR"
+        ]
+       },
+       {
+        "numeral": 9,
+        "term": "行星销",
+        "selector": "PGB-PLANET-PIN",
+        "figures": [
+         "fig2"
+        ],
+        "parts": [
+         "PGB-PLANET-PIN"
+        ]
+       },
+       {
+        "numeral": 10,
+        "term": "行星架",
+        "selector": "PGB-PLANET-CARRIER",
+        "figures": [
+         "fig2"
+        ],
+        "parts": [
+         "PGB-PLANET-CARRIER"
+        ]
+       },
+       {
+        "numeral": 11,
+        "term": "输出轴承",
+        "selector": "PGB-OUTPUT-BEARING",
+        "figures": [
+         "fig2"
+        ],
+        "parts": [
+         "PGB-OUTPUT-BEARING"
+        ]
+       },
+       {
+        "numeral": 12,
+        "term": "油封",
+        "selector": "PGB-OIL-SEAL",
+        "figures": [
+         "fig2"
+        ],
+        "parts": [
+         "PGB-OIL-SEAL"
+        ]
+       }
+      ],
+      "description_zh": "附图标记说明：1—电机壳体；2—电机后盖；3—安装法兰；4—内齿圈；5—端盖；6—输出轴；7—太阳轮；8—行星轮；9—行星销；10—行星架；11—输出轴承；12—油封。"
+     },
+     "figure_descriptions": [
+      "图1 为行星齿轮减速器的整体结构示意图。",
+      "图2 为行星齿轮减速器齿轮系的分解示意图。"
+     ],
+     "finished_at": "2026-10-11 10:31"
+    },
+    "plan": {
+     "schema": "patent-figure-plan/1",
+     "source": {
+      "step": "demo-planetary-gearbox.stp",
+      "include": [
+       "PGB-*"
+      ],
+      "exclude": []
+     },
+     "terms": [
+      {
+       "selector": "PGB-MOTOR-HOUSING",
+       "term": "电机壳体"
+      },
+      {
+       "selector": "PGB-MOTOR-REAR-CAP",
+       "term": "电机后盖"
+      },
+      {
+       "selector": "PGB-MOUNT-FLANGE",
+       "term": "安装法兰"
+      },
+      {
+       "selector": "PGB-RING-GEAR",
+       "term": "内齿圈"
+      },
+      {
+       "selector": "PGB-END-COVER",
+       "term": "端盖"
+      },
+      {
+       "selector": "PGB-OUTPUT-SHAFT",
+       "term": "输出轴"
+      },
+      {
+       "selector": "PGB-SUN-GEAR",
+       "term": "太阳轮"
+      },
+      {
+       "selector": "PGB-PLANET-GEAR",
+       "term": "行星轮"
+      },
+      {
+       "selector": "PGB-PLANET-PIN",
+       "term": "行星销"
+      },
+      {
+       "selector": "PGB-PLANET-CARRIER",
+       "term": "行星架"
+      },
+      {
+       "selector": "PGB-OUTPUT-BEARING",
+       "term": "输出轴承"
+      },
+      {
+       "selector": "PGB-OIL-SEAL",
+       "term": "油封"
+      },
+      {
+       "selector": "PGB-SCREW-*",
+       "term": "紧固螺钉",
+       "label": "none"
+      }
+     ],
+     "figures": [
+      {
+       "id": "fig1",
+       "caption": "行星齿轮减速器整体结构示意图",
+       "kind": "assembly",
+       "members": [
+        "PGB-MOTOR-HOUSING",
+        "PGB-MOTOR-REAR-CAP",
+        "PGB-MOUNT-FLANGE",
+        "PGB-RING-GEAR",
+        "PGB-END-COVER",
+        "PGB-OUTPUT-SHAFT",
+        "PGB-SCREW-*"
+       ]
+      },
+      {
+       "id": "fig2",
+       "caption": "行星齿轮减速器齿轮系分解示意图",
+       "kind": "exploded",
+       "members": [
+        "PGB-SUN-GEAR",
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN",
+        "PGB-PLANET-CARRIER",
+        "PGB-RING-GEAR",
+        "PGB-OUTPUT-SHAFT",
+        "PGB-OUTPUT-BEARING",
+        "PGB-END-COVER",
+        "PGB-OIL-SEAL"
+       ]
+      }
+     ],
+     "layout": {
+      "max_labels_per_figure": 20
+     }
+    },
+    "model_url": "dev/fixtures/models/planetary-gearbox.glb"
+   }
+  },
+  {
+   "id": "bench-vise",
+   "summary": {
+    "project_id": "bench-vise",
+    "title": "台虎钳",
+    "description": "固定钳身 / 活动钳身 / 丝杠手柄三个子装配",
+    "step_name": "demo-bench-vise.stp",
+    "example": true,
+    "status": "ready",
+    "message": "",
+    "plan_etag": "W/\"bench-vise-1\"",
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true
+    },
+    "figures": 0,
+    "figures_pass": 0,
+    "flowcharts": 0,
+    "thumb": null
+   },
+   "detail": {
+    "project_id": "bench-vise",
+    "title": "台虎钳",
+    "description": "固定钳身 / 活动钳身 / 丝杠手柄三个子装配",
+    "step_name": "demo-bench-vise.stp",
+    "example": true,
+    "status": "ready",
+    "message": "",
+    "plan_etag": "W/\"bench-vise-1\"",
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true
+    },
+    "figures": 0,
+    "figures_pass": 0,
+    "flowcharts": 0,
+    "thumb": null,
+    "assembly": {
+     "schema": "patent-assembly/1",
+     "source": {
+      "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-bench-vise.stp",
+      "sha256": "3e0ac05c6d72eaf5ab303e412303c889d08c33f7b4d406ecae935056544da400",
+      "instances": 20,
+      "distinct": 12
+     },
+     "units": "mm",
+     "bbox": {
+      "lo": [
+       -100.0,
+       -80.0,
+       -6.0
+      ],
+      "hi": [
+       150.0,
+       80.0,
+       82.0
+      ],
+      "size": [
+       250.0,
+       160.0,
+       88.0
+      ]
+     },
+     "parts": [
+      {
+       "name": "VISE-BASE",
+       "instances": 1,
+       "bbox_size": [
+        200.0,
+        90.0,
+        32.0
+       ],
+       "max_dim": 200.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         16.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-BASE"
+      },
+      {
+       "name": "VISE-BASE-BOLT",
+       "instances": 4,
+       "bbox_size": [
+        13.0,
+        15.011,
+        26.0
+       ],
+       "max_dim": 26.0,
+       "centers": [
+        [
+         -82.0,
+         -34.0,
+         7.0
+        ],
+        [
+         -82.0,
+         34.0,
+         7.0
+        ],
+        [
+         82.0,
+         -34.0,
+         7.0
+        ],
+        [
+         82.0,
+         34.0,
+         7.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-BASE-BOLT"
+      },
+      {
+       "name": "VISE-FIXED-JAW",
+       "instances": 1,
+       "bbox_size": [
+        40.0,
+        96.0,
+        56.0
+       ],
+       "max_dim": 96.0,
+       "centers": [
+        [
+         -80.0,
+         0.0,
+         42.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-FIXED-JAW-ASM/VISE-FIXED-JAW"
+      },
+      {
+       "name": "VISE-HANDLE-BAR",
+       "instances": 1,
+       "bbox_size": [
+        8.0,
+        140.0,
+        8.0
+       ],
+       "max_dim": 140.0,
+       "centers": [
+        [
+         140.0,
+         0.0,
+         46.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-HANDLE-BAR"
+      },
+      {
+       "name": "VISE-HANDLE-HUB",
+       "instances": 1,
+       "bbox_size": [
+        20.0,
+        26.0,
+        26.0
+       ],
+       "max_dim": 26.0,
+       "centers": [
+        [
+         140.0,
+         0.0,
+         46.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-HANDLE-HUB"
+      },
+      {
+       "name": "VISE-HANDLE-KNOB",
+       "instances": 2,
+       "bbox_size": [
+        16.0,
+        16.0,
+        16.0
+       ],
+       "max_dim": 16.0,
+       "centers": [
+        [
+         140.0,
+         -72.0,
+         46.0
+        ],
+        [
+         140.0,
+         72.0,
+         46.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-HANDLE-KNOB"
+      },
+      {
+       "name": "VISE-JAW-PLATE",
+       "instances": 2,
+       "bbox_size": [
+        5.0,
+        88.0,
+        24.0
+       ],
+       "max_dim": 88.0,
+       "centers": [
+        [
+         -57.5,
+         0.0,
+         58.0
+        ],
+        [
+         -4.5,
+         0.0,
+         58.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-FIXED-JAW-ASM/VISE-JAW-PLATE"
+      },
+      {
+       "name": "VISE-LEAD-NUT",
+       "instances": 1,
+       "bbox_size": [
+        28.0,
+        30.0,
+        26.0
+       ],
+       "max_dim": 30.0,
+       "centers": [
+        [
+         58.0,
+         0.0,
+         46.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-MOVABLE-JAW-ASM/VISE-LEAD-NUT"
+      },
+      {
+       "name": "VISE-LEAD-SCREW",
+       "instances": 1,
+       "bbox_size": [
+        190.0,
+        19.483,
+        19.483
+       ],
+       "max_dim": 190.0,
+       "centers": [
+        [
+         35.0,
+         0.0,
+         46.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-LEAD-SCREW"
+      },
+      {
+       "name": "VISE-MOVABLE-JAW",
+       "instances": 1,
+       "bbox_size": [
+        72.0,
+        96.0,
+        68.0
+       ],
+       "max_dim": 96.0,
+       "centers": [
+        [
+         34.0,
+         0.0,
+         48.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-MOVABLE-JAW-ASM/VISE-MOVABLE-JAW"
+      },
+      {
+       "name": "VISE-PLATE-SCREW",
+       "instances": 4,
+       "bbox_size": [
+        14.5,
+        8.0,
+        8.0
+       ],
+       "max_dim": 14.5,
+       "centers": [
+        [
+         -57.75,
+         -28.0,
+         58.0
+        ],
+        [
+         -57.75,
+         28.0,
+         58.0
+        ],
+        [
+         0.75,
+         -28.0,
+         58.0
+        ],
+        [
+         0.75,
+         28.0,
+         58.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-FIXED-JAW-ASM/VISE-PLATE-SCREW"
+      },
+      {
+       "name": "VISE-THRUST-COLLAR",
+       "instances": 1,
+       "bbox_size": [
+        10.0,
+        30.0,
+        30.0
+       ],
+       "max_dim": 30.0,
+       "centers": [
+        [
+         105.0,
+         0.0,
+         46.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-THRUST-COLLAR"
+      }
+     ],
+     "principal_axis": {
+      "vector": [
+       1.0,
+       0.0,
+       0.0
+      ],
+      "nearest": "x",
+      "spread_ratio": 6.847
+     },
+     "coaxial_groups": [
+      {
+       "id": "g1",
+       "axis": [
+        1.0,
+        0.0,
+        0.0
+       ],
+       "origin": [
+        0.0,
+        -28.0,
+        58.0
+       ],
+       "members": [
+        "VISE-PLATE-SCREW"
+       ],
+       "instances": 2,
+       "extent": [
+        -65.0,
+        8.0
+       ]
+      },
+      {
+       "id": "g2",
+       "axis": [
+        1.0,
+        0.0,
+        0.0
+       ],
+       "origin": [
+        0.0,
+        28.0,
+        58.0
+       ],
+       "members": [
+        "VISE-PLATE-SCREW"
+       ],
+       "instances": 2,
+       "extent": [
+        -65.0,
+        8.0
+       ]
+      },
+      {
+       "id": "g3",
+       "axis": [
+        1.0,
+        0.0,
+        0.0
+       ],
+       "origin": [
+        0.0,
+        0.0,
+        46.0
+       ],
+       "members": [
+        "VISE-HANDLE-HUB",
+        "VISE-LEAD-SCREW",
+        "VISE-THRUST-COLLAR"
+       ],
+       "instances": 3,
+       "extent": [
+        -60.0,
+        150.0
+       ]
+      }
+     ],
+     "stack_order": [
+      "VISE-FIXED-JAW",
+      "VISE-JAW-PLATE",
+      "VISE-PLATE-SCREW",
+      "VISE-BASE",
+      "VISE-BASE-BOLT",
+      "VISE-MOVABLE-JAW",
+      "VISE-LEAD-SCREW",
+      "VISE-LEAD-NUT",
+      "VISE-THRUST-COLLAR",
+      "VISE-HANDLE-BAR",
+      "VISE-HANDLE-HUB",
+      "VISE-HANDLE-KNOB"
+     ],
+     "size_tiers": [
+      {
+       "tier": "large",
+       "members": [
+        "VISE-BASE",
+        "VISE-FIXED-JAW",
+        "VISE-HANDLE-BAR",
+        "VISE-LEAD-SCREW",
+        "VISE-MOVABLE-JAW"
+       ]
+      },
+      {
+       "tier": "medium",
+       "members": [
+        "VISE-JAW-PLATE",
+        "VISE-LEAD-NUT",
+        "VISE-THRUST-COLLAR"
+       ]
+      },
+      {
+       "tier": "small",
+       "members": [
+        "VISE-BASE-BOLT",
+        "VISE-HANDLE-HUB",
+        "VISE-HANDLE-KNOB",
+        "VISE-PLATE-SCREW"
+       ]
+      }
+     ],
+     "split_suggestions": [],
+     "warnings": []
+    },
+    "structure": {
+     "source": "ai",
+     "provider": "DeepSeek V3.2",
+     "created": "2026-10-11 10:40",
+     "groups": [
+      {
+       "id": "v-fixed",
+       "name": "固定钳身组",
+       "role": "固定与基座",
+       "parts": [
+        "VISE-BASE",
+        "VISE-FIXED-JAW",
+        "VISE-BASE-BOLT"
+       ]
+      },
+      {
+       "id": "v-move",
+       "name": "活动钳身组",
+       "role": "夹持与移动",
+       "parts": [
+        "VISE-MOVABLE-JAW",
+        "VISE-JAW-PLATE",
+        "VISE-PLATE-SCREW"
+       ]
+      },
+      {
+       "id": "v-screw",
+       "name": "丝杠手柄组",
+       "role": "驱动夹紧",
+       "parts": [
+        "VISE-LEAD-SCREW",
+        "VISE-LEAD-NUT",
+        "VISE-THRUST-COLLAR",
+        "VISE-HANDLE-BAR",
+        "VISE-HANDLE-HUB",
+        "VISE-HANDLE-KNOB"
+       ]
+      }
+     ],
+     "names": {
+      "VISE-BASE": {
+       "name": "钳座",
+       "confidence": "high"
+      },
+      "VISE-FIXED-JAW": {
+       "name": "固定钳身",
+       "confidence": "high"
+      },
+      "VISE-MOVABLE-JAW": {
+       "name": "活动钳身",
+       "confidence": "high"
+      },
+      "VISE-JAW-PLATE": {
+       "name": "钳口板",
+       "confidence": "high"
+      },
+      "VISE-LEAD-SCREW": {
+       "name": "丝杠",
+       "confidence": "high"
+      },
+      "VISE-LEAD-NUT": {
+       "name": "丝杠螺母",
+       "confidence": "high"
+      },
+      "VISE-HANDLE-BAR": {
+       "name": "手柄杆",
+       "confidence": "high"
+      },
+      "VISE-HANDLE-HUB": {
+       "name": "手柄座",
+       "confidence": "high"
+      },
+      "VISE-HANDLE-KNOB": {
+       "name": "手柄球",
+       "confidence": "high"
+      },
+      "VISE-THRUST-COLLAR": {
+       "name": "止推环",
+       "confidence": "high"
+      },
+      "VISE-BASE-BOLT": {
+       "name": "底座螺栓",
+       "confidence": "high"
+      },
+      "VISE-PLATE-SCREW": {
+       "name": "钳口板螺钉",
+       "confidence": "high"
+      }
+     }
+    },
+    "candidates": [
+     {
+      "fig_id": "whole",
+      "caption": "台虎钳整机装配图（兜底候选）",
+      "kind": "assembly",
+      "members": [
+       "固定钳身组",
+       "活动钳身组",
+       "丝杠手柄组"
+      ],
+      "status": "fail",
+      "qa": {
+       "schema": "patent-figure-qa/1",
+       "file": "whole.dxf",
+       "pass": false,
+       "checks": [
+        {
+         "id": "geometry_occupancy",
+         "pass": true,
+         "value": 0.71,
+         "threshold": ">=0.55",
+         "detail": "几何占用 0.71",
+         "hint": ""
+        },
+        {
+         "id": "sheet_fill",
+         "pass": true,
+         "value": 0.63,
+         "threshold": ">=0.55",
+         "detail": "纸面填充 0.63",
+         "hint": ""
+        },
+        {
+         "id": "text_height_mm",
+         "pass": false,
+         "value": 2.4,
+         "threshold": ">=3.5",
+         "detail": "NUM 图层最小字高 2.40 mm（共 22 个标记）",
+         "hint": "字太小意味着被标注件在图面上太小：对标准件设 terms[].label=\"none\"，按 assembly.json:split_suggestions 拆图，或把 layout.density 改成 \"compact\"。"
+        },
+        {
+         "id": "text_slot_ratio",
+         "pass": false,
+         "value": 0.74,
+         "threshold": "<=0.6",
+         "detail": "最小被标注几何簇外廓 18.0 mm，最小字高 2.40 mm",
+         "hint": "被标注件相对字号太小：对该零件设 terms[].label=\"none\"，或按 assembly.json:split_suggestions 拆图。"
+        },
+        {
+         "id": "label_overlap_pairs",
+         "pass": true,
+         "value": 0,
+         "threshold": "<=0",
+         "detail": "无标记互相碾压",
+         "hint": ""
+        },
+        {
+         "id": "leader_hits_numeral_box",
+         "pass": true,
+         "value": 0,
+         "threshold": "<=0",
+         "detail": "引线未压数字",
+         "hint": ""
+        },
+        {
+         "id": "leader_crossing",
+         "pass": false,
+         "value": 3,
+         "threshold": "<=0",
+         "detail": "检测到 3 对引线交叉",
+         "hint": "引线交叉：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图。"
+        },
+        {
+         "id": "leader_anchor_gap",
+         "pass": true,
+         "value": 0.4,
+         "threshold": "<=0.5",
+         "detail": "引线均落在轮廓上",
+         "hint": ""
+        },
+        {
+         "id": "part_bbox_overlap_pairs",
+         "pass": true,
+         "value": 0,
+         "threshold": "<=0",
+         "detail": "零件无压叠",
+         "hint": ""
+        },
+        {
+         "id": "labels_per_figure",
+         "pass": false,
+         "value": 22,
+         "threshold": "<=20",
+         "detail": "本图 22 个标记，超过上限 20",
+         "hint": "拆图：按 assembly.json:split_suggestions 把该 figure 拆成多张，或对标准件设 terms[].label=\"none\" 减少标记。"
+        },
+        {
+         "id": "non_numeral_text_ratio",
+         "pass": true,
+         "value": 0.0,
+         "threshold": "<=0.05",
+         "detail": "无多余文字",
+         "hint": ""
+        },
+        {
+         "id": "non_continuous",
+         "pass": true,
+         "value": 0,
+         "threshold": "<=0",
+         "detail": "全部实体连续线型",
+         "hint": ""
+        },
+        {
+         "id": "forbidden_text",
+         "pass": true,
+         "value": 0,
+         "threshold": "==0",
+         "detail": "无内部件号 / 图号形状字符串",
+         "hint": ""
+        }
+       ],
+       "summary": {
+        "passed": 9,
+        "failed": 4
+       }
+      },
+      "reason": "整机 22 个标记塞进一张图：字高 2.4<3.5 mm、标记 22>20、引线 3 处交叉。建议按结构拆成「固定钳身 / 活动钳身 / 丝杠手柄」三张分解图。",
+      "labels": 22
+     },
+     {
+      "fig_id": "v-screw",
+      "caption": "丝杠手柄机构分解图",
+      "kind": "exploded",
+      "members": [
+       "丝杠手柄组"
+      ],
+      "status": "pass",
+      "reason": "6 个标记、字高 5.0 mm，13 项 QA 全过",
+      "labels": 6
+     }
+    ],
+    "render": null,
+    "plan": {
+     "schema": "patent-figure-plan/1",
+     "source": {
+      "step": "demo-bench-vise.stp",
+      "include": [
+       "VISE-*"
+      ],
+      "exclude": []
+     },
+     "terms": [
+      {
+       "selector": "VISE-BASE",
+       "term": "钳座"
+      },
+      {
+       "selector": "VISE-FIXED-JAW",
+       "term": "固定钳身"
+      },
+      {
+       "selector": "VISE-MOVABLE-JAW",
+       "term": "活动钳身"
+      },
+      {
+       "selector": "VISE-JAW-PLATE",
+       "term": "钳口板"
+      },
+      {
+       "selector": "VISE-LEAD-SCREW",
+       "term": "丝杠"
+      },
+      {
+       "selector": "VISE-LEAD-NUT",
+       "term": "丝杠螺母"
+      },
+      {
+       "selector": "VISE-HANDLE-BAR",
+       "term": "手柄杆"
+      },
+      {
+       "selector": "VISE-HANDLE-HUB",
+       "term": "手柄座"
+      },
+      {
+       "selector": "VISE-HANDLE-KNOB",
+       "term": "手柄球"
+      },
+      {
+       "selector": "VISE-THRUST-COLLAR",
+       "term": "止推环"
+      },
+      {
+       "selector": "VISE-BASE-BOLT",
+       "term": "底座螺栓"
+      },
+      {
+       "selector": "VISE-PLATE-SCREW",
+       "term": "钳口板螺钉"
+      }
+     ],
+     "figures": [],
+     "layout": {
+      "max_labels_per_figure": 20
+     }
+    },
+    "model_url": "dev/fixtures/models/bench-vise.glb"
+   }
+  },
+  {
+   "id": "ball-valve",
+   "summary": {
+    "project_id": "ball-valve",
+    "title": "球阀",
+    "description": "法兰阀体、开孔球芯、阀座、阀杆填料与手柄",
+    "step_name": "demo-ball-valve.stp",
+    "example": true,
+    "status": "ready",
+    "message": "",
+    "plan_etag": "W/\"ball-valve-1\"",
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true
+    },
+    "figures": 0,
+    "figures_pass": 0,
+    "flowcharts": 0,
+    "thumb": null
+   },
+   "detail": {
+    "project_id": "ball-valve",
+    "title": "球阀",
+    "description": "法兰阀体、开孔球芯、阀座、阀杆填料与手柄",
+    "step_name": "demo-ball-valve.stp",
+    "example": true,
+    "status": "ready",
+    "message": "",
+    "plan_etag": "W/\"ball-valve-1\"",
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true
+    },
+    "figures": 0,
+    "figures_pass": 0,
+    "flowcharts": 0,
+    "thumb": null,
+    "assembly": {
+     "schema": "patent-assembly/1",
+     "source": {
+      "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-ball-valve.stp",
+      "sha256": "7d07a043f93d736fdbf657846d490635acce071edeed9fc0703123c8a28c42cc",
+      "instances": 18,
+      "distinct": 9
+     },
+     "units": "mm",
+     "bbox": {
+      "lo": [
+       -66.0,
+       -48.0,
+       -48.0
+      ],
+      "hi": [
+       96.0,
+       48.0,
+       119.0
+      ],
+      "size": [
+       162.0,
+       96.0,
+       167.0
+      ]
+     },
+     "parts": [
+      {
+       "name": "VALVE-BALL",
+       "instances": 1,
+       "bbox_size": [
+        50.0,
+        50.0,
+        49.679
+       ],
+       "max_dim": 50.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         -0.160536
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-BALL"
+      },
+      {
+       "name": "VALVE-BODY",
+       "instances": 1,
+       "bbox_size": [
+        88.0,
+        96.0,
+        120.0
+       ],
+       "max_dim": 120.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         12.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-BODY"
+      },
+      {
+       "name": "VALVE-FLANGE-BOLT",
+       "instances": 8,
+       "bbox_size": [
+        41.0,
+        16.166,
+        14.0
+       ],
+       "max_dim": 41.0,
+       "centers": [
+        [
+         -45.5,
+         -26.870058,
+         -26.870058
+        ],
+        [
+         -45.5,
+         -26.870058,
+         26.870058
+        ],
+        [
+         -45.5,
+         26.870058,
+         -26.870058
+        ],
+        [
+         -45.5,
+         26.870058,
+         26.870058
+        ],
+        [
+         45.5,
+         -26.870058,
+         -26.870058
+        ],
+        [
+         45.5,
+         -26.870058,
+         26.870058
+        ],
+        [
+         45.5,
+         26.870058,
+         -26.870058
+        ],
+        [
+         45.5,
+         26.870058,
+         26.870058
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-FLANGE-BOLT"
+      },
+      {
+       "name": "VALVE-GLAND-NUT",
+       "instances": 1,
+       "bbox_size": [
+        34.0,
+        39.26,
+        14.0
+       ],
+       "max_dim": 39.26,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         79.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-STEM-ASM/VALVE-GLAND-NUT"
+      },
+      {
+       "name": "VALVE-HANDLE",
+       "instances": 1,
+       "bbox_size": [
+        111.0,
+        30.0,
+        16.0
+       ],
+       "max_dim": 111.0,
+       "centers": [
+        [
+         40.5,
+         0.0,
+         107.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-HANDLE"
+      },
+      {
+       "name": "VALVE-HANDLE-NUT",
+       "instances": 1,
+       "bbox_size": [
+        16.0,
+        18.475,
+        7.0
+       ],
+       "max_dim": 18.475,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         115.5
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-HANDLE-NUT"
+      },
+      {
+       "name": "VALVE-PACKING-RING",
+       "instances": 2,
+       "bbox_size": [
+        24.0,
+        24.0,
+        5.0
+       ],
+       "max_dim": 24.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         63.5
+        ],
+        [
+         0.0,
+         0.0,
+         68.5
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-STEM-ASM/VALVE-PACKING-RING"
+      },
+      {
+       "name": "VALVE-SEAT",
+       "instances": 2,
+       "bbox_size": [
+        8.0,
+        52.0,
+        52.0
+       ],
+       "max_dim": 52.0,
+       "centers": [
+        [
+         -26.0,
+         0.0,
+         0.0
+        ],
+        [
+         26.0,
+         0.0,
+         0.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-SEAT"
+      },
+      {
+       "name": "VALVE-STEM",
+       "instances": 1,
+       "bbox_size": [
+        14.0,
+        14.0,
+        100.0
+       ],
+       "max_dim": 100.0,
+       "centers": [
+        [
+         0.0,
+         0.0,
+         68.0
+        ]
+       ],
+       "degenerate": false,
+       "path_sample": "DEMO-VALVE-ASSY/VALVE-STEM-ASM/VALVE-STEM"
+      }
+     ],
+     "principal_axis": {
+      "vector": [
+       0.0,
+       0.0,
+       1.0
+      ],
+      "nearest": "z",
+      "spread_ratio": 1.922
+     },
+     "coaxial_groups": [
+      {
+       "id": "g1",
+       "axis": [
+        1.0,
+        0.0,
+        0.0
+       ],
+       "origin": [
+        0.0,
+        0.0,
+        0.0
+       ],
+       "members": [
+        "VALVE-SEAT"
+       ],
+       "instances": 2,
+       "extent": [
+        -30.0,
+        30.0
+       ]
+      },
+      {
+       "id": "g2",
+       "axis": [
+        0.0,
+        0.0,
+        1.0
+       ],
+       "origin": [
+        0.0,
+        0.0,
+        0.0
+       ],
+       "members": [
+        "VALVE-PACKING-RING",
+        "VALVE-STEM"
+       ],
+       "instances": 3,
+       "extent": [
+        18.0,
+        118.0
+       ]
+      }
+     ],
+     "stack_order": [
+      "VALVE-BALL",
+      "VALVE-FLANGE-BOLT",
+      "VALVE-SEAT",
+      "VALVE-BODY",
+      "VALVE-PACKING-RING",
+      "VALVE-STEM",
+      "VALVE-GLAND-NUT",
+      "VALVE-HANDLE",
+      "VALVE-HANDLE-NUT"
+     ],
+     "size_tiers": [
+      {
+       "tier": "large",
+       "members": [
+        "VALVE-BODY",
+        "VALVE-HANDLE",
+        "VALVE-STEM"
+       ]
+      },
+      {
+       "tier": "medium",
+       "members": [
+        "VALVE-BALL",
+        "VALVE-FLANGE-BOLT",
+        "VALVE-SEAT"
+       ]
+      },
+      {
+       "tier": "small",
+       "members": [
+        "VALVE-GLAND-NUT",
+        "VALVE-HANDLE-NUT",
+        "VALVE-PACKING-RING"
+       ]
+      }
+     ],
+     "split_suggestions": [],
+     "warnings": []
+    },
+    "structure": {
+     "source": "fallback",
+     "provider": "",
+     "created": "",
+     "groups": [
+      {
+       "id": "bv-body",
+       "name": "子装配 1",
+       "role": "",
+       "parts": [
+        "VALVE-BALL",
+        "VALVE-BODY",
+        "VALVE-FLANGE-BOLT",
+        "VALVE-GLAND-NUT",
+        "VALVE-HANDLE"
+       ]
+      },
+      {
+       "id": "bv-trim",
+       "name": "子装配 2",
+       "role": "",
+       "parts": [
+        "VALVE-HANDLE-NUT",
+        "VALVE-PACKING-RING",
+        "VALVE-SEAT",
+        "VALVE-STEM"
+       ]
+      }
+     ],
+     "names": {}
+    },
+    "candidates": [],
+    "render": null,
+    "plan": {
+     "schema": "patent-figure-plan/1",
+     "source": {
+      "step": "demo-ball-valve.stp",
+      "include": [
+       "BV-*"
+      ],
+      "exclude": []
+     },
+     "terms": [
+      {
+       "selector": "VALVE-BALL",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-BODY",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-FLANGE-BOLT",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-GLAND-NUT",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-HANDLE",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-HANDLE-NUT",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-PACKING-RING",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-SEAT",
+       "term": ""
+      },
+      {
+       "selector": "VALVE-STEM",
+       "term": ""
+      }
+     ],
+     "figures": [],
+     "layout": {
+      "max_labels_per_figure": 20
+     }
+    },
+    "model_url": "dev/fixtures/models/ball-valve.glb"
+   }
+  }
+ ],
+ "note": "版本化静态 manifest + 只读适配器（架构 §4 T0 / codex S2-16）。预计算展示，不是在线出图；无需上传自有模型。"
+}

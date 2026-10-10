@@ -9,19 +9,20 @@ export const bus = {
 };
 
 export const state = {
+  projectId: '',        // 当前工程 id（来自 ?project=）
+  planEtag: null,       // plan 的 ETag，用于乐观锁
+  title: '',
   assembly: null,
   plan: null,
   validate: null,       // 服务器 validate 结果 {ok, issues}
   render: null,         // 最近一次渲染结果
   rendering: false,
+  candidates: [],       // F2-lite 候选分图
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
   activeFigure: null,   // 当前操作的图 id
   saveState: 'clean',   // clean | dirty | saving | saved | error
-  workdir: '',
   step: '',
-  homeUrl: null,        // 工作台首页（单工程模式为 null）
   llm: null,            // 大模型通道状态
-  flowcharts: [],       // 本工程的流程图
   aiBusy: false,
   aiSuggestions: {},    // selector -> {term, confidence, reason}
   structure: null,      // {source: ai|fallback, groups:[{id,name,role,parts}], names:{part:{name}}}
@@ -148,15 +149,15 @@ export function mutate(fn) {
 
 export async function flush() {
   if (state.saveState !== 'dirty') return;
+  if (api.readOnly) { state.saveState = 'readonly'; bus.emit('save-state'); return; }
   state.saveState = 'saving';
   bus.emit('save-state');
   try {
-    const res = await api.savePlan(state.plan);
-    state.validate = res.validate;
+    const res = await api.putPlan(state.projectId, state.plan, state.planEtag);
+    if (res.etag) state.planEtag = res.etag;
     state.saveState = 'saved';
-    bus.emit('validate');
   } catch (err) {
-    state.saveState = 'error';
+    state.saveState = err.code === 'etag_conflict' ? 'conflict' : 'error';
     console.error('保存失败', err);
   }
   bus.emit('save-state');
@@ -176,26 +177,25 @@ export function setActiveFigure(id) {
   bus.emit('active-figure');
 }
 
-export async function boot() {
-  const data = await api.state();
+export async function boot(projectId) {
+  state.projectId = projectId;
+  const data = await api.getProject(projectId);
+  state.title = data.title;
+  state.step = data.step_name;
   state.assembly = data.assembly;
-  state.plan = data.plan;
-  state.validate = data.validate;
   state.render = data.render;
-  state.rendering = data.rendering;
-  state.workdir = data.workdir;
-  state.step = data.step;
-  state.homeUrl = data.home_url ? `${data.home_url}?token=${encodeURIComponent(
-    new URLSearchParams(location.search).get('token') || '')}` : null;
+  state.rendering = false;
+  state.candidates = data.candidates || [];
   state.llm = data.llm || null;
-  state.flowcharts = data.flowcharts || [];
   state.structure = data.structure || null;
-  state.structureJob = data.structure_job || null;
+  const planRes = await api.getPlan(projectId);
+  state.plan = planRes.plan;
+  state.planEtag = planRes.etag || null;
   indexStructure();
   if (state.structure?.source === 'ai') state.view.colorBy = 'structure';
   const groups = state.structure?.groups || [];
   const total = groups.reduce((n, g) => n + g.parts.length, 0);
   groups.forEach((g) => { if (total > 40 && g.parts.length > 12) state.collapsed.add(g.id); });
-  state.activeFigure = data.plan?.figures?.[0]?.id || null;
+  state.activeFigure = state.plan?.figures?.[0]?.id || null;
   bus.emit('booted');
 }

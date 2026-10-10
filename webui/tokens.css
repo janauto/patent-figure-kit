@@ -1,0 +1,131 @@
+/* 墨线 · 设计令牌（research/03 §四，直接采用）。
+   策略：不推翻、只系统化——保留朱红印章、青蓝选中、纸白墨线，补齐
+   「表面层级 / 三档墨色 / 暗色外壳 / 字阶 / 间距 / 圆角 / 阴影 / 动效」。
+   铁律：图纸区 / 3D 视口 / SVG 预览恒白（--surface-paper），两套主题都锁定。 */
+
+:root {
+  /* 表面层级：用面而非边框做层级 */
+  --surface-0: #f3efe6;     /* 桌面底 */
+  --surface-1: #f8f5ee;     /* 面板 / 卡片 */
+  --surface-2: #fdfcf8;     /* 浮起面：输入 / 下拉 / hover */
+  --surface-paper: #ffffff; /* 图纸 / 预览：恒白，不随主题变 */
+  --viewport-bg: #fbfaf5;   /* 3D 视口描图纸底 */
+
+  /* 墨色三档 + 反白 */
+  --ink-1: #1e1c17;         /* 主文字 / 标题 */
+  --ink-muted: #6a6457;     /* 次要 */
+  --ink-faint: #9a9488;     /* 占位 / 禁用 / 弱提示 */
+  --on-ink: #f8f5ee;        /* 深底反白 */
+
+  /* 分隔线两档 */
+  --hair: #1e1c1715;        /* 发丝线，退为次要手段 */
+  --hair-strong: #1e1c1733;
+
+  /* 品牌 / 强调（可替换；现为藏青家族，与交付惯例一致） */
+  --brand: #1c4d8f;         /* 主强调：选中 / 焦点 / 链接 */
+  --brand-ink: #15386a;     /* 主强调按压态 */
+  --brand-wash: #1c4d8f14;  /* 主强调淡底 */
+
+  /* 语义色（沿用印章体系） */
+  --seal: #b43a2b;          /* 动作 / 当前 / FAIL（印章朱红） */
+  --seal-deep: #93291c;
+  --seal-wash: #b43a2b12;
+  --ok: #2e7d4f;            /* 合格 */
+  --ok-wash: #2e7d4f0d;
+  --warn: #8a6d00;          /* 注意 */
+  --warn-bg: #fff3d6;
+
+  /* 焦点环（统一 :focus-visible） */
+  --focus-ring: 0 0 0 2px var(--surface-paper), 0 0 0 4px var(--brand);
+
+  /* 字体栈：西文在前、中文在后；system-first 保离线 */
+  --font-sans: ui-sans-serif, -apple-system, "Segoe UI", "Inter",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-song: "Songti SC", "STSong", "Source Han Serif SC", "SimSun", serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* 字阶：size / line-height / weight（中文友好，base 14） */
+  --t-display: 700 32px/1.2  var(--font-song);
+  --t-h1:      700 22px/1.3  var(--font-song);
+  --t-h2:      700 17px/1.35 var(--font-song);
+  --t-h3:      600 15px/1.4  var(--font-sans);
+  --t-body:    400 14px/1.6  var(--font-sans);
+  --t-body-sm: 400 13px/1.55 var(--font-sans);
+  --t-caption: 400 12px/1.5  var(--font-sans);
+  --t-mono:    400 12px/1.5  var(--font-mono);
+
+  /* 4px 基准间距阶 */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 24px; --s-6: 32px; --s-7: 48px; --s-8: 64px;
+
+  /* 圆角：保持「制图锐利」，浮起面才略圆 */
+  --r-1: 2px;  --r-2: 4px;  --r-3: 8px;
+
+  /* 阴影：低透明暖色，克制 */
+  --e-1: 0 1px 0 #1e1c170a;
+  --e-2: 0 2px 8px -4px #1e1c1726;
+  --e-3: 0 16px 48px -24px #1e1c1759, 0 2px 8px -4px #1e1c1726;
+
+  /* 动效：时长 + 缓动 */
+  --dur-1: 120ms; --dur-2: 200ms; --dur-3: 320ms;
+  --ease-out:    cubic-bezier(.2, .8, .2, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+
+  /* 旧变量别名：平滑迁移，避免一次性大改（research §4 落地建议） */
+  --paper: var(--surface-0);
+  --sheet: var(--surface-1);
+  --ink: var(--ink-1);
+  --ink-2: var(--ink-muted);
+  --pick: var(--brand);
+  --font-hei: var(--font-sans);
+}
+
+/* 暗色仅外壳；图纸 / 画布恒白（暖黑外壳，与纸面同家族）。
+   就绪即可，M1 默认不开启；由 data-theme 切换。 */
+:root[data-theme="dark"] {
+  --surface-0: #15140f;
+  --surface-1: #1c1b15;
+  --surface-2: #24221b;
+  --surface-paper: #ffffff;  /* 关键：图纸 / 画布深色下仍是白的「聚光灯」 */
+  --viewport-bg: #f4f2ec;
+
+  --ink-1: #efe9db;
+  --ink-muted: #b4ad9d;
+  --ink-faint: #7d7768;
+  --on-ink: #15140f;
+
+  --hair: #efe9db12;
+  --hair-strong: #efe9db24;
+
+  --brand: #5b9be6;
+  --brand-ink: #7fb0ea;
+  --brand-wash: #5b9be61f;
+  --seal: #e06a52;
+  --seal-deep: #e58870;
+  --seal-wash: #e06a521f;
+  --ok: #57b07d;
+  --warn: #d7b85a;
+  --warn-bg: #2a2410;
+}
+:root[data-theme="dark"] body { font-weight: 380; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 统一焦点环：只给键盘焦点，鼠标点击不画环 */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-2);
+}
+
+/* 所有数值等宽对齐 */
+.num, .mono, .qa-val, .part-meta, .head-count,
+[data-tabular] { font-variant-numeric: tabular-nums; }

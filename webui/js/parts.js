@@ -43,9 +43,9 @@ function partRow(p, missing) {
 function structureHead() {
   const s = state.structure;
   const job = state.structureJob || {};
-  const llmOk = state.llm && state.llm.provider !== 'none';
+  const llmOk = state.llm && state.llm.configured;
   const source = job.running
-    ? '<span class="spin dark"></span> AI 正在识别结构…（推理模型约需 2–5 分钟，可继续操作）'
+    ? '<span class="spin"></span> AI 正在识别结构…（可继续操作）'
     : (s?.source === 'ai' ? `AI 识别 · ${esc(s.provider || '')} · ${esc(s.created || '')}`
       : '按 STEP 装配层级自动分组——点「AI 识别结构」换成看得懂的结构名');
   const emptyTerms = (state.plan?.terms || []).filter((t) => !(t.term || '').trim()).length;
@@ -54,7 +54,7 @@ function structureHead() {
     <p class="struct-src${job.error ? ' bad' : ''}">${job.error ? `识别失败：${esc(job.error)}` : source}</p>
     <div class="struct-actions">
       <button class="btn-ai" data-analyze ${job.running || !llmOk ? 'disabled' : ''}
-        title="${llmOk ? '' : '请先在工作台设置里配置大模型'}">✦ ${s?.source === 'ai' ? '重新识别' : 'AI 识别结构'}</button>
+        title="${llmOk ? '' : '未接入 AI；可在术语页手填中文名'}"><span class="ai-mark">AI</span> ${s?.source === 'ai' ? '重新识别' : '识别结构'}</button>
       ${canApply ? `<button class="btn-min" data-apply title="只填术语表里空着的行，人工填过的不动">中文名填入术语${emptyTerms ? `（${emptyTerms} 空）` : ''}</button>` : ''}
     </div></div>`;
 }
@@ -160,8 +160,8 @@ function bind() {
       const g = groupById(b.dataset.gsel);
       const name = window.prompt('结构组名称', g.name);
       if (!name || name.trim() === g.name) return;
-      const res = await api.renameGroups([{ id: g.id, name: name.trim() }]);
-      state.structure = res.structure; indexStructure(); render(); bus.emit('structure');
+      g.name = name.trim();                 // 本地改名（plan 不含结构名，随 plan 自然持久）
+      indexStructure(); render(); bus.emit('structure');
     });
   });
   root.querySelectorAll('[data-solo]').forEach((b) => b.addEventListener('click', () => {
@@ -182,12 +182,7 @@ function bind() {
     toast(`已用「${g.name}」新建 ${id}（${g.parts.length} 种零件）——零件多时出图前可再拆分`, 'ok');
   }));
   root.querySelector('[data-analyze]')?.addEventListener('click', analyze);
-  root.querySelector('[data-apply]')?.addEventListener('click', async () => {
-    const res = await api.applyStructureNames();
-    state.plan = res.plan; state.validate = res.validate;
-    bus.emit('plan'); bus.emit('validate');
-    toast(`已把 ${res.applied.filled.length + res.applied.added.length} 个中文名填入术语表；人工填过的 ${res.applied.kept_human.length} 个未改动`, 'ok');
-  });
+  root.querySelector('[data-apply]')?.addEventListener('click', applyStructureNames);
   const clear = root.querySelector('[data-act="clear"]');
   if (clear) clear.addEventListener('click', () => setSelection([]));
   root.querySelectorAll('.sugg').forEach((btn) => {
@@ -195,29 +190,36 @@ function bind() {
   });
 }
 
+// 结构识别：起一个 suggest 作业演示进度（mock 的结构已预置，作业完成后沿用现有结构）。
 async function analyze() {
   try {
-    const res = await api.analyzeStructure();
-    state.structureJob = res.job;
+    const { job_id } = await api.suggest(state.projectId, false);
+    state.structureJob = { running: true };
     render();
-    poll();
-  } catch (err) { toast('无法开始识别：' + err.message, 'bad'); }
+    api.jobEvents(job_id, {
+      done() {
+        state.structureJob = null;
+        if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
+        bus.emit('structure'); render();
+        toast(`结构识别完成：${state.structure?.groups?.length || 0} 个结构组`, 'ok');
+      },
+      fail(d) { state.structureJob = { error: d.message }; render(); toast('结构识别失败：' + d.message, 'bad'); },
+    });
+  } catch (err) { toast('无法开始识别：' + (err.hint || err.message), 'bad'); }
 }
 
-function poll() {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(async () => {
-    const res = await api.structure();
-    state.structureJob = res.job;
-    if (res.job.running) { render(); poll(); return; }
-    state.structure = res.structure;
-    indexStructure();
-    if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
-    bus.emit('structure');
-    render();
-    if (res.job.error) toast('结构识别失败：' + res.job.error, 'bad');
-    else toast(`结构识别完成：${state.structure.groups.length} 个结构组`, 'ok');
-  }, 3000);
+// 把结构里的中文名填进术语表的空行（人工填过的不覆盖），本地完成后保存 plan。
+function applyStructureNames() {
+  const names = state.structure?.names || {};
+  let filled = 0;
+  mutate((plan) => {
+    const bySel = new Map((plan.terms || []).map((t) => [t.selector, t]));
+    Object.entries(names).forEach(([sel, info]) => {
+      const row = bySel.get(sel);
+      if (row && !(row.term || '').trim()) { row.term = info.name; filled += 1; }
+    });
+  });
+  toast(`已把 ${filled} 个中文名填入术语表；人工填过的未改动`, 'ok');
 }
 
 function applySuggestion(index) {
