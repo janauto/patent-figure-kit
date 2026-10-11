@@ -2221,3 +2221,12 @@ produced the bogus "jsonschema missing" reading on the first pass.
   视图拷贝与「第二步改名失败回滚」。**待 Windows 实机验证**：`msvcrt.locking` 实际语义、
   `OpenProcess` 权限、目录视图拷贝与 `os.replace` 在 Windows 上的行为、符号链接权限不足时的拷贝
   回退。
+
+#### 13.5.6 R1h 收敛：路径包含判定不以「存在」为前提
+
+- `_guard_side_paths` 的包含关系判定改为 `_hits(target, root)`：对目标与根各取全部写法
+  （`_path_forms`：绝对字面路径；`os.path.realpath`——解析最近存在祖先上的全部符号链接、跟随悬空
+  链接到其（未来）目标、再拼接尚不存在的剩余段；`realpath(父目录)/名字`），任一写法落入任一写法
+  即拒绝。**不再有 `out_dir.exists()` 前提**：首次发布时 `-o` 尚不存在，经父目录别名（如
+  `/tmp → /private/tmp`）或指向未来 `out` 的悬空链接给出的 `--json` / `--cache` 同样退出码 2、
+  不写任何文件。提交后、写报告前用同一规则**再校验一次**（纵深防御），不通过则拒写报告。

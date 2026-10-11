@@ -1021,16 +1021,36 @@ def _inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+def _path_forms(path: Path) -> set:
+    """Every spelling under which ``path`` can be reached, computed WITHOUT requiring it to
+    exist (R1h): the absolute lexical path; ``realpath`` — which resolves every symlink in the
+    longest existing prefix, follows dangling links to their (future) targets, and appends the
+    not-yet-existing remainder; and ``realpath(parent)/name`` (the location of a leaf that may
+    itself become a symlink, e.g. the out/ view)."""
+    p = Path(os.path.abspath(str(path)))
+    return {p, Path(os.path.realpath(str(p))),
+            Path(os.path.realpath(str(p.parent))) / p.name}
+
+
+def _hits(target: Path, root: Path) -> bool:
+    """Does ANY spelling of ``target`` fall inside ANY spelling of ``root``? Unconditional —
+    no ``exists()`` precondition: on a first publish ``-o`` does not exist yet, and a symlink
+    alias of its parent (e.g. /tmp → /private/tmp) or a dangling link to the future out/ must
+    still be caught (R1h)."""
+    return any(_inside(t, r) for t in _path_forms(target) for r in _path_forms(root))
+
+
 def _guard_side_paths(args, out_dir: Path) -> Optional[str]:
-    """R1g #1: validate EVERY path this run will write besides its own version, BEFORE
+    """R1g #1 / R1h: validate EVERY path this run will write besides its own version, BEFORE
     rendering — the ``--json`` report (written after the commit) and the ``--cache`` dir.
 
-    Pointer mode: neither may lie in ``-o`` (the view — checked lexically, because the view may
-    not exist yet and will alias the NEW version after the commit, and after resolving
-    symlinks, because ``-o`` aliases the CURRENT version), nor in this run's store
-    ``<out>.versions/``, nor in ANY version store's reserved area (``versions.
-    protected_path_reason``: version dirs, leases, the view, ``current.json``…). ``-o`` itself
-    must not be another store's reserved area (e.g. the workbench's ``studio/out``).
+    Pointer mode: neither may lie in ``-o`` — the view, which may not exist yet and will alias
+    the NEW version after the commit, and which already aliases the CURRENT version — nor in
+    this run's store ``<out>.versions/``, nor in ANY version store's reserved area
+    (``versions.protected_path_reason``). Containment is tested over every spelling of both
+    paths (``_hits``: lexical, symlink-resolved through the nearest existing ancestor, dangling
+    links followed), never gated on existence. ``-o`` itself must not be another store's
+    reserved area (e.g. the workbench's ``studio/out``).
 
     ``--in-place`` (internal): the report may ONLY be this unsealed version's dedicated
     ``render-report.json``; the cache must not be in any store's reserved area."""
@@ -1058,15 +1078,13 @@ def _guard_side_paths(args, out_dir: Path) -> Optional[str]:
     if why:
         return "-o %s %s——它属于另一个版本库，请换一个专用输出目录" % (out_dir, why)
     store_root = _publish.cli_store(out_dir).root
-    view_real = Path(os.path.realpath(str(out_dir)))
     for flag, raw in targets:
-        lexical = Path(os.path.abspath(str(raw)))
-        real = Path(os.path.realpath(str(raw)))
-        if _inside(lexical, out_dir) or (out_dir.exists() and _inside(real, view_real)):
-            return ("%s %s 落在输出视图 -o %s 内（视图即已封口的当前版本，提交后还会指向新版本），"
-                    "请写到 -o 之外" % (flag, raw, out_dir))
-        if _inside(lexical, store_root) or _inside(real, Path(os.path.realpath(str(store_root)))):
-            return "%s %s 落在版本库 %s 内，请写到版本库之外" % (flag, raw, store_root)
+        if _hits(raw, out_dir):
+            return ("%s %s 落在输出视图 -o %s 内（含符号链接别名；视图即已封口的当前版本，"
+                    "提交后还会指向新版本），请写到 -o 之外" % (flag, raw, out_dir))
+        if _hits(raw, store_root):
+            return "%s %s 落在版本库 %s 内（含符号链接别名），请写到版本库之外" % (
+                flag, raw, store_root)
         why = _versions.protected_path_reason(raw)
         if why:
             return "%s %s %s" % (flag, raw, why)
@@ -1272,6 +1290,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except OSError:
             pass
 
+    if args.json_out and not args.in_place:
+        # Defence in depth (R1h): the out/ view and the store now EXIST; re-validate with the
+        # same rule right before the post-commit write. A target that has meanwhile become an
+        # alias of the view/store is refused — the report is never written through it.
+        late = _guard_side_paths(args, out_dir)
+        if late:
+            _fail("拒绝写报告：%s" % late)
+            return EXIT_USAGE
     if args.json_out:
         payload = {
             "schema": REPORT_SCHEMA,

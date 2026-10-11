@@ -553,6 +553,64 @@ def test_side_paths_cannot_overwrite_published_versions(rendered, tmp_path):
     assert _tree_hashes(sealed) == {k: v for k, v in before.items() if k.startswith(str(sealed))}
 
 
+def _snapshot_tree(root: Path) -> list:
+    return sorted((str(q.relative_to(root)), q.is_symlink()) for q in root.rglob("*")) \
+        if root.exists() else []
+
+
+def test_first_publish_aliases_of_the_future_view_are_refused(rendered, tmp_path):
+    """R1h: on a FIRST publish -o does not exist yet. A side path that reaches the future out/
+    through a symlinked parent (like /tmp → /private/tmp) or a dangling link must still be
+    refused — exit 2, nothing written (no view, no store, no report) — for --json AND --cache.
+    Containment is checked over every spelling, with no exists() precondition."""
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)                          # alias/ ≡ real/ (like /tmp ≡ /private/tmp)
+    (tmp_path / "future").symlink_to(real / "out")  # dangling: points at the FUTURE view
+    (tmp_path / "rep.json").symlink_to(real / "out" / "fig1.dxf")   # dangling report link
+    cases = [
+        (alias / "out", "--json", real / "out" / "fig1.dxf"),
+        (real / "out", "--json", alias / "out" / "fig1.dxf"),
+        (alias / "out", "--json", real / "out.versions" / "current.json"),
+        (real / "out", "--json", tmp_path / "future" / "fig1.dxf"),
+        (real / "out", "--json", tmp_path / "rep.json"),
+        (alias / "out", "--cache", real / "out"),
+        (real / "out", "--cache", tmp_path / "future"),
+        (real / "out", "--cache", alias / "out.versions" / "c"),
+    ]
+    before = _snapshot_tree(tmp_path)
+    for out, flag, target in cases:
+        proc = render_in_subprocess(rendered["plan"], rendered["assembly"], out,
+                                    [flag, str(target)])
+        assert proc.returncode == 2, (out, flag, target, proc.stderr[-300:])
+        assert "用法错误" in proc.stderr
+        assert _snapshot_tree(tmp_path) == before, "a refused run must not write anything"
+    # the system alias, when the host has one (macOS: /tmp → /private/tmp)
+    import os as _os
+    import tempfile
+    if _os.path.realpath("/tmp") != "/tmp":
+        base = Path(tempfile.mkdtemp(dir="/tmp"))
+        try:
+            proc = render_in_subprocess(
+                rendered["plan"], rendered["assembly"], base / "out",
+                ["--json", str(Path(_os.path.realpath(str(base))) / "out" / "fig1.dxf")])
+            assert proc.returncode == 2 and list(base.iterdir()) == [], proc.stderr[-300:]
+        finally:
+            import shutil as _sh
+            _sh.rmtree(str(base), ignore_errors=True)
+    # control: the same first publish with a legitimate report path succeeds, and the report
+    # did not land on (or through) any published file
+    rep = tmp_path / "ok.json"
+    good = render_in_subprocess(rendered["plan"], rendered["assembly"], alias / "out",
+                                ["--json", str(rep)])
+    assert good.returncode == 0, good.stderr[-300:]
+    data = json.loads(rep.read_text(encoding="utf-8"))
+    assert data["published"] is True
+    assert SH.normalized_digest(real / "out" / "fig1.dxf") == \
+        SH.normalized_digest(rendered["out_a"] / "fig1.dxf")
+
+
 def test_in_place_report_must_be_the_versions_dedicated_path(rendered, tmp_path):
     from patent_figure import versions as V
     s = V.VersionStore(tmp_path / "store")
