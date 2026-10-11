@@ -71,7 +71,8 @@ class Workspace:
         self.assembly = self.root / "assembly.json"
         self.plan = self.root / "plan.json"
         self.glb = self.root / "model.glb"
-        self.out = self.root / "out"
+        # No ``out`` attribute: ``<root>/out`` is only the VersionStore's view of the current
+        # version; readers resolve versions via VersionStore.snapshot() (R1e #5 / R1f).
         self.cache = self.root / "cache"
         self.history = self.root / ".plan-history"
         self.state = self.root / "state.json"
@@ -466,10 +467,33 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
                 pass
         return rid, res
 
+    def job_diag(rid):
+        """Diagnostics of a job's OWN version (R1f #2): where its files and quarantined figures
+        are, which figures failed, which artefacts were missing — never the published one."""
+        if not rid:
+            return None
+        from patent_figure import versions as _VS
+        store = _VS.VersionStore(ws.root)
+        vd = store.version_dir(rid)
+        if not _VS.RID_RE.match(str(rid)) or not vd.is_dir():
+            return None
+        res = store.read_result(rid) or {}
+        man = store.read_manifest(rid) or {}
+        dd = vd / "diag"
+        return {"version": rid, "version_dir": str(vd),
+                "diag_dir": str(dd) if dd.is_dir() else None,
+                "sealed": store.is_complete(rid), "published": store.current_id() == rid,
+                "failed_figures": [f.get("id") for f in res.get("figures", [])
+                                   if not f.get("pass")],
+                "missing_artefacts": man.get("missing_artefacts")
+                or res.get("missing_artefacts") or [],
+                "log_tail": (res.get("log") or "")[-1500:]}
+
     def job_view() -> dict:
-        """The current render JOB's status (separate from what is published, R1e #5): the
-        project's latest job from the workbench job store when injected (covers REST/MCP jobs),
-        else this sub-app's own job."""
+        """The current render JOB's status (separate from what is published, R1e #5 / R1f #2):
+        ``{id, state, stage, running, ok, error, result, diag}`` — the project's latest job from
+        the workbench job store when injected (covers REST/MCP jobs), else this sub-app's own
+        job. ``result`` here is the JOB's own result; ``diag`` locates its version's files."""
         ext = None
         if job_status is not None:
             try:
@@ -478,14 +502,15 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
                 ext = None
         if ext:
             res = ext.get("result") or {}
-            return {"id": ext.get("id"), "state": ext.get("state"),
+            return {"id": ext.get("id"), "state": ext.get("state"), "stage": ext.get("stage"),
                     "running": ext.get("state") in ("queued", "running"),
                     "ok": bool(res.get("ok")) if ext.get("state") == "succeeded" else False,
                     "error": ext.get("error"), "committed": ext.get("committed"),
-                    "result": res or None}
+                    "result": res or None, "diag": job_diag(ext.get("id"))}
         return {"id": job_state["id"], "state": job_state["state"],
-                "running": job_state["running"], "ok": job_state["ok"],
-                "error": job_state["error"], "result": job_state["result"]}
+                "stage": job_state["state"], "running": job_state["running"],
+                "ok": job_state["ok"], "error": job_state["error"],
+                "result": job_state["result"], "diag": job_diag(job_state["id"])}
 
     def validate_now() -> dict:
         proc = run_cli([str(SCRIPTS / "validate_figure_plan.py"), str(ws.plan),

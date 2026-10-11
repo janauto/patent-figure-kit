@@ -14,6 +14,15 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 from patent_figure import versions as V  # noqa: E402
 
 
+def _commit(store, rid, revision):
+    """Commit the pointer + refresh the view — what publish.commit_version does after sealing
+    (VersionStore has no publish() shortcut any more, R1f bypass list)."""
+    became = store.commit_pointer(rid, revision)
+    if became:
+        store.refresh_view()
+    return became
+
+
 def _seal(store, rid, revision, figs=("fig1",)):
     vd = store.begin(rid)
     (vd / "fig1.dxf").write_text("dxf-" + rid, encoding="utf-8")
@@ -41,10 +50,10 @@ def test_publish_points_current_and_syncs_out(tmp_path):
     s = V.VersionStore(tmp_path)
     _seal(s, "r1", 1)
     with V.state_lock(tmp_path):
-        assert s.publish("r1", 1) is True
+        assert _commit(s, "r1", 1) is True
     assert s.current_id() == "r1" and s.current_dir() == s.version_dir("r1")
     assert (s.out / "fig1.dxf").read_text(encoding="utf-8") == "dxf-r1"
-    assert s.current_result()["ok"] is True
+    assert s.snapshot()[2]["ok"] is True
 
 
 def test_publish_refuses_incomplete_version(tmp_path):
@@ -52,7 +61,7 @@ def test_publish_refuses_incomplete_version(tmp_path):
     s.begin("r1")
     with pytest.raises(ValueError):
         with V.state_lock(tmp_path):
-            s.publish("r1", 1)
+            _commit(s, "r1", 1)
     assert s.current_id() is None
 
 
@@ -62,8 +71,8 @@ def test_monotonic_revision_refuses_stale(tmp_path):
     _seal(s, "rB", 2)
     _seal(s, "rA", 1)                       # older revision, finishes later
     with V.state_lock(tmp_path):
-        assert s.publish("rB", 2) is True
-        assert s.publish("rA", 1) is False  # refused as stale
+        assert _commit(s, "rB", 2) is True
+        assert _commit(s, "rA", 1) is False  # refused as stale
     assert s.current_id() == "rB"
     assert (s.out / "fig1.dxf").read_text(encoding="utf-8") == "dxf-rB"
 
@@ -101,7 +110,7 @@ def test_sync_out_handles_legacy_real_directory(tmp_path):
     (s.out / "stale.dxf").write_text("old", encoding="utf-8")
     _seal(s, "r1", 1)
     with V.state_lock(tmp_path):
-        s.publish("r1", 1)
+        _commit(s, "r1", 1)
     assert (s.out / "fig1.dxf").is_file() and not (s.out / "stale.dxf").exists()
 
 
@@ -112,7 +121,7 @@ def test_copy_fallback_when_symlink_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "_symlink_swap",
                         lambda target: (_ for _ in ()).throw(OSError("no symlink")))
     with V.state_lock(tmp_path):
-        s.publish("r1", 1)
+        _commit(s, "r1", 1)
     assert not s.out.is_symlink()
     assert (s.out / "fig1.dxf").read_text(encoding="utf-8") == "dxf-r1"
 
@@ -122,7 +131,7 @@ def test_recover_reports_incomplete_versions(tmp_path):
     _seal(s, "done", 1)
     s.begin("half")
     with V.state_lock(tmp_path):
-        s.publish("done", 1)
+        _commit(s, "done", 1)
     assert V.VersionStore(tmp_path).recover() == ["half"]
 
 
@@ -148,7 +157,7 @@ def test_reclaim_protects_referenced_version(tmp_path):
     for i in range(1, 8):
         _seal(s, "r%d" % i, i)
         with V.state_lock(tmp_path):
-            s.publish("r%d" % i, i)            # current advances to r7
+            _commit(s, "r%d" % i, i)            # current advances to r7
     s.ref("r1")                                 # an export pins the oldest version
     removed = s.reclaim(keep_success=2)
     kept = {d.name for d in s.results.iterdir()}
@@ -163,7 +172,7 @@ def test_reclaim_keeps_current_and_recent(tmp_path):
     for i in range(1, 6):
         _seal(s, "r%d" % i, i)
         with V.state_lock(tmp_path):
-            s.publish("r%d" % i, i)
+            _commit(s, "r%d" % i, i)
     s.begin("failed")                       # a never-sealed version
     removed = s.reclaim(keep_success=2)
     kept = {d.name for d in s.results.iterdir()}
@@ -301,7 +310,7 @@ def test_install_view_second_rename_failure_restores_old_view(tmp_path, monkeypa
                         lambda target: (_ for _ in ()).throw(OSError("no symlink")))
     _seal_ok(s, "r1", 1)
     with V.state_lock(tmp_path):
-        assert s.publish("r1", 1)
+        assert _commit(s, "r1", 1)
     assert not s.out.is_symlink() and (s.out / "fig1.dxf").read_text("utf-8") == "dxf-r1"
     _seal_ok(s, "r2", 2)
     real_replace = os.replace
@@ -332,7 +341,7 @@ def test_symlink_view_replace_failure_keeps_old_link(tmp_path, monkeypatch):
     s = V.VersionStore(tmp_path)
     _seal_ok(s, "r1", 1)
     with V.state_lock(tmp_path):
-        assert s.publish("r1", 1)
+        assert _commit(s, "r1", 1)
     _seal_ok(s, "r2", 2)
     real_replace = os.replace
     monkeypatch.setattr(V.os, "replace", lambda a, b: (_ for _ in ()).throw(OSError("boom"))
@@ -350,7 +359,7 @@ def test_reconcile_current_rolls_back_okfalse_current_to_last_ok(tmp_path):
     s = V.VersionStore(tmp_path)
     _seal_ok(s, "good", 1)
     with V.state_lock(tmp_path):
-        s.publish("good", 1)
+        _commit(s, "good", 1)
     _seal_ok(s, "bad", 2, ok=False)
     from patent_figure import project_io as pio
     pio.atomic_write_json(s.current_file, {"render_job_id": "bad", "revision": 2})
@@ -384,7 +393,7 @@ def test_acquire_and_reclaim_are_one_critical_section(tmp_path, monkeypatch):
     for i in range(1, 4):
         _seal_ok(s, "r%d" % i, i)
         with V.state_lock(tmp_path):
-            s.publish("r%d" % i, i)
+            _commit(s, "r%d" % i, i)
     real = V.VersionStore.is_publishable
     inside, go = threading.Event(), threading.Event()
 
@@ -421,8 +430,117 @@ def test_acquire_after_reclaim_refuses_without_leaking_a_ref(tmp_path):
     _seal_ok(s, "old", 1)
     _seal_ok(s, "new", 2)
     with V.state_lock(tmp_path):
-        s.publish("new", 2)
+        _commit(s, "new", 2)
     assert "old" in s.reclaim(keep_success=0)
     with pytest.raises(ValueError):
         s.acquire_verified_version("old")
     assert s.referenced() == set()
+
+
+# ----------------------------------------------------------------------------- R1f #1 (cross-process)
+
+import subprocess  # noqa: E402
+import time  # noqa: E402
+
+_SCRIPTS = str(_ROOT / "scripts")
+
+
+def _py(code: str, *args) -> "subprocess.Popen":
+    return subprocess.Popen([sys.executable, "-c", code] + [str(a) for a in args],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def test_next_revision_is_unique_across_processes(tmp_path):
+    """R1f #1: revision allocation is under the cross-process store lock — 6 processes drawing
+    25 revisions each concurrently get 150 distinct, gap-free numbers."""
+    code = ("import sys; sys.path.insert(0, %r)\n"
+            "from patent_figure import versions as V\n"
+            "s = V.VersionStore(sys.argv[1])\n"
+            "print(' '.join(str(s.next_revision()) for _ in range(25)))\n") % _SCRIPTS
+    procs = [_py(code, tmp_path) for _ in range(6)]
+    got = []
+    for p in procs:
+        out, err = p.communicate(timeout=60)
+        assert p.returncode == 0, err
+        got += [int(x) for x in out.split()]
+    assert sorted(got) == list(range(1, 151)), "duplicate or lost revisions across processes"
+
+
+_COMMIT_CHILD = r'''
+import sys, time, json
+from pathlib import Path
+sys.path.insert(0, %r)
+from patent_figure import project_io as pio, versions as V, publish as P
+root, rid, rev, pause, marker = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
+s = V.VersionStore(root)
+real = pio.atomic_write_json
+def slow(path, obj):
+    if Path(path).name == "current.json" and pause > 0:
+        Path(marker).write_text("inside")          # past the stale check, before the write
+        time.sleep(pause)
+    return real(path, obj)
+pio.atomic_write_json = slow
+vd = s.begin(rid)
+(vd / "fig1.dxf").write_text("dxf-" + rid)
+print(json.dumps({"became": P.commit_version(
+    s, rid, rev, {"figures": []}, {"required_artefacts": ["fig1.dxf"]}, ok=True),
+    "t": time.time()}))
+''' % _SCRIPTS
+
+
+def test_commit_compare_and_replace_is_atomic_across_processes(tmp_path):
+    """R1f #1 (Codex repro, real processes): OLD (revision 1) passes the revision comparison
+    and pauses before writing current.json; NEW (revision 2) commits meanwhile. With
+    thread-only locks NEW was overwritten by OLD (current regressed to 1). With the cross-process
+    store lock NEW waits, then wins: current never goes backwards."""
+    marker = tmp_path / "old-inside"
+    old = _py(_COMMIT_CHILD, tmp_path / "store", "old", 1, 3.0, marker)
+    t0 = time.time()
+    while not marker.exists():
+        assert time.time() - t0 < 30, old.stderr.read() if old.poll() is not None else "timeout"
+        time.sleep(0.02)
+    new = _py(_COMMIT_CHILD, tmp_path / "store", "new", 2, 0, tmp_path / "unused")
+    o_out, o_err = old.communicate(timeout=60)
+    n_out, n_err = new.communicate(timeout=60)
+    assert old.returncode == 0 and new.returncode == 0, (o_err, n_err)
+    s = V.VersionStore(tmp_path / "store")
+    assert s.current_id() == "new" and s.current_revision() == 2, \
+        "current regressed to the older revision"
+    assert (s.out / "fig1.dxf").read_text("utf-8") == "dxf-new"
+    import json as _json
+    assert _json.loads(o_out)["t"] <= _json.loads(n_out)["t"], "NEW must have waited for OLD"
+
+
+def test_store_lock_excludes_another_process(tmp_path):
+    """While this process holds a store's state lock, another process cannot take it."""
+    code = ("import sys, time; sys.path.insert(0, %r)\n"
+            "from patent_figure import versions as V\n"
+            "with V.state_lock(sys.argv[1]):\n"
+            "    print(time.time())\n") % _SCRIPTS
+    with V.state_lock(tmp_path):
+        p = _py(code, tmp_path)
+        time.sleep(1.0)
+        released = time.time()
+    out, err = p.communicate(timeout=30)
+    assert p.returncode == 0, err
+    assert float(out.strip()) >= released, "the other process got the lock while we held it"
+
+
+def test_in_place_target_must_be_an_unsealed_version_dir(tmp_path):
+    """R1f bypass list: --in-place may only fill an in-progress version dir."""
+    s = V.VersionStore(tmp_path)
+    vd = s.begin("r1")
+    assert V.is_unsealed_version_dir(vd)
+    assert not V.is_unsealed_version_dir(tmp_path)              # arbitrary folder
+    _seal_ok(s, "r2", 1)
+    assert not V.is_unsealed_version_dir(s.version_dir("r2"))   # sealed = immutable
+    _commit(s, "r2", 1)
+    assert not V.is_unsealed_version_dir(s.out)                 # the view
+    s.mark_cancelled("r1")
+    assert not V.is_unsealed_version_dir(vd)
+
+
+def test_no_compat_publish_shortcuts_remain():
+    """R1f bypass list: the store exposes no publish shortcut that skips commit_version."""
+    for name in ("publish", "write_manifest", "current_result"):
+        assert not hasattr(V.VersionStore, name), name

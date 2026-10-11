@@ -84,6 +84,48 @@ components:
           description: 每种格式的结果（ok/skip/fail）。dwg 在无转换器时为 skip。
         files: {type: array, items: {type: string}}
         download_url: {type: string}
+    RenderJobDiag:
+      description: 本次作业版本的诊断信息（失败时用来定位问题；不代表已发布）。
+      type: object
+      nullable: true
+      properties:
+        version: {type: string, description: 本次作业的版本 id（= 渲染作业 id）}
+        version_dir: {type: string, description: 本次版本目录（本机路径）}
+        diag_dir: {type: string, nullable: true, description: 未过闸图的隔离目录（本机路径），无则 null}
+        sealed: {type: boolean}
+        published: {type: boolean, description: 本次版本是否就是当前已发布版本}
+        failed_figures: {type: array, items: {type: string}}
+        missing_artefacts: {type: array, items: {type: string}}
+        log_tail: {type: string}
+    RenderJobStatus:
+      description: >
+        「本次渲染作业」的状态——与「已发布版本」严格分开（R1e #5 / R1f #2）。失败时 result 仍是
+        上一已发布版本，本次失败只在这里体现。
+      type: object
+      properties:
+        id: {type: string, nullable: true}
+        state: {type: string, nullable: true, enum: [queued, running, succeeded, failed, cancelled, interrupted, null]}
+        stage: {type: string, nullable: true}
+        running: {type: boolean}
+        ok: {type: boolean, nullable: true}
+        error: {nullable: true, description: 失败原因（结构化 Error 或日志尾）}
+        result: {type: object, nullable: true, description: "本次作业自己的结果（含逐图 QA 失败项）；预览 URL 绑定本次版本 ?v=<id>"}
+        diag: {$ref: '#/components/schemas/RenderJobDiag'}
+    RenderStatus:
+      description: >
+        浏览器子应用 GET /p/{pid}/api/render/status 的语义（冻结）：
+        result = 当前**已发布**版本（来自版本库快照；预览 URL 带 ?v=<version>；从未发布则 null）；
+        version = 该已发布版本 id；job = **本次（最近一次）渲染作业**状态（RenderJobStatus）。
+        「成功后再失败」时 result 仍是旧的好版本、job.state=failed 并带 error/diag——前端必须读 job
+        才能显示本次失败，并标明预览/导出属于上一成功版本。
+      type: object
+      required: [running, result, version, job]
+      properties:
+        running: {type: boolean}
+        started: {type: string, nullable: true}
+        result: {type: object, nullable: true, description: 已发布版本的结果（含 version 字段）}
+        version: {type: string, nullable: true}
+        job: {$ref: '#/components/schemas/RenderJobStatus'}
 security:
   - bearer: []
   - sessionCookie: []
@@ -336,6 +378,17 @@ paths:
     post: {tags: [流程图], summary: 按语义 JSON 出流程图, responses: {"200": {description: ok}}}
   /v1/flowcharts/generate:
     post: {tags: [AI], summary: 文字描述 → 流程图, responses: {"200": {description: ok}}}
+  /p/{pid}/api/render/status:
+    parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
+    get:
+      tags: [浏览器子应用]
+      summary: 渲染状态：已发布版本（result）与本次作业（job）分开返回
+      description: >
+        挂在工作台 /p/{pid}/ 下的 Plan Studio 子应用接口（浏览器用；同样接受 Bearer）。语义见
+        components.schemas.RenderStatus：result 永远是已发布版本，job 是本次作业状态（含失败诊断）。
+        GET /p/{pid}/api/state 同理返回 render（已发布）+ version + render_job（本次作业）。
+      responses:
+        "200": {content: {application/json: {schema: {$ref: '#/components/schemas/RenderStatus'}}}}
   /mcp:
     post:
       tags: [MCP]

@@ -36,6 +36,10 @@ def test_bench_records_exitcodes_and_gates_speedup(tmp_path):
     am = tier["worker_amortization"]
     # exit codes + fig counts are recorded for both paths (R1 #13)
     assert "render_returncodes" in seg and len(seg["render_returncodes"]) == 1
+    # R1f bypass list: on this repo the export segment goes through the export service (or is
+    # honestly skipped when the dense tier publishes nothing) — never the legacy direct zip.
+    assert seg["export_path"] and all(x == "export-service" or x.startswith("skipped(")
+                                      for x in seg["export_path"]), seg["export_path"]
     assert len(am["subprocess_returncodes"]) == 2
     assert len(am["worker_returncodes"]) == 2
     assert "equivalent_work" in am

@@ -395,6 +395,115 @@ def test_missing_plan_is_a_usage_error(tmp_path, rendered):
     assert "Traceback" not in proc.stderr
 
 
+# --------------------------------------------------------------------------- R1f #1 / bypass
+
+_CLI_WRAPPER = r'''
+import sys, time, json
+from pathlib import Path
+sys.path.insert(0, %r)
+from patent_figure import project_io as pio, versions as V, publish as P
+role, log, pause = sys.argv[1], Path(sys.argv[2]), float(sys.argv[3])
+real_write = pio.atomic_write_json
+real_commit = P.commit_version
+def stamp(event):
+    with open(str(log), "a") as fh:
+        fh.write(json.dumps({"role": role, "event": event, "t": time.time()}) + "\n")
+def slow_write(path, obj):
+    if Path(path).name == "current.json" and pause > 0:
+        stamp("inside-commit")          # past the revision comparison, before the write
+        time.sleep(pause)
+    out = real_write(path, obj)
+    if Path(path).name == "current.json":
+        stamp("wrote-current")
+    return out
+def logged_commit(*a, **k):
+    if role == "new":                    # interleave: NEW commits only once OLD is INSIDE its
+        while '"old", "event": "inside-commit"' not in log.read_text():   # critical section
+            time.sleep(0.02)
+    stamp("enter-commit")               # before the store lock is requested
+    return real_commit(*a, **k)
+real_next = V.VersionStore.next_revision
+def ordered_next(self):
+    n = real_next(self)
+    stamp("allocated-" + str(n))
+    if role == "old":                    # OLD keeps revision 1 but waits until NEW has drawn
+        while '"new", "event": "allocated' not in log.read_text():   # its own (2) — so both
+            time.sleep(0.02)             # render concurrently and OLD reaches commit first
+    return n
+pio.atomic_write_json = slow_write
+P.commit_version = logged_commit
+V.VersionStore.next_revision = ordered_next
+import render_patent_figure as R
+sys.exit(R.main(sys.argv[4:]))
+''' % str(_SCRIPTS)
+
+
+def test_two_cli_processes_interleaved_commit_never_regresses(rendered, tmp_path):
+    """R1f #1: two REAL CLI processes write the same -o. OLD draws revision 1, passes the
+    comparison and pauses inside the commit; NEW draws revision 2, finishes rendering and tries
+    to commit WHILE OLD is paused. The cross-process store lock makes NEW wait; current ends on
+    NEW (revision 2) — never regressed to OLD — and the two revisions are distinct."""
+    wrapper = tmp_path / "wrap.py"
+    wrapper.write_text(_CLI_WRAPPER, encoding="utf-8")
+    log = tmp_path / "events.jsonl"
+    out = tmp_path / "shared_out"
+    cache = tmp_path / "cache"
+    argv = [str(rendered["plan"]), "--assembly", str(rendered["assembly"]), "-o", str(out),
+            "--cache", str(cache)]
+    warm = render_in_subprocess(rendered["plan"], rendered["assembly"], tmp_path / "warm",
+                                ["--cache", str(cache)])
+    assert warm.returncode == 0, warm.stderr                # warm cache: NEW renders fast
+    old = subprocess.Popen([sys.executable, str(wrapper), "old", str(log), "8"] + argv,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                           cwd=str(_ROOT))
+    import time as _t
+    t0 = _t.time()
+    while not (log.is_file() and "allocated-1" in log.read_text()):
+        assert old.poll() is None and _t.time() - t0 < 120, old.communicate()[1][-800:]
+        _t.sleep(0.05)
+    new = subprocess.Popen([sys.executable, str(wrapper), "new", str(log), "0"] + argv,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                           cwd=str(_ROOT))
+    n_out, n_err = new.communicate(timeout=300)
+    o_out, o_err = old.communicate(timeout=300)
+    assert old.returncode == 0 and new.returncode == 0, (o_err[-600:], n_err[-600:])
+    ev = [json.loads(line) for line in log.read_text().splitlines()]
+    t = {(e["role"], e["event"]): e["t"] for e in ev}
+    # the race was really exercised: NEW reached its commit while OLD was inside its commit
+    assert t[("new", "enter-commit")] < t[("old", "wrote-current")], ev
+    assert t[("new", "wrote-current")] > t[("old", "wrote-current")], ev
+    store = out.parent / (out.name + ".versions")
+    cur = json.loads((store / "current.json").read_text(encoding="utf-8"))
+    revs = {}
+    for d in (store / "results").iterdir():
+        revs[d.name] = json.loads((d / "manifest.json").read_text(encoding="utf-8"))["revision"]
+    assert len(revs) == 2 and len(set(revs.values())) == 2, revs   # no duplicate revision
+    assert cur["revision"] == max(revs.values()) == 2, (cur, revs)  # current never regressed
+    assert revs[cur["render_job_id"]] == 2
+    assert digests(out) == digests(rendered["out_a"])
+
+
+def test_in_place_refuses_anything_but_an_unsealed_version_dir(rendered, tmp_path):
+    """R1f bypass list: the internal --in-place mode cannot be used as a delivery path — it
+    refuses a plain folder, a sealed (published) version and the out/ view, touching nothing."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    proc = render_in_subprocess(rendered["plan"], rendered["assembly"], plain, ["--in-place"])
+    assert proc.returncode == 2 and "--in-place" in proc.stderr
+    assert list(plain.iterdir()) == []
+    out = rendered["out_a"]
+    store = out.parent / (out.name + ".versions")
+    cur_before = (store / "current.json").read_text(encoding="utf-8")
+    sealed = out.resolve()                                   # the current, sealed version dir
+    before = sorted(p.name for p in sealed.iterdir())
+    for target in (sealed, out):
+        proc = render_in_subprocess(rendered["plan"], rendered["assembly"], target,
+                                    ["--in-place"])
+        assert proc.returncode == 2, proc.stderr
+    assert (store / "current.json").read_text(encoding="utf-8") == cur_before
+    assert sorted(p.name for p in sealed.iterdir()) == before
+
+
 # --------------------------------------------------------------------------- regeneration
 
 

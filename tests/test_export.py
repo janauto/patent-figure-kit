@@ -18,6 +18,15 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 from patent_figure import export as EX  # noqa: E402
 from patent_figure import versions as V  # noqa: E402
 
+
+def _commit(store, rid, revision):
+    """Commit the pointer + refresh the view — what publish.commit_version does after sealing
+    (VersionStore has no publish() shortcut any more, R1f bypass list)."""
+    became = store.commit_pointer(rid, revision)
+    if became:
+        store.refresh_view()
+    return became
+
 ART = ("fig1.dxf", "fig1.svg", "fig1_annotated.dxf", "fig1_annotated.svg",
        "fig1_filing.dxf", "fig1_filing.svg", "reference-numerals.json")
 
@@ -32,7 +41,7 @@ def _publish(store, rid, revision, tag):
     m = {"ok": True, "required_artefacts": list(ART)}
     store.seal(rid, m, revision)
     with V.state_lock(store.root):
-        assert store.publish(rid, revision)
+        assert _commit(store, rid, revision)
     return vd
 
 
@@ -101,3 +110,23 @@ def test_zip_dir_is_atomic(tmp_path):
     z = EX.zip_dir(src, tmp_path / "b.zip")
     assert zipfile.ZipFile(str(z)).namelist() == ["a/x.txt"]
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_cli_versions_export_through_the_same_service(tmp_path):
+    """R1f bypass list: bench.py's export timing (and any tool exporting a direct-CLI output)
+    goes through acquire → build_bundle → zip_dir; CLI results mark figures ``gate_pass``."""
+    from patent_figure import publish as P
+    vs = P.cli_store(tmp_path / "out")
+    vd = vs.begin("c1")
+    for name in ("fig1.dxf", "fig1.qa.json", "reference-numerals.json"):
+        (vd / name).write_text(name, encoding="utf-8")
+    assert P.commit_version(vs, "c1", vs.next_revision(),
+                            {"figures": [{"id": "fig1", "gate_pass": True}]},
+                            {"required_artefacts": ["fig1.dxf", "fig1.qa.json",
+                                                    "reference-numerals.json"]}, ok=True)
+    with EX.acquire(vs.root) as pin:
+        out = EX.build_bundle(pin, tmp_path / "b", variants=("raw",), formats=("dxf",))
+        EX.zip_dir(tmp_path / "b", tmp_path / "b.zip")
+    assert out["manifest"] == {"fig1/原始/dxf": "ok"}
+    assert "原始出图/fig1.dxf" in zipfile.ZipFile(str(tmp_path / "b.zip")).namelist()
+    assert vs.referenced() == set()

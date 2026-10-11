@@ -386,46 +386,61 @@ class JobStore:
             job._persist()
         return job
 
-    def run(self, job: Job, fn: "Callable[[Job], Optional[Dict[str, Any]]]") -> None:
+    def run(self, job: Job, fn: "Callable[[Job], Optional[Dict[str, Any]]]",
+            finalizer: "Optional[Callable[[], None]]" = None) -> None:
         """Execute ``fn(job)`` synchronously, driving the state machine and events.
 
         ``fn`` does the real work and may call ``job.emit`` for stages/progress/logs and
         ``job.raise_if_cancelled()`` at checkpoints. Raise ``JobCancelled`` to cancel,
         anything else to fail. This is normally the target of a background thread.
-        """
-        if job.cancel_requested:
-            job.emit(EV_ERROR, "作业已取消", stage=CANCELLED)
-            job._set_state(CANCELLED)
-            job._persist()
-            return
-        job._set_state(RUNNING)
-        job.emit(EV_STAGE, "running", stage=RUNNING, progress=0.0)
-        try:
-            result = fn(job)
-            job.raise_if_cancelled()
-            job.result = result if isinstance(result, dict) else {"value": result}
-            job._set_state(SUCCEEDED)
-            job.emit(EV_DONE, job.result, stage=SUCCEEDED, progress=1.0)
-        except JobCancelled:
-            job._set_state(CANCELLED)
-            job.emit(EV_ERROR, "作业已取消", stage=CANCELLED)
-        except BaseException as exc:  # noqa: BLE001 — report, never leak a thread exception
-            code = getattr(exc, "code", "E_JOB_FAILED")
-            job.error = {"code": str(code), "message": str(exc),
-                         "hint": getattr(exc, "hint", "") or ""}
-            # A structured failure (e.g. a render that ran but did not pass QA) may carry a
-            # result payload with the per-figure diagnostics — keep it queryable (R1 #5).
-            payload = getattr(exc, "result", None)
-            if isinstance(payload, dict):
-                job.result = payload
-            job._set_state(FAILED)
-            job.emit(EV_ERROR, job.error, stage=FAILED)
-        finally:
-            job._persist()
 
-    def start(self, job: Job, fn: "Callable[[Job], Optional[Dict[str, Any]]]") -> threading.Thread:
-        """Run ``fn`` in a daemon thread. Returns the thread (join in tests)."""
-        t = threading.Thread(target=self.run, args=(job, fn), daemon=True)
+        ``finalizer`` (R1f #3) runs exactly once on EVERY path out of ``run`` — including a job
+        cancelled before ``fn`` ever started — so a resource taken at submit time (an export's
+        version pin) can never outlive the job.
+        """
+        try:
+            if job.cancel_requested:
+                if job.state != CANCELLED:          # JobStore.cancel already finalised a QUEUED job
+                    job.emit(EV_ERROR, "作业已取消", stage=CANCELLED)
+                    job._set_state(CANCELLED)
+                    job._persist()
+                return
+            job._set_state(RUNNING)
+            job.emit(EV_STAGE, "running", stage=RUNNING, progress=0.0)
+            try:
+                result = fn(job)
+                job.raise_if_cancelled()
+                job.result = result if isinstance(result, dict) else {"value": result}
+                job._set_state(SUCCEEDED)
+                job.emit(EV_DONE, job.result, stage=SUCCEEDED, progress=1.0)
+            except JobCancelled:
+                job._set_state(CANCELLED)
+                job.emit(EV_ERROR, "作业已取消", stage=CANCELLED)
+            except BaseException as exc:  # noqa: BLE001 — report, never leak a thread exception
+                code = getattr(exc, "code", "E_JOB_FAILED")
+                job.error = {"code": str(code), "message": str(exc),
+                             "hint": getattr(exc, "hint", "") or ""}
+                # A structured failure (e.g. a render that ran but did not pass QA) may carry a
+                # result payload with the per-figure diagnostics — keep it queryable (R1 #5).
+                payload = getattr(exc, "result", None)
+                if isinstance(payload, dict):
+                    job.result = payload
+                job._set_state(FAILED)
+                job.emit(EV_ERROR, job.error, stage=FAILED)
+            finally:
+                job._persist()
+        finally:
+            if finalizer is not None:
+                try:
+                    finalizer()
+                except Exception:  # noqa: BLE001 — a finalizer must never mask the job's outcome
+                    pass
+
+    def start(self, job: Job, fn: "Callable[[Job], Optional[Dict[str, Any]]]",
+              finalizer: "Optional[Callable[[], None]]" = None) -> threading.Thread:
+        """Run ``fn`` in a daemon thread. Returns the thread (join in tests). ``finalizer`` runs
+        once when the job leaves ``run`` by any path (see ``run``)."""
+        t = threading.Thread(target=self.run, args=(job, fn, finalizer), daemon=True)
         t.start()
         return t
 

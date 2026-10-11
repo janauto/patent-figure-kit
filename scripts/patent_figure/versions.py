@@ -23,22 +23,153 @@ OCP-free: only orchestrates paths; ``occ_backend`` is the only OCP module.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from patent_figure import project_io as _pio
 
-_state_locks: Dict[str, threading.RLock] = {}
-_rev_locks: Dict[str, threading.Lock] = {}
-_view_locks: Dict[str, threading.Lock] = {}  # serialises out/ view swaps per workspace (R1e #6)
+_state_locks: Dict[str, "StoreLock"] = {}
+_view_locks: Dict[str, "StoreLock"] = {}    # serialises out/ view swaps per store (R1e #6)
 _refs: Dict[str, Dict[str, int]] = {}        # ws_root -> {rid: refcount}, guarded by state_lock
 _guard = threading.Lock()
+
+#: A lockfile whose holder is gone is reclaimed after this long (O_EXCL fallback only — the
+#: fcntl / msvcrt locks are released by the kernel when the holder dies).
+STALE_LOCK_S = 600.0
+LOCK_POLL_S = 0.05
+
+
+def _os_lock(path: Path):
+    """Take an exclusive CROSS-PROCESS lock on ``path``; returns a handle for ``_os_unlock``.
+
+    POSIX ``fcntl.flock`` / Windows ``msvcrt.locking``: kernel locks, released automatically if
+    the holder dies — no stale lock is possible. Fallback (neither module): ``O_CREAT|O_EXCL``
+    lockfile carrying pid + time, reclaimed when older than ``STALE_LOCK_S``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl  # POSIX
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(fd)
+            raise
+        return ("fcntl", fd)
+    except ImportError:
+        pass
+    try:
+        import msvcrt  # Windows
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            while True:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(LOCK_POLL_S)
+        except BaseException:
+            os.close(fd)
+            raise
+        return ("msvcrt", fd)
+    except ImportError:
+        pass
+    excl = path.with_name(path.name + ".excl")
+    while True:
+        try:
+            fd = os.open(str(excl), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.write(fd, ("%d %f" % (os.getpid(), time.time())).encode("ascii"))
+            return ("excl", (fd, excl))
+        except FileExistsError:
+            try:
+                if time.time() - excl.stat().st_mtime > STALE_LOCK_S:
+                    excl.unlink()                       # stale holder: reclaim
+                    continue
+            except OSError:
+                pass
+            time.sleep(LOCK_POLL_S)
+        except OSError as exc:  # pragma: no cover - unwritable store
+            if exc.errno in (errno.EACCES, errno.EROFS):
+                raise
+            raise
+
+
+def _os_unlock(handle) -> None:
+    kind, h = handle
+    if kind == "fcntl":
+        import fcntl
+        try:
+            fcntl.flock(h, fcntl.LOCK_UN)
+        finally:
+            os.close(h)
+    elif kind == "msvcrt":
+        import msvcrt
+        try:
+            os.lseek(h, 0, os.SEEK_SET)
+            msvcrt.locking(h, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(h)
+    else:
+        fd, excl = h
+        os.close(fd)
+        try:
+            excl.unlink()
+        except OSError:
+            pass
+
+
+class StoreLock:
+    """A reentrant lock that is exclusive across THREADS and across PROCESSES (R1f #1).
+
+    In-process threads serialise on an ``RLock``; the outermost holder additionally takes the
+    store's lockfile (``_os_lock``), so two CLI processes writing the same ``-o`` — or anything
+    else sharing a version store — exclude each other for revision allocation, the current
+    compare-and-replace, cancellation decisions, reference pinning and reclamation. Re-entry by
+    the holding thread only bumps a depth counter (no second OS lock, which flock would treat
+    as a separate, self-deadlocking owner)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._rlock = threading.RLock()
+        self._depth = 0
+        self._handle = None
+
+    def acquire(self) -> bool:
+        self._rlock.acquire()
+        if self._depth == 0:
+            try:
+                self._handle = _os_lock(self.path)
+            except BaseException:
+                self._rlock.release()
+                raise
+        self._depth += 1
+        return True
+
+    def release(self) -> None:
+        self._depth -= 1
+        if self._depth == 0:
+            handle, self._handle = self._handle, None
+            try:
+                _os_unlock(handle)
+            finally:
+                self._rlock.release()
+        else:
+            self._rlock.release()
+
+    def __enter__(self) -> "StoreLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.release()
 
 #: A version id as it may appear in a URL (``?v=<rid>``): no separators, no traversal.
 RID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
@@ -48,27 +179,43 @@ RID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 META_FILES = ("manifest.json", "result.json", "cancelled.json", "render-report.json")
 
 
-def _view_lock(ws_root) -> threading.Lock:
+def _view_lock(ws_root) -> StoreLock:
     key = str(Path(ws_root).resolve())
     with _guard:
-        return _view_locks.setdefault(key, threading.Lock())
+        lk = _view_locks.get(key)
+        if lk is None:
+            lk = _view_locks[key] = StoreLock(Path(key) / ".view.lock")
+        return lk
 
 #: Default retention: keep this many most-recent successful (non-current) versions; older
 #: successful versions and all stale failed/cancelled versions are reclaimable (R1c #11).
 KEEP_SUCCESS = 5
 
 
-def state_lock(ws_root) -> threading.RLock:
-    """One state lock per workspace, shared by commit (pointer swap) and cancellation."""
-    key = str(Path(ws_root).resolve())
-    with _guard:
-        return _state_locks.setdefault(key, threading.RLock())
+def is_unsealed_version_dir(path) -> bool:
+    """Is ``path`` an in-progress version directory (``<store>/results/<rid>/``, not yet sealed,
+    not cancelled)? The renderer's internal ``--in-place`` mode may ONLY write into such a
+    directory — never into a published version, the ``out/`` view or an arbitrary folder — so
+    it cannot bypass the publish service (R1f bypass list)."""
+    p = Path(path)
+    try:
+        return (p.is_dir() and not p.is_symlink() and p.parent.name == "results"
+                and bool(RID_RE.match(p.name))
+                and not (p / "manifest.json").exists() and not (p / "cancelled.json").exists())
+    except OSError:
+        return False
 
 
-def _rev_lock(ws_root) -> threading.Lock:
+def state_lock(ws_root) -> StoreLock:
+    """THE lock of a version store — reentrant, cross-thread and cross-process (R1f #1): held
+    for revision allocation, the current compare-and-replace (commit), cancellation, reference
+    pinning (export) and reclamation. Located by the store root (``<root>/.store.lock``)."""
     key = str(Path(ws_root).resolve())
     with _guard:
-        return _rev_locks.setdefault(key, threading.Lock())
+        lk = _state_locks.get(key)
+        if lk is None:
+            lk = _state_locks[key] = StoreLock(Path(key) / ".store.lock")
+        return lk
 
 
 def _fsync_path(path: Path) -> None:
@@ -97,8 +244,9 @@ class VersionStore:
 
     # -- revisions (R1c #3) --------------------------------------------------
     def next_revision(self) -> int:
-        """Allocate a project-level monotonic revision, assigned when inputs are frozen."""
-        with _rev_lock(self.root):
+        """Allocate a project-level monotonic revision, assigned when inputs are frozen. Under
+        the cross-process store lock: two processes can never draw the same number (R1f #1)."""
+        with state_lock(self.root):
             try:
                 n = int(json.loads(self.revision_file.read_text(encoding="utf-8"))["n"])
             except (OSError, ValueError, KeyError):
@@ -156,10 +304,6 @@ class VersionStore:
         data["files"] = files
         _pio.atomic_write_json(self.manifest_path(rid), data)
         _fsync_path(vd)
-
-    # back-compat alias
-    def write_manifest(self, rid: str, manifest: dict) -> None:
-        self.seal(rid, manifest, int(manifest.get("revision", 0)))
 
     def read_manifest(self, rid: str) -> Optional[dict]:
         try:
@@ -252,10 +396,6 @@ class VersionStore:
         if rid and self.is_complete(rid):
             return self.version_dir(rid)
         return None
-
-    def current_result(self) -> Optional[dict]:
-        rid = self.current_id()
-        return self.read_result(rid) if rid and self.is_complete(rid) else None
 
     def snapshot(self):
         """Resolve the current version in ONE read and return ``(rid, vdir, result)`` — every
@@ -363,25 +503,22 @@ class VersionStore:
         """Commit ONLY the pointer (R1d #3): verify integrity, enforce monotonic revision, write
         ``current.json`` atomically + fsync its parent dir. Does NOT touch the ``out/`` view —
         that is refreshed separately so a view-refresh failure can never un-commit. Returns True
-        if this version became current, False if refused as stale. Caller holds ``state_lock``."""
+        if this version became current, False if refused as stale."""
         if revision is None:
             revision = self.revision_of(rid)
-        # ok=false never switches (R1e #1/#2): the store itself refuses, not just the callers.
-        if not self.is_publishable(rid):
-            raise ValueError("拒绝发布未通过完整性校验或未全部过闸（ok=false）的版本 %s" % rid)
-        if revision <= self.current_revision() and self.current_id() is not None:
-            return False                                 # stale: keep as history, don't overwrite
-        _pio.atomic_write_json(self.current_file,
-                               {"render_job_id": str(rid), "revision": int(revision)})
-        _fsync_path(self.root)                           # fsync the pointer's parent dir (R1c #6)
-        return True
-
-    def publish(self, rid: str, revision: Optional[int] = None) -> bool:
-        """Back-compat convenience: commit the pointer, then (best-effort) refresh the view."""
-        became = self.commit_pointer(rid, revision)
-        if became:
-            self.refresh_view()
-        return became
+        # The compare-and-replace runs under the cross-process store lock (reentrant: callers
+        # that already hold it for the cancel decision just nest) — another process cannot
+        # slip a newer commit in between the comparison and the write (R1f #1).
+        with state_lock(self.root):
+            # ok=false never switches (R1e #1/#2): the store itself refuses, not the callers.
+            if not self.is_publishable(rid):
+                raise ValueError("拒绝发布未通过完整性校验或未全部过闸（ok=false）的版本 %s" % rid)
+            if revision <= self.current_revision() and self.current_id() is not None:
+                return False                             # stale: keep as history, don't overwrite
+            _pio.atomic_write_json(self.current_file,
+                                   {"render_job_id": str(rid), "revision": int(revision)})
+            _fsync_path(self.root)                       # fsync the pointer's parent (R1c #6)
+            return True
 
     # -- the out/ view -------------------------------------------------------
     def sync_out(self, rid: str) -> None:

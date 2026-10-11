@@ -92,6 +92,7 @@ def bench_segments(repo: Path, step: Path, work: Path, reps: int) -> Dict[str, o
     seg: Dict[str, List[float]] = {k: [] for k in
                                    ("receive", "analyze", "glb", "render", "annotate", "qa", "export")}
     states: Dict[str, List[float]] = {"no_cache": [], "hlr_hit": [], "plan_partial": [], "rerender": []}
+    export_paths: List[str] = []
 
     for _ in range(reps):
         root = work / ("run-%d" % int(time.perf_counter() * 1e6))
@@ -139,29 +140,62 @@ def bench_segments(repo: Path, step: Path, work: Path, reps: int) -> Dict[str, o
         states["rerender"].append(_time(lambda: render(out4, cache)))
 
         # annotate / qa / export：以首渲产物为输入。密集装配图常过不了 QA 而被隔离到 diag/，
-        # 但分段计时衡量的是操作成本而非是否过闸，所以 out/ 没有就从 diag/ 取一张。
-        figs = sorted(out.glob("fig*.dxf")) or sorted((out / "diag").glob("fig*.dxf"))
+        # 但分段计时衡量的是操作成本而非是否过闸，所以 out/ 没有就从 diag/ 取一张。R1e 起
+        # 失败的一套不发布：diag/ 在本次版本目录 out.versions/results/<id>/diag/（旧基线仓库仍在
+        # out/diag/，两处都找）。
+        diag_dirs = [out / "diag"] + sorted((root / "out.versions" / "results").glob("*/diag"))
+        figs = sorted(out.glob("fig*.dxf")) or \
+            [f for d in diag_dirs for f in sorted(d.glob("fig*.dxf"))]
         if figs:
             fig = figs[0]
             ann = root / "fig1_annotated.dxf"
-            numerals = out / "reference-numerals.json"
+            numerals = fig.parent / "reference-numerals.json"
+            if not numerals.is_file():
+                numerals = fig.parent.parent / "reference-numerals.json"
             seg["annotate"].append(_time(lambda: _run(
                 repo, [repo / "scripts" / "annotate_figure_sheet.py", fig,
                        "--numerals", numerals, "--figure-number", 1, "-o", ann])))
             seg["qa"].append(_time(lambda: _run(
                 repo, [repo / "scripts" / "qa_patent_figure.py", fig, "--kind", "assembly"])))
 
-            def do_zip():
+            # export：经单一导出服务（patent_figure.export：acquire 校验 + 引用 → build_bundle →
+            # zip_dir → release，R1f 旁路清理）从**已发布版本**打包，与交付路径同一份代码。
+            # 只有被测仓库是 R1e 之前的旧基线（没有版本库）时，才退回旧的「直接打包 out/」计时，
+            # 并在 export_path 里如实标注，不把两种口径混成一个数。
+            store = root / "out.versions"
+
+            def do_export():
+                sys.path.insert(0, str(_HERE))
+                from patent_figure import export as _EX
+                with _EX.acquire(store) as pin:
+                    dest = root / "bundle"
+                    _EX.build_bundle(pin, dest, variants=("raw",), formats=("dxf",))
+                    _EX.zip_dir(dest, root / "bundle.zip")
+
+            def do_legacy_zip():
                 z = root / "bundle.zip"
                 with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
                     for f in sorted(out.rglob("*")):
                         if f.is_file():
                             zf.write(f, f.relative_to(out).as_posix())
-            seg["export"].append(_time(do_zip))
+
+            sys.path.insert(0, str(_HERE))
+            from patent_figure import versions as _V
+            if _V.VersionStore(store).current_id():
+                seg["export"].append(_time(do_export))
+                export_paths.append("export-service")
+            elif not store.exists() and out.is_dir():
+                seg["export"].append(_time(do_legacy_zip))
+                export_paths.append("legacy-zip(baseline repo)")
+            else:
+                export_paths.append("skipped(no published version)")
+        else:
+            export_paths.append("skipped(no figure rendered)")
 
     render_rcs = seg.pop("_render_rcs", [])
     render_figcounts = seg.pop("_render_figcounts", [])
     return {
+        "export_path": export_paths,
         "segments_median_s": {k: _median(v) for k, v in seg.items()},
         "candidates_median_s": None,  # WP2
         "cache_states_render_median_s": {k: _median(v) for k, v in states.items()},

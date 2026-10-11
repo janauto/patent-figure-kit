@@ -1156,8 +1156,10 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
 
         ``EXPORT.acquire`` verifies (declared artefact list, sizes, non-empty, sealed ok) AND
         pins in one state-lock critical section (R1e #7). The pin is released on EVERY path:
-        job creation failing, job start failing, or the export body finishing/failing
-        (``Pin.release`` is idempotent, so the overlapping guards are safe)."""
+        job creation or thread start failing (the ``except`` below), and — via the JobStore
+        ``finalizer``, which wraps the whole ``JobStore.run`` — the export body finishing,
+        failing, or the job being cancelled BEFORE its body ever runs (R1f #3). ``Pin.release``
+        is idempotent, so the overlapping guards are safe."""
         reg.need(pid)
         formats = formats or ["docx", "dxf"]
         variant = variant or "both"
@@ -1177,22 +1179,19 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                 "render_job_id": render_job.id})
 
             def fn(j):
-                try:
-                    j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
-                    dest = (jobs.root / j.id / "bundle")
-                    bundle = EXPORT.build_bundle(pin, dest,
-                                                 variants=EXPORT.REST_VARIANTS[variant],
-                                                 formats=formats, dpi=dpi, run_cli=PS.run_cli)
-                    EXPORT.zip_dir(dest, jobs.root / j.id / "bundle.zip")
-                    return {"export_id": j.id, "render_job_id": render_job.id,
-                            "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
-                            "manifest": bundle["manifest"], "notes": bundle["notes"],
-                            "dwg_log": bundle["dwg_log"],
-                            "download_url": base + "/v1/exports/%s/download" % j.id}
-                finally:
-                    pin.release()                        # the read is done (or failed)
+                j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
+                dest = (jobs.root / j.id / "bundle")
+                bundle = EXPORT.build_bundle(pin, dest,
+                                             variants=EXPORT.REST_VARIANTS[variant],
+                                             formats=formats, dpi=dpi, run_cli=PS.run_cli)
+                EXPORT.zip_dir(dest, jobs.root / j.id / "bundle.zip")
+                return {"export_id": j.id, "render_job_id": render_job.id,
+                        "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
+                        "manifest": bundle["manifest"], "notes": bundle["notes"],
+                        "dwg_log": bundle["dwg_log"],
+                        "download_url": base + "/v1/exports/%s/download" % j.id}
 
-            jobs.start(job, fn)
+            jobs.start(job, fn, finalizer=pin.release)   # released on every run() exit path
         except BaseException:
             pin.release()                                # create/start failed → drop the pin
             raise

@@ -857,10 +857,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="QA 阈值覆盖（JSON 文件，覆盖 qa.DEFAULT_THRESHOLDS 的对应项）。"
                         "用于更严/更松的审查口径；缺省用契约冻结的阈值。")
     p.add_argument("--in-place", dest="in_place", action="store_true",
-                   help="直接渲染进 -o 目录，不走版本指针发布、不建立视图（供上层发布服务的内部"
-                        "调用：工作台把图渲进它自己的版本目录，由其版本库负责原子性与提交）。"
-                        "缺省走版本指针发布：整套渲进 <out>.versions/results/<id>/，完整成功才"
-                        "切换指针，-o 是当前版本的视图（R1e #1）。")
+                   help="内部模式（非交付路径）：只允许 -o 指向一个尚未封口的版本目录"
+                        "（<版本库>/results/<id>/），由调用方的发布服务负责封口与提交；指向其他"
+                        "任何目录一律用法错误。缺省走版本指针发布：整套渲进 "
+                        "<out>.versions/results/<id>/，完整成功才切换指针，-o 是当前版本的视图。")
     return p
 
 
@@ -1072,6 +1072,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               % (step, step_sha[:12], expected[:12]))
         return EXIT_FAIL
 
+    if args.in_place and not _versions.is_unsealed_version_dir(out_dir):
+        # R1f: --in-place is the publish service's inner render step, not a delivery path. It
+        # may only fill an in-progress version dir that the service will seal and commit — it
+        # can never write into a published version, the out/ view or an arbitrary directory.
+        _fail("用法错误：--in-place 是内部模式，-o 必须是尚未封口的版本目录"
+              "（<版本库>/results/<id>/）；交付请去掉 --in-place，走版本指针发布。")
+        return EXIT_USAGE
     if not args.in_place:
         # R1e #1: -o becomes the VIEW of the current version (a symlink / copy). A directory
         # that holds this run's own inputs (the plan, assembly or STEP), or the working
@@ -1150,7 +1157,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except OSError:
             pass
         if args.only is not None:
-            merge_source = vs.current_dir()      # carry the current version's other figures
+            # carry the current version's other figures (one snapshot read of the pointer)
+            _cur, merge_source, _res = vs.snapshot()
 
     ok, rendered, errors, numerals_doc, numeral_warnings = _render_set(
         render_dir, figures=figures, plan_doc=plan_doc, assembly=assembly, selected=selected,
@@ -1235,7 +1243,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("提示：本次整套已通过并封口于 %s，但期间已有更新的修订被提交（并发运行），"
               "未切换当前版本。" % render_dir)
     if vs is not None and not ok:
-        cur = vs.current_dir()
+        cur = vs.snapshot()[1]
         print("本次未全部通过，未发布：%s %s；未过闸的图与诊断在 %s"
               % (out_dir, "保持上一次成功的版本" if cur else "尚无已发布版本",
                  render_dir / DIAG_SUBDIR if (render_dir / DIAG_SUBDIR).is_dir()

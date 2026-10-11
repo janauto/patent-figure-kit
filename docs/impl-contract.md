@@ -2167,3 +2167,33 @@ produced the bogus "jsonschema missing" reading on the first pass.
 - **回收**：`reclaim(keep_success=0)` 不再因 `[-0:]` 切片保留全部；CLI 回收保护未封口目录
   （可能是另一进程正在渲染）。
 
+
+#### 13.5.4 R1f 收敛：跨进程锁、状态语义冻结、作业终结回调、旁路清单
+
+- **跨进程存储锁**：`versions.state_lock(root)` 现为 `StoreLock`——线程间 `RLock` + 进程间
+  `<root>/.store.lock` 内核锁（POSIX `fcntl.flock` / Windows `msvcrt.locking`，持有者死亡由内核
+  释放，无陈旧锁；两者都没有时退回 `O_CREAT|O_EXCL` 锁文件 + 超时回收）。可重入（同线程嵌套只
+  计深度，不重复加内核锁）。保护：修订号分配（`next_revision`）、current 比较与替换
+  （`commit_pointer` 自己取锁）、取消决定、引用登记（`acquire_verified_version`）与回收
+  （`reclaim`）。视图刷新另有 `<root>/.view.lock`（同为跨进程锁）。效果：两个 CLI 进程写同一
+  `-o`，修订号不重复，current 不倒退（旧修订在新修订提交后到达只会被拒为过时）。锁顺序：计划锁 →
+  存储锁；视图锁从不在存储锁内获取。
+- **`/p/{pid}/api/render/status` 语义冻结**（openapi `components.schemas.RenderStatus`）：
+  `result` = 当前**已发布**版本（快照；预览 URL 带 `?v=`；从未发布为 null），`version` = 其 id；
+  `job` = **本次（最近一次）渲染作业**：`{id, state, stage, running, ok, error, result, diag}`，
+  `diag = {version, version_dir, diag_dir, sealed, published, failed_figures, missing_artefacts,
+  log_tail}` 指向本次作业自己的版本。「成功后再失败」时 `result` 仍是旧的好版本、`job.state=failed`
+  带 error/diag。`/api/state` 同理：`render`（已发布）+ `version` + `render_job`。前端（WP3）必须
+  读 `job` 显示本次失败，并标明预览/导出属于上一成功版本。
+- **作业终结回调**：`JobStore.run/start(job, fn, finalizer=None)`——`finalizer` 包住整个 `run`，
+  在**所有**出口（成功、失败、执行中取消、**线程运行前已取消**）恰好执行一次。导出的版本引用由它
+  释放（`Pin.release` 幂等）；已被 `cancel()` 收尾的排队作业不再重复写取消事件。
+- **旁路清单与处置**（`tests/test_bypass_guard.py` 静态钉住，新增旁路即失败）：
+  | 旁路 | 处置 |
+  | --- | --- |
+  | 渲染器 `--in-place` | 保留为发布服务的内部渲染步骤，但**只允许** `-o` 为尚未封口的版本目录（`versions.is_unsealed_version_dir`）；普通目录、已封口版本、out 视图一律用法错误且不写任何文件。只有 `studio_ext.render_version` 传它。 |
+  | `bench.py` 独立 ZIP | 导出分段改走 `export.acquire → build_bundle → zip_dir`；仅当被测仓库是没有版本库的旧基线时才用旧的直接打包计时，并在 `export_path` 如实标注。诊断件改从版本目录 `diag/` 取。 |
+  | `VersionStore.publish()` / `write_manifest()` / `current_result()` | **删除**（只有测试在用，测试改走 `commit_pointer` + `refresh_view`）。 |
+  | `Workspace.out` | **删除**（`<root>/out` 只是版本库视图，读者一律 `snapshot()`）。 |
+  | CLI `--only` 合并源 / 失败提示 | 改为 `snapshot()` 读取，不再单独 `current_dir()`。 |
+  非交付的只读路径（不入清单）：验收与测试直接读 `-o/fig1.dxf`（视图），`studio_ext.ensure_preview_png` 在版本目录里派生预览 PNG（临时文件 + 原子替换，不进 manifest）。

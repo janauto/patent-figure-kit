@@ -27,6 +27,15 @@ from patent_figure import project_io as PIO  # noqa: E402
 from patent_figure import publish as P  # noqa: E402
 from patent_figure import versions as V  # noqa: E402
 
+
+def _commit(store, rid, revision):
+    """Commit the pointer + refresh the view — what publish.commit_version does after sealing
+    (VersionStore has no publish() shortcut any more, R1f bypass list)."""
+    became = store.commit_pointer(rid, revision)
+    if became:
+        store.refresh_view()
+    return became
+
 FIGS = ("fig1", "fig2")
 
 
@@ -259,7 +268,7 @@ def test_startup_isolates_a_verified_but_okfalse_current(tmp_path):
     jobs = J.JobStore(tmp_path / "jobs")
     _seal_job_version(vs, jobs, "good", True, J.SUCCEEDED, committed=False, revision=1)
     with V.state_lock(ws_root):
-        assert vs.publish("good", 1)
+        assert _commit(vs, "good", 1)
     _seal_job_version(vs, jobs, "bad", False, J.SUCCEEDED, committed=True, revision=2)
     PIO.atomic_write_json(vs.current_file, {"render_job_id": "bad", "revision": 2})
     vs.sync_out("bad")
@@ -305,7 +314,7 @@ def test_startup_interrupted_job_of_the_current_version_becomes_consistent_succe
     jobs = J.JobStore(tmp_path / "jobs")
     _seal_job_version(vs, jobs, "r1", True, J.RUNNING)
     with V.state_lock(ws_root):
-        assert vs.publish("r1", 1)
+        assert _commit(vs, "r1", 1)
     jobs2 = J.JobStore(tmp_path / "jobs")
     assert jobs2.get("r1").state == J.INTERRUPTED
     P.reconcile_startup(ws_root, jobs2, "p1")

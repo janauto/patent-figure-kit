@@ -46,6 +46,7 @@ def test_openapi_paths_match_live_routes(tmp_path):
     yaml = pytest.importorskip("yaml")
     import workbench as W
 
+    import plan_studio as PS
     reg = W.Registry(tmp_path / "data", "t0k")  # no projects needed; isolated tmp dir
     app = W.build_workbench(reg, "t0k", 8790)
     live = set()
@@ -53,6 +54,11 @@ def test_openapi_paths_match_live_routes(tmp_path):
         methods = getattr(route, "methods", None) or set()
         for m in methods:
             live.add((m.upper(), getattr(route, "path", "")))
+    # Browser sub-app routes are dispatched under /p/{pid} (R1f #2 documents render/status).
+    sub = PS.build_app(PS.Workspace(tmp_path / "x.stp", tmp_path / "ws"), "t0k")
+    for route in sub.routes:
+        for m in getattr(route, "methods", None) or set():
+            live.add((m.upper(), "/p/{pid}" + getattr(route, "path", "")))
 
     spec = yaml.safe_load((_ROOT / "docs" / "openapi.yaml").read_text(encoding="utf-8"))
     missing = []
@@ -743,3 +749,69 @@ def test_rest_export_create_or_start_failure_releases_the_pin(client, fresh_proj
                     json={"formats": ["dxf"], "render_job_id": rid})
     assert vs.referenced() == set(), "the pin must be released when create/start fails"
     assert seen.get(rid) == 1, "released exactly once (idempotent Pin)"
+
+
+def test_status_after_success_then_failure_keeps_published_result_and_reports_job(
+        client, fresh_project):
+    """R1f #2 (frozen semantics of /api/render/status): success → then a failing re-render.
+    ``result`` is STILL the old good published version; ``job`` is the failed job with its
+    error and diagnostics (its own version, failed figures). /api/state agrees."""
+    pid = fresh_project
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    good = rr.json()["job_id"]
+    assert _poll(client, good)["state"] == "succeeded"
+    cur = client.get("/v1/projects/%s/plan" % pid, headers=H)
+    doc = cur.json()
+    doc["figures"] = [{"id": "figX", "caption": "坏", "kind": "assembly",
+                       "members": ["NOPE-NONE"]}]
+    client.put("/v1/projects/%s/plan" % pid, headers={**H, "If-Match": cur.headers["etag"]},
+               json=doc)
+    assert client.post("/p/%s/api/render" % pid, headers=H).status_code == 200   # browser
+    for _ in range(600):
+        st = client.get("/p/%s/api/render/status" % pid, headers=H).json()
+        if not st["running"] and st["job"]["id"] not in (None, good) \
+                and st["job"]["state"] in ("failed", "succeeded", "cancelled"):
+            break
+        time.sleep(0.5)
+    assert st["version"] == good and st["result"]["render_job_id"] == good
+    assert st["result"]["ok"] is True, "result must stay the old GOOD published version"
+    job = st["job"]
+    assert job["state"] == "failed" and job["ok"] is False
+    assert job["error"] and job["error"]["code"] == "E_RENDER_NOT_OK"
+    diag = job["diag"]
+    assert diag["version"] == job["id"] and diag["sealed"] is True and diag["published"] is False
+    assert "figX" in diag["failed_figures"]
+    assert Path(diag["version_dir"]).is_dir()
+    state = client.get("/p/%s/api/state" % pid, headers=H).json()
+    assert state["version"] == good and state["render_job"]["state"] == "failed"
+
+
+def test_export_cancelled_before_its_thread_runs_releases_the_pin(client, fresh_project,
+                                                                  monkeypatch):
+    """R1f #3 (deterministic interleaving): the export is cancelled after it was submitted
+    (version pinned) but BEFORE its thread runs the body. The pin must still be released."""
+    from patent_figure import jobs as JOBS
+    from patent_figure import versions as VS
+    pid = fresh_project
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    rid = rr.json()["job_id"]
+    assert _poll(client, rid)["state"] == "succeeded"
+    jobs = client.app.main.state.jobs
+    real_start = jobs.start
+
+    def cancel_then_start(job, fn, finalizer=None):
+        jobs.cancel(job.id)                       # the cancel lands first
+        return real_start(job, fn, finalizer=finalizer)
+
+    monkeypatch.setattr(jobs, "start", cancel_then_start)
+    r = client.post("/v1/projects/%s/export" % pid, headers=H,
+                    json={"formats": ["dxf"], "render_job_id": rid})
+    assert r.status_code == 202
+    j = _poll(client, r.json()["export_id"])
+    assert j["state"] == JOBS.CANCELLED
+    vs = VS.VersionStore(client.app.reg.need(pid).root / "studio")
+    for _ in range(50):
+        if not vs.referenced():
+            break
+        time.sleep(0.1)
+    assert vs.referenced() == set(), "a cancelled-before-run export must not keep its pin"

@@ -116,8 +116,10 @@ records it as `diag_dir` (with `version`, `published`, `current_version`). `--on
 re-renders a single figure while iterating (the other figures of the current version are carried
 into the new set). `-o` must be a dedicated output directory: a pre-existing ordinary folder is
 moved aside to `out.pre-versions-<stamp>/` (never deleted), and a folder that holds the plan,
-assembly or STEP is refused. `--in-place` (internal, used by the workbench) renders straight into
-`-o` without a version store.
+assembly or STEP is refused. `--in-place` is internal to the workbench's publish service and only accepts an unsealed
+version directory as `-o` (anything else is a usage error); never use it for delivery. Two runs
+writing the same `-o` at once are safe: revisions and the commit are serialised by a
+cross-process lock, so the newer revision always ends up current.
 
 `--thresholds overrides.json` tightens or loosens the QA gate (a JSON object of
 `qa.DEFAULT_THRESHOLDS` keys → values); omit it for the contract-frozen thresholds. Use it for

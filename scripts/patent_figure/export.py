@@ -176,7 +176,9 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
     dest.mkdir(parents=True, exist_ok=True)
     formats = list(formats)
     raw_formats = list(raw_formats) if raw_formats is not None else formats
-    figs = sorted([f for f in result.get("figures", []) if f.get("pass")],
+    # workbench results mark a delivered figure ``pass``; direct-CLI results ``gate_pass``
+    figs = sorted([f for f in result.get("figures", [])
+                   if (f.get("pass") if "pass" in f else f.get("gate_pass"))],
                   key=lambda f: (f.get("number") or 999, str(f.get("id"))))
     manifest: Dict[str, str] = {}
     notes: List[str] = []

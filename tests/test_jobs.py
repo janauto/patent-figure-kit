@@ -261,3 +261,37 @@ def test_sse_frame_format(tmp_path):
     assert "event: stage\n" in frame
     assert frame.endswith("\n\n")
     assert '"progress": 0.5' in frame
+
+
+def test_finalizer_runs_when_cancelled_before_the_thread_runs(tmp_path):
+    """R1f #3: a resource taken at submit time (an export's version pin) is released even when
+    the job is cancelled BEFORE its run function ever starts — the finalizer wraps the whole
+    JobStore.run. Exactly once; one cancel terminal event (no duplicate)."""
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("export", "p")
+    store.cancel(job.id)                          # cancel lands before the thread is scheduled
+    calls, ran = [], []
+    t = store.start(job, lambda j: ran.append(1), finalizer=lambda: calls.append(1))
+    t.join(5)
+    assert ran == [] and calls == [1]
+    assert job.state == J.CANCELLED
+    assert sum(1 for e in job.events if e["type"] == J.EV_ERROR) == 1
+
+
+@pytest.mark.parametrize("outcome", ["ok", "fail", "cancel-mid"])
+def test_finalizer_runs_once_on_every_run_path(tmp_path, outcome):
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("export", "p")
+    calls = []
+
+    def fn(j):
+        if outcome == "fail":
+            raise RuntimeError("boom")
+        if outcome == "cancel-mid":
+            j.request_cancel()
+            j.raise_if_cancelled()
+        return {"ok": True}
+
+    store.run(job, fn, finalizer=lambda: calls.append(1))
+    assert calls == [1]
+    assert job.state == {"ok": J.SUCCEEDED, "fail": J.FAILED, "cancel-mid": J.CANCELLED}[outcome]
