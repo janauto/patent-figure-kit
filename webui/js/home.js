@@ -503,7 +503,18 @@ async function tidyToken() {
 }
 
 // ---------------------------------------------------------------- 启动
+// 旧版后端兼容模式（开发用，不随产品发布）：顶栏中性提示，导出恒锁定
+function showCompatBadge() {
+  if (!isLegacy) return;
+  const b = document.createElement('span');
+  b.className = 'compat-badge'; b.id = 'compat-badge';
+  b.textContent = '旧版后端兼容模式：导出需升级后端';
+  b.title = '开发用兼容模式（不随产品发布）：可浏览、出图、编辑术语与预览；导出需升级到新版后端。';
+  document.querySelector('.hbar-tools')?.prepend(b);
+}
+
 async function start() {
+  showCompatBadge();
   initDialogs();
   if (readOnly) document.body.classList.add('is-static');
   await loadList();

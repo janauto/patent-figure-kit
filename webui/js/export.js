@@ -1,7 +1,9 @@
 // 屏⑤ 导出：版本段控 + 格式矩阵 + 推荐组合 + 打包进度与清单。
 // 递交版 = PDF / Word；DXF / DWG 标「源文件，供再编辑」，不暗示能递交；DWG 不可用时禁选。
 // 四态：QA 未全过（禁用 + 指向 QA）/ 就绪 / 打包中 / 完成清单。
-import { state, renderStale, renderStaleReason, flush, bus, normEtag, planDigest, resultIdentity } from './state.js';
+// 导出按 WP1 契约闭环：请求带 render_job_id（要导出的那次成功渲染）+ plan_etag，后端与该渲染的冻结输入
+// 原子比对，不符 409 →「计划已变更，请重新出图」。旧版后端兼容模式（legacy）一律锁定（修复轮 7 裁决）。
+import { state, renderStale, renderStaleReason, flush, bus, normEtag, resultVersion } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 import { esc } from './esc.js';
@@ -15,7 +17,7 @@ const params = new URLSearchParams(location.search);
 // 只有在票仍与当前计划 + 当前渲染证据完全一致时才发布清单；展示 / 下载缓存结果前再核对一次。
 // 失效代次 packGen：计划一改（render-stale）或出现新的渲染结果（rendered）就 +1，并作废在途打包与缓存 ZIP。
 let packGen = 0; let packSeq = 0; let activePack = null;
-const planKey = () => (state.planEtag ? `e:${normEtag(state.planEtag)}` : `d:${planDigest()}`);
+const planKey = () => normEtag(state.planEtag) || '';
 const evidenceKey = () => JSON.stringify(state.renderInputs || {});
 function openTicket(id) {
   return { id, gen: packGen, plan: planKey(), editVersion: state.editVersion,
@@ -42,6 +44,7 @@ const FORMATS = [
 ];
 
 function gatePassed() {
+  if (api.isLegacy) return false;           // 兼容模式：导出恒锁定，不凭任何本地记录解锁
   if (params.get('state') === 'empty') return false;
   if (renderStale()) return false;          // 计划改过 / 无法证明版本一致 → 锁定导出直到重渲
   const r = state.render;
@@ -58,17 +61,17 @@ function render() {
   }
   // 展示缓存结果前再核对一次：票与当前计划 / 渲染证据不符 → 丢弃（?state=done 为截图用的演示清单，不核对）
   if (result && force !== 'done' && !ticketValid(result.ticket)) result = null;
+  if (api.isLegacy) { renderLegacyLocked(); return; }
   if (!gatePassed() && force !== 'done') {
     const reason = renderStaleReason();
-    const stale = reason && state.render;
     const h2 = {
       'no-proof': '无法证明结果对应当前计划', unsaved: '计划有改动尚未保存',
-      raced: '出图期间计划改过，结果版本不确定', changed: '计划改过，结果已过期',
+      conflict: '计划已变更，请重新出图', changed: '计划改过，结果已过期',
     }[reason] || '还有图未过 QA，不能导出';
     const body = {
-      'no-proof': '为安全起见，未经本会话重新出图的结果不解锁导出。请到「出图与 QA」重新出图以解锁。',
+      'no-proof': '这份结果缺少后端给出的版本证据（输入快照与结果 ID），不解锁导出。请到「出图与 QA」重新出图以解锁。',
       unsaved: '本地改动还没保存好（或保存失败）。先把计划存好、重新出图并过闸，再来导出。',
-      raced: '出图进行时计划被改过，无法确定那次出图用的是哪一版。请到「出图与 QA」重新出图以解锁。',
+      conflict: '服务端核对发现：要导出的出图结果与计划版本不一致（409）。请到「出图与 QA」重新出图、过闸后再导出。',
       changed: '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」重新出图并过闸再来导出。',
     }[reason] || '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」按提示修改并重渲，全过后再来导出。';
     host.innerHTML = `<div class="exp-blank">
@@ -82,32 +85,30 @@ function render() {
   }
   if (result) { renderDone(); return; }
 
-  const legacy = api.isLegacy;
+  // 最近一次出图失败时：导出的是上一成功版本（已发布版本），写明版本
+  const job = state.renderJob;
+  const ver = resultVersion(state.render);
+  const prevNote = (job && ['failed', 'interrupted'].includes(job.state) && force !== 'done')
+    ? `<div class="exp-note">最近一次出图未成功；这里导出的是<b>上一成功版本</b>${ver ? `（版本 <span class="mono">${esc(ver)}</span>${state.render?.finished_at ? ` · ${esc(state.render.finished_at)}` : ''}）` : ''}。</div>` : '';
   host.innerHTML = `
     <div class="exp-wrap">
+      ${prevNote}
       <section class="exp-sec">
         <h3>① 版本</h3>
-        ${legacy ? `<div class="legacy-note">现有后端固定打包<b>递交版（仅图号）、交底版（图号+件号表）、原始出图</b>三版，
-          无法按版本筛选——接线新版后可选。</div>`
-        : `<div class="seg big">
+        <div class="seg big">
           <button class="seg-btn ${variant === 'filing' ? 'on' : ''}" data-v="filing">递交版<span>仅图号</span></button>
           <button class="seg-btn ${variant === 'disclosure' ? 'on' : ''}" data-v="disclosure">交底版<span>图号 + 件号表</span></button>
           <button class="seg-btn ${variant === 'both' ? 'on' : ''}" data-v="both">两版都要<span>推荐</span></button>
-        </div>`}
+        </div>
       </section>
 
       <section class="exp-sec">
         <h3>② 格式</h3>
-        ${legacy ? '<p class="hint" style="margin-bottom:8px">现有后端固定产出 交底版 Word + DXF（各版）+ 附图说明；DWG 可选，PDF 暂不支持。</p>' : ''}
         <div class="fmt-grid">${FORMATS.map((f) => {
-          const noPdf = f.k === 'pdf' && legacy;              // 旧后端不产出 PDF（F1 属后续工作包）
           const noDwg = f.k === 'dwg' && !dwgOk;
-          const fixed = legacy && (f.k === 'docx' || f.k === 'dxf');   // 旧后端固定包含，不可取消
-          const disabled = noPdf || noDwg || fixed;
-          const on = fixed ? true : (picked.has(f.k) && !disabled);
-          const why = noPdf ? '现有后端不产出 PDF——接线后由新版提供'
-            : (noDwg ? '本机未检出 DWG 转换器（ODA / LibreDWG），不可用'
-              : (fixed ? '现有后端固定包含，无法取消' : ''));
+          const disabled = noDwg;
+          const on = picked.has(f.k) && !disabled;
+          const why = noDwg ? '本机未检出 DWG 转换器（ODA / LibreDWG），不可用' : '';
           return `<label class="fmt-card ${on ? 'on' : ''} ${disabled ? 'disabled' : ''}">
             <input type="checkbox" data-fmt="${f.k}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
             <div class="fmt-head"><b>${esc(f.name)}</b><span class="fmt-tag ${f.tag === '源文件' ? 'src' : ''}">${esc(f.tag)}</span></div>
@@ -117,10 +118,8 @@ function render() {
         }).join('')}</div>
         <div class="reco">
           <span class="reco-mark">推荐组合</span>
-          <b>${legacy ? '交底版 Word + DXF' : '递交版 PDF + 交底版 Word'}</b>
-          <span class="muted">${legacy
-            ? '现有后端出交底版 Word（带件号表，给代理所核对）与 DXF 源文件；递交版 PDF 待接线新版后提供。'
-            : '递交版只放图号，按形式要求排版，供代理所用于递交稿（最终以受理为准）；交底版带件号表，给代理所核对。DXF/DWG 是给要再编辑的人的源文件，不用于递交。'}</span>
+          <b>递交版 PDF + 交底版 Word</b>
+          <span class="muted">递交版只放图号，按形式要求排版，供代理所用于递交稿（最终以受理为准）；交底版带件号表，给代理所核对。DXF/DWG 是给要再编辑的人的源文件，不用于递交。</span>
         </div>
       </section>
 
@@ -142,6 +141,25 @@ function render() {
     const fill = host.querySelector('#pack-fill'); if (fill) fill.style.width = '62%';
     const log = host.querySelector('#pack-log'); if (log) log.textContent = 'PDF / Word / DXF / DWG 转档…';
   }
+}
+
+// 旧版后端兼容模式：导出恒锁定（架构裁决，修复轮 7）。只说明原因与升级方式，不提供任何解锁路径。
+function renderLegacyLocked() {
+  host.innerHTML = `<div class="exp-blank">
+    <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
+    <p class="stamp-fail">导出锁定</p>
+    <h2>旧版后端兼容模式不支持导出</h2>
+    <p class="muted">旧版后端出图时不冻结输入、结果也没有版本 ID，无法保证打包内容就是当前计划画出来的那一版——
+      所以这里一律不打包。</p>
+    <div class="upgrade-guide">
+      <h3>升级到新版后端后即可导出</h3>
+      <ol>
+        <li>换用新版墨线工作台（提供 <span class="mono">/v1</span> 版本化接口：出图冻结输入、结果带版本 ID）。</li>
+        <li>从工作台首页重新进入本工程，重新出图并过闸。</li>
+        <li>导出时由后端按「出图结果 ID + 计划版本」原子核对，不一致会直接拒绝。</li>
+      </ol>
+      <p class="hint">兼容模式下仍可：浏览工程与 3D、出图预览与查看 QA、编辑术语与分图。</p>
+    </div></div>`;
 }
 
 function renderDone() {
@@ -193,20 +211,6 @@ async function doPack() {
   if (state.editVersion > state.savedVersion || !gatePassed()) {
     end(); toast('结果已不对应当前计划或未过闸，未打包——请先到「出图与 QA」重新出图。', 'bad'); render(); return;
   }
-  if (!state.planEtag) {
-    // legacy（无 ETag、无结果 ID）：旧后端打包的是「服务端此刻的那份结果」。提交前回读一次服务端，
-    // 确认计划与结果仍是本页绑定的那一份（另一页面改计划 / 重新出图后，本页的内存证据不能再背书）。
-    let srv;
-    try { srv = await api.getProject(state.projectId); } catch (err) {
-      if (mine()) { end(); toast('无法核对服务端状态，未打包：' + (err.hint || err.message), 'bad'); render(); }
-      return;
-    }
-    if (!mine()) return;
-    if (srv.rendering || resultIdentity(srv.render) !== resultIdentity(state.render)
-        || planDigest(srv.plan) !== state.renderInputs.digest || !gatePassed()) {
-      end(); toast('服务端的计划或出图结果已在别处变化（如另一页面重新出图），未打包——请刷新后重新出图。', 'bad'); render(); return;
-    }
-  }
   // 提交前开票（同步，紧挨着请求）：完成时只认这张票
   const ticket = openTicket(id);
   const late = () => {                                   // 迟到 / 已作废的完成：不发布，不覆盖当前状态
@@ -216,8 +220,11 @@ async function doPack() {
   };
   const formats = [...picked];
   try {
-    const res = await api.export(state.projectId, { variant, formats, dpi: 300, sheet_preset: '170x257', plan_etag: state.planEtag });
-    if (!mine() || !ticketValid(ticket)) { late(); return; }   // legacy 同步打包：请求返回时就可能已过期
+    // render_job_id = 页面上这份结果的版本 ID；plan_etag = 前端认为的当前计划版本。后端把后者与该渲染的
+    // 冻结输入比对（而不是与服务端当前计划比），不符 409——所以这里发的是当前计划 ETag，不是结果自带的那个。
+    const res = await api.export(state.projectId, { variant, formats, dpi: 300,
+      render_job_id: state.renderInputs.version, plan_etag: state.planEtag });
+    if (!mine() || !ticketValid(ticket)) { late(); return; }
     api.jobEvents(res.job_id, {
       stage(d) {
         if (!mine()) return;
@@ -237,12 +244,21 @@ async function doPack() {
       },
       fail(d) { if (!mine()) return; end(); toast('打包失败：' + d.message, 'bad'); render(); },
     });
-  } catch (err) { if (!mine()) return; end(); toast('无法打包：' + (err.hint || err.message), 'bad'); render(); }
+  } catch (err) {
+    if (!mine()) return;
+    end();
+    if (err.status === 409) {
+      // 后端原子核对不通过：结果与计划版本不一致（或该渲染不可导出）→ 锁定并要求重新出图
+      state.renderInputs = { ...state.renderInputs, conflict: true };
+      toast(`计划已变更，请重新出图（服务端核对：${err.message}）`, 'bad');
+      bus.emit('render-stale');               // 作废缓存包、刷新 QA 提示
+    } else toast('无法打包：' + (err.hint || err.message), 'bad');
+    render();
+  }
 }
 
 export async function mountExport(el) {
   host = el;
-  if (api.isLegacy) picked.delete('pdf');     // 旧后端不产出 PDF，默认不勾
   try { const llm = await api.llmStatus(); dwgOk = llm.dwg_available !== false; } catch { /* 默认可用 */ }
   render();
 }

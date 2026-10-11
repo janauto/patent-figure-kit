@@ -3,6 +3,7 @@
 import { boot, bus, state, setSelection, flush, setView, displayName, mutate } from './state.js';
 import { api, readOnly } from './api.js';
 import { applyBrand } from './brand.js';
+import { esc } from './esc.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const params = new URLSearchParams(location.search);
@@ -276,14 +277,25 @@ function initKeyboard() {
 }
 
 // ---------------------------------------------------------------- 启动
+// 旧版后端兼容模式（开发用，不随产品发布）：顶栏中性提示，导出恒锁定
+function showCompatBadge() {
+  if (!api.isLegacy) return;
+  const b = document.createElement('span');
+  b.className = 'compat-badge'; b.id = 'compat-badge';
+  b.textContent = '旧版后端兼容模式：导出需升级后端';
+  b.title = '开发用兼容模式（不随产品发布）：可浏览、出图、编辑术语与预览；导出需升级到新版后端。';
+  $('.tb-right')?.prepend(b);
+}
+
 async function start() {
+  showCompatBadge();
   initStageNav();
   initKeyboard();
   if (readOnly) document.body.classList.add('is-static');
   try {
     await boot(projectId);
   } catch (err) {
-    document.body.innerHTML = `<div class="fatal">载入工程失败：${err.message}
+    document.body.innerHTML = `<div class="fatal">载入工程失败：${esc(err.message)}
       <br><a href="./home.html">← 回到工程列表</a></div>`;
     return;
   }

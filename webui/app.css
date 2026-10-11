@@ -248,9 +248,24 @@ input, select, textarea { font: inherit; color: var(--ink-1); }
 
 /* ---- 屏④ 出图与 QA ---- */
 .stage-qa { display: block; }
-#qa-host { height: 100%; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
-/* 结果过期时多一条提示栏：留出第三行，否则 qa-top（图号页签/版本/门禁）被挤成 0 高 */
-#qa-host:has(> .stale-bar) { grid-template-rows: auto auto minmax(0, 1fr); }
+/* 三行：提示区（本次失败诊断 / 过期 / 兼容模式，可为空）· qa-top · 主体 */
+#qa-host { height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+.qa-notices:empty { display: none; }
+.qa-notices { max-height: 42vh; overflow-y: auto; }
+.compat-bar { padding: 8px 16px; font: var(--t-body-sm); color: var(--ink-muted); background: var(--surface-2);
+  border-bottom: 1px solid var(--hair); }
+.job-fail { padding: 12px 16px; background: var(--surface-1); border-bottom: 1px solid var(--hair); border-left: 3px solid var(--seal);
+  display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.job-fail-head { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; font: var(--t-body-sm); }
+.job-fail-head b { color: var(--ink-1); }
+.job-fail-fig h4 { font: var(--t-body-sm); font-weight: 600; margin: 4px 0; }
+.job-fail-fig .qa-fixes { border-top: 0; padding-top: 0; }
+.job-fail-note { font: var(--t-body-sm); color: var(--ink-muted); }
+.job-fail-note b { color: var(--ink-1); }
+.qa-blank .job-fail { border: 0; border-left: 3px solid var(--seal); margin: 0 0 var(--s-4); background: none; }
+.qa-gate.compat { color: var(--ink-muted); border: 1px solid var(--hair-strong); background: var(--surface-2); }
+.compat-badge { font: var(--t-caption); color: var(--ink-muted); border: 1px solid var(--hair-strong); border-radius: var(--r-1);
+  padding: 2px 8px; white-space: nowrap; }
 #qa-host > .qa-blank { grid-row: 1 / -1; align-self: center; justify-self: center; margin: 0; }
 .stage-export { overflow-y: auto; }
 #export-host { min-height: 100%; }
@@ -325,8 +340,11 @@ input, select, textarea { font: inherit; color: var(--ink-1); }
 .fmt-tag.src { border-color: var(--ink-faint); color: var(--ink-muted); }
 .fmt-what { font: var(--t-caption); }
 .fmt-why { font: var(--t-caption); color: var(--seal); margin-top: 6px; }
-.legacy-note { font: var(--t-body-sm); color: var(--ink-muted); padding: 10px 12px; border: 1px dashed var(--hair-strong); border-radius: var(--r-2); background: var(--surface-2); }
-.legacy-note b { color: var(--ink-1); }
+.exp-note { font: var(--t-body-sm); color: var(--ink-muted); padding: 10px 12px; border: 1px dashed var(--hair-strong); border-radius: var(--r-2); background: var(--surface-2); }
+.exp-note b { color: var(--ink-1); }
+.upgrade-guide { text-align: left; margin-top: var(--s-4); padding: var(--s-4); border: 1px dashed var(--hair-strong); border-radius: var(--r-2); background: var(--surface-2); }
+.upgrade-guide h3 { font: var(--t-body); font-weight: 600; margin-bottom: var(--s-2); }
+.upgrade-guide ol { margin: 0 0 var(--s-3) 1.2em; display: flex; flex-direction: column; gap: 4px; font: var(--t-body-sm); }
 .reco { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: var(--s-4); padding: 12px 14px;
   border: 1px dashed var(--ok); border-radius: var(--r-2); background: var(--ok-wash); }
 .reco-mark { font: var(--t-caption); color: var(--ok); border: 1px solid var(--ok); border-radius: var(--r-1); padding: 1px 6px; }

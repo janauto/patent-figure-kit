@@ -9,8 +9,11 @@
 * 失败场景：闸门未过（bench-vise 整机候选被拦）、AI 未配置、DWG 不可用；
 * 三个公开示例工程的真实资产（GLB / SVG / QA JSON / 件号表，来自 webui/dev/fixtures/，
   由现有 CLI 生成，只作 mock 数据）；
-* legacy 兼容子应用 /p/{id}/ + /api/*（仿旧 plan_studio 的同步接口：后台线程渲染、无 ETag、
-  无结果 ID、同步打包），供 verify_ui.py 走真实的 legacy 适配路径（api.js 的 legacy 分支）。
+* 渲染作业按 WP1 契约：结果带版本 ID（render_job_id / version）；未全部过闸或计划未过校验的渲染是
+  **失败作业**（error + diag），不发布，已发布版本保持上一成功版本；导出须带 render_job_id + plan_etag，
+  与被导出渲染的冻结输入原子比对，不符 409；
+* /p/{id}/ + /api/* 子应用（供前端的「旧版后端兼容模式」= api.js 的 legacy 分支）：
+  api/render/status 按 openapi RenderStatus 返回 {running, result=已发布, version, job=本次作业}。
 
 OpenAPI（docs/openapi.yaml）WP1 尚未提供，本 mock 的契约为自拟，差异点见 webui/dev/README.md。
 
@@ -265,6 +268,7 @@ GLB_BY_PROJECT = {"gearbox": "planetary-gearbox.glb", "bench-vise": "bench-vise.
 
 PROJECTS = {}        # id -> runtime dict
 JOBS = {}            # job_id -> job dict
+VERSIONS = {}        # 已发布（成功）渲染版本 rid -> {"project", "plan_etag"}；导出只认这里的版本
 EXPORTS = {}         # export_id -> manifest
 LOCK = threading.Lock()
 
@@ -288,6 +292,13 @@ def seed():
         d["id"] = pid
         d["plan_etag"] = 'W/"%s-1"' % pid
         d["plan_rev"] = 1
+        r = d["data"].get("render")
+        if r:                                     # 种子结果 = 一个已发布版本
+            rid = "seed-%s" % pid
+            r["render_job_id"] = r["version"] = rid
+            r.setdefault("inputs", {})["plan_etag"] = d["plan_etag"]
+            VERSIONS[rid] = {"project": pid, "plan_etag": d["plan_etag"]}
+        d["data"]["render_job"] = None
         PROJECTS[pid] = d
     # 准备中 / 失败 两个占位工程，演示列表的加载态与错误态
     PROJECTS["demo-preparing"] = dict(id="demo-preparing", title="（我的）回转支承机构",
@@ -318,7 +329,7 @@ def new_job(kind, project_id=None, fail_stage=None, speed=1.0, result=None):
     jid = "job_" + uuid.uuid4().hex[:10]
     job = {"job_id": jid, "kind": kind, "project_id": project_id,
            "state": "queued", "stage": None, "progress": 0.0, "logs": [],
-           "stages": [], "inputs": {}, "result": result, "error": None,
+           "stages": [], "inputs": {}, "result": result, "error": None, "diag": None,
            "_events": [], "_cv": threading.Condition(), "_done": False}
     JOBS[jid] = job
     t = threading.Thread(target=run_job, args=(job, kind, fail_stage, speed), daemon=True)
@@ -331,6 +342,21 @@ def _emit(job, etype, data):
         eid = len(job["_events"])
         job["_events"].append({"id": eid, "event": etype, "data": data})
         job["_cv"].notify_all()
+
+
+def render_job_status(job):
+    """openapi RenderJobStatus：本次（最近一次）渲染作业的状态，与已发布版本分开。"""
+    st = job.get("state")
+    return {"id": job.get("job_id"), "state": st, "stage": job.get("stage"),
+            "running": st in ("queued", "running"), "ok": (st == "succeeded") if st else None,
+            "error": job.get("error"), "result": job.get("result"), "diag": job.get("diag")}
+
+
+def norm_etag(e):
+    e = (e or "").strip()
+    if e.startswith("W/"):
+        e = e[2:]
+    return e.strip('"')
 
 
 def run_job(job, kind, fail_stage, speed):
@@ -363,12 +389,42 @@ def run_job(job, kind, fail_stage, speed):
         done.append({"stage": name, "label": label, "seconds": elapsed, "ok": True})
         job["stages"] = done
         _emit(job, "stage", {"stage": name, "progress": prog, "seconds": elapsed, "label": label})
+    if kind == "render" and job.get("project_id") and job.get("result") is not None:
+        p = PROJECTS.get(job["project_id"])
+        r = job["result"]
+        if not r.get("ok"):
+            # WP1：未全部过闸 / 计划未过校验 → 失败作业，带诊断；不发布，已发布版本保持不变
+            failed = [f["id"] for f in r.get("figures", []) if not f.get("pass")]
+            if r.get("figures"):
+                err = {"code": "E_RENDER_NOT_OK", "message": "出图未全部过闸/有图缺失：%s" % failed,
+                       "hint": "按每张图的 QA 提示改计划后重渲"}
+            else:
+                err = {"code": "E_PLAN_INVALID", "message": "计划未通过校验，未渲染",
+                       "hint": "按校验提示改计划后重渲"}
+            job["state"] = "failed"
+            job["error"] = err
+            job["diag"] = {"version": job["job_id"], "sealed": True, "published": False,
+                           "failed_figures": failed, "missing_artefacts": [],
+                           "log_tail": (r.get("log") or "")[-1500:]}
+            if p and p.get("data") is not None:
+                p["data"]["render_job"] = render_job_status(job)
+            _emit(job, "error", dict(err, job_id=job["job_id"]))
+            with job["_cv"]:
+                job["_done"] = True
+                job["_cv"].notify_all()
+            return
+        # 成功：发布为当前版本（重新进入也能看到），并登记为可导出版本
+        job["diag"] = {"version": job["job_id"], "sealed": True, "published": True,
+                       "failed_figures": [], "missing_artefacts": [], "log_tail": ""}
+        if p and p.get("data") is not None:
+            p["data"]["render"] = r
+            VERSIONS[job["job_id"]] = {"project": job["project_id"],
+                                       "plan_etag": (job.get("inputs") or {}).get("plan_etag")}
     job["state"] = "succeeded"
-    # 渲染作业：把权威结果落到工程，重新进入也能看到（Codex finding 3）
-    if kind == "render" and job.get("project_id") and job.get("result"):
+    if kind == "render" and job.get("project_id"):
         p = PROJECTS.get(job["project_id"])
         if p and p.get("data") is not None:
-            p["data"]["render"] = job["result"]
+            p["data"]["render_job"] = render_job_status(job)
     _emit(job, "done", {"result": job.get("result")})
     with job["_cv"]:
         job["_done"] = True
@@ -376,18 +432,17 @@ def run_job(job, kind, fail_stage, speed):
 
 
 # --------------------------------------------------------------------------- #
-#  legacy 兼容子应用：/p/{pid}/ + /api/*（仿旧 scripts/plan_studio.py）            #
+#  /p/{pid}/ 子应用（前端「旧版后端兼容模式」= api.js 的 legacy 分支）              #
 # --------------------------------------------------------------------------- #
-# 与旧后端一致的要点：渲染在后台线程里读 plan（不冻结输入）、开工即作废旧结果、结果无 ID 只有完成时间；
-# 打包同步返回 {zip, files}，打包的是「服务端此刻的那份结果」。前端的 legacy 适配逻辑要在这些约束下成立。
-LEGACY = {}                   # pid -> {"running", "result", "started"}
+# 接口形状仿旧 plan_studio 的同步 /api/*（无 ETag），状态语义按 WP1 冻结的 openapi RenderStatus：
+# result = 已发布版本，version = 其 ID，job = 本次（最近一次）渲染作业；失败作业不发布。
+# 前端在兼容模式下只用它浏览、渲染、改术语、预览——导出一律锁定（架构裁决，修复轮 7）。
+LEGACY = {}                   # pid -> {"running", "result", "version", "started", "job"}
 LEGACY_RENDER_SECS = 1.6
-LEGACY_EXPORTS = set()        # 已生成的 zip 名
-_legacy_export_seq = [0]
 
 
 def legacy_shape(r):
-    """把（live 形态的）渲染结果改成旧后端形态：无 inputs/ETag，预览走 /api/preview/。"""
+    """把（live 形态的）渲染结果改成子应用形态：无 inputs/ETag，预览走 /api/preview/。"""
     r.pop("inputs", None)
     for f in r.get("figures", []):
         f["svg"] = "/api/preview/%s" % f["svg"].rsplit("/", 1)[-1]
@@ -403,21 +458,35 @@ def legacy_ws(pid):
     ws = LEGACY.get(pid)
     if ws is None:
         r = copy.deepcopy(p["data"].get("render"))
-        ws = LEGACY[pid] = {"running": False, "started": None,
-                            "result": legacy_shape(r) if r else None}
+        ws = LEGACY[pid] = {"running": False, "started": None, "job": None,
+                            "result": legacy_shape(r) if r else None,
+                            "version": (r or {}).get("version")}
     return ws
 
 
-def legacy_render_job(pid, ws):
-    plan = json.dumps(PROJECTS[pid]["data"]["plan"], ensure_ascii=False, sort_keys=True)  # 线程里读 plan
+def legacy_render_job(pid, ws, jid, fail):
+    plan = json.dumps(PROJECTS[pid]["data"]["plan"], ensure_ascii=False, sort_keys=True)
     time.sleep(LEGACY_RENDER_SECS)
-    src = (PROJECTS.get("gearbox", {}).get("data") or {}).get("render")
-    r = legacy_shape(copy.deepcopy(src)) if src else {"figures": []}
-    r["ok"] = bool(r.get("figures"))
+    r = legacy_shape(render_payload(pid, fail))
+    r["render_job_id"] = r["version"] = jid
     r["finished"] = time.strftime("%H:%M:%S")
     r["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    r["log"] = "mock legacy 渲染 · 读到的 plan sha256=%s" % hashlib.sha256(plan.encode("utf-8")).hexdigest()[:12]
-    ws["result"] = r
+    r.setdefault("log", "")
+    r["log"] = (r["log"] + "\nmock 子应用渲染 · 读到的 plan sha256=%s"
+                % hashlib.sha256(plan.encode("utf-8")).hexdigest()[:12]).strip()
+    failed = [f["id"] for f in r.get("figures", []) if not f.get("pass")]
+    job = {"id": jid, "stage": "render", "running": False, "result": r,
+           "diag": {"version": jid, "sealed": True, "published": bool(r.get("ok")),
+                    "failed_figures": failed, "missing_artefacts": [], "log_tail": r["log"][-1500:]}}
+    if r.get("ok"):
+        ws["result"], ws["version"] = r, jid                  # 只有成功才发布
+        job.update(state="succeeded", ok=True, error=None)
+    else:
+        err = ({"code": "E_RENDER_NOT_OK", "message": "出图未全部过闸/有图缺失：%s" % failed,
+                "hint": "按每张图的 QA 提示改计划后重渲"} if r.get("figures") else
+               {"code": "E_PLAN_INVALID", "message": "计划未通过校验，未渲染", "hint": "按校验提示改计划后重渲"})
+        job.update(state="failed", ok=False, error=err)
+    ws["job"] = job
     ws["running"] = False
 
 
@@ -427,7 +496,8 @@ def legacy_state(pid, ws):
     return {"step": "/mock/%s" % p["step"], "workdir": "/mock/%s" % pid,
             "assembly": d.get("assembly"), "plan": d.get("plan"),
             "validate": d.get("validate") or {"ok": True, "issues": []},
-            "render": ws["result"], "rendering": ws["running"], "home_url": "/home.html",
+            "render": ws["result"], "version": ws["version"], "render_job": ws["job"],
+            "rendering": ws["running"], "home_url": "/home.html",
             "flowcharts": [], "llm": {"provider": LLM["provider"], "provider_label": LLM["provider_label"]},
             "structure": d.get("structure"), "structure_job": {}}
 
@@ -462,6 +532,7 @@ def project_detail(p):
     d = p.get("data") or {}
     out.update(assembly=d.get("assembly"), structure=d.get("structure"),
                candidates=d.get("candidates", []), render=d.get("render"),
+               render_job=d.get("render_job"),          # 本次（最近一次）渲染作业，与已发布 render 分开
                plan=d.get("plan"),                      # 静态只读站要能读到 plan（S2-16）
                validate=d.get("validate") or {"ok": True, "issues": []},
                model_url=f"/v1/projects/{p['id']}/model.glb")
@@ -580,7 +651,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and api == "state":
             return self._send(200, legacy_state(pid, ws))
         if method == "GET" and api == "render/status":
-            return self._send(200, {"running": ws["running"], "result": ws["result"], "started": ws["started"]})
+            return self._send(200, {"running": ws["running"], "result": ws["result"], "version": ws["version"],
+                                    "started": ws["started"], "job": ws["job"]})
         if method == "GET" and api == "model.glb":
             glb = GLB_BY_PROJECT.get(pid)
             return self.static(f"/dev/fixtures/models/{glb}") if glb else self._err(404, "没有模型")
@@ -591,13 +663,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.static(f"/dev/fixtures/{pid}/{name}")
         if method == "GET" and api == "flowcharts":
             return self._send(200, {"flowcharts": []})
-        if method == "GET" and api.startswith("export-file/"):
-            name = api[len("export-file/"):]
-            if name not in LEGACY_EXPORTS:
-                return self._err(404, "没有这个包")
-            body = ("这是 mock legacy 的占位 zip（%s）。" % name).encode("utf-8")
-            return self._send(200, body, "application/zip",
-                              {"Content-Disposition": 'attachment; filename="%s"' % name})
         if method == "PUT" and api == "plan":
             body = self._json_body()
             plan = body.get("plan")
@@ -609,29 +674,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"validate": {"ok": True, "issues": []}})
         if method == "POST" and api == "render":
             self._json_body()
+            fail = (q.get("fail") or [""])[0]                   # ""|"gate"|"validate"（开发用失败场景）
             with LOCK:
                 if ws["running"]:
                     return self._err(409, "已有一次渲染在进行——几何缓存不支持并发写入")
                 ws["running"] = True
                 ws["started"] = time.strftime("%H:%M:%S")
-            threading.Thread(target=legacy_render_job, args=(pid, ws), daemon=True).start()
+                jid = "lr_" + uuid.uuid4().hex[:10]
+                ws["job"] = {"id": jid, "state": "running", "stage": "render", "running": True,
+                             "ok": None, "error": None, "result": None, "diag": None}
+            threading.Thread(target=legacy_render_job, args=(pid, ws, jid, fail), daemon=True).start()
             return self._send(200, {"started": ws["started"]})
-        if method == "POST" and api == "export":
-            body = self._json_body()
-            r = ws["result"]
-            if not (r and r.get("ok") and r.get("figures") and all(f.get("pass") for f in r["figures"])):
-                return self._err(409, "存在未通过 QA 的图，不能导出——按提示改计划后重渲")
-            with LOCK:
-                _legacy_export_seq[0] += 1
-                name = "export-%s-%06d.zip" % (time.strftime("%Y%m%d"), _legacy_export_seq[0])
-                LEGACY_EXPORTS.add(name)
-            files = ["交底版_说明书附图.docx"] + ["%s_%s.dxf" % (f["id"], v) for f in r["figures"]
-                                                for v in ("annotated", "filing", "raw")] + ["附图说明.txt"]
-            if body.get("dwg") and LLM.get("dwg_available", True):
-                files += ["%s_filing.dwg" % f["id"] for f in r["figures"]]
-            return self._send(200, {"zip": name, "files": files, "notes": [],
-                                    "dir": "/mock/%s/%s" % (pid, name[:-4])})
-        return self._err(404, "mock legacy 未实现：%s %s" % (method, api))
+        return self._err(404, "mock 子应用未实现：%s %s" % (method, api))
 
     def do_DELETE(self):
         u = urlparse(self.path)
@@ -689,9 +743,11 @@ class Handler(BaseHTTPRequestHandler):
             job = JOBS.get(m.group(1))
             if not job:
                 return self._err(404, "没有这个作业")
-            return self._send(200, {k: job[k] for k in
-                ("job_id", "kind", "project_id", "state", "stage", "progress",
-                 "logs", "stages", "inputs", "result", "error")})
+            out = {k: job[k] for k in
+                   ("job_id", "kind", "project_id", "state", "stage", "progress",
+                    "logs", "stages", "inputs", "result", "error", "diag")}
+            out["id"] = job["job_id"]
+            return self._send(200, out)
         # SSE
         m = re.fullmatch(r"/v1/jobs/([\w\-]+)/events", path)
         if m:
@@ -811,11 +867,28 @@ class Handler(BaseHTTPRequestHandler):
             job = new_job("render", project_id=m.group(1),
                           result=render_payload(m.group(1), fail, p.get("plan_etag")))
             job["inputs"] = inputs
+            job["result"]["render_job_id"] = job["result"]["version"] = job["job_id"]   # 结果 ID = 版本
+            if p.get("data") is not None:
+                p["data"]["render_job"] = render_job_status(job)
             return self._send(202, {"job_id": job["job_id"], "inputs": inputs})
         # 导出
         m = re.fullmatch(r"/v1/projects/([\w\-]+)/export", path)
         if m:
             p = PROJECTS.get(m.group(1))
+            if not p or not p.get("data"):
+                return self._err(404, "没有这个工程")
+            if body.get("sheet_preset"):
+                return self._err(400, "sheet_preset 尚未实现（WP2）；请不要传该参数", ecode="bad_request")
+            # WP1 契约：绑定一次成功渲染（缺省取已发布版本），plan_etag 与该渲染的冻结输入比对
+            rid = body.get("render_job_id") or ((p["data"].get("render") or {}).get("render_job_id"))
+            ver = VERSIONS.get(rid or "")
+            if not ver or ver["project"] != m.group(1):
+                return self._err(409, "没有可导出的成功渲染（render_job_id 无效或未成功）",
+                                 "请先出图并全部过闸再导出", "render_job_invalid")
+            want = body.get("plan_etag")
+            if want and norm_etag(want) != norm_etag(ver["plan_etag"]):
+                return self._err(409, "请求的 plan_etag 与被导出渲染的输入版本不一致",
+                                 "计划已变更，请重新出图后再导出", "plan_changed")
             formats = body.get("formats", ["pdf", "docx", "dxf"])
             variant = body.get("variant", "both")
             want_dwg = "dwg" in formats
@@ -838,7 +911,7 @@ class Handler(BaseHTTPRequestHandler):
                 "manifest": ["递交版_图1.pdf", "递交版_图2.pdf", "交底版_说明书附图.docx",
                              "fig1.dxf", "fig2.dxf", "附图说明.txt", "核对清单.txt"],
             }
-            return self._send(202, {"export_id": exp_id, "job_id": job["job_id"]})
+            return self._send(202, {"export_id": exp_id, "job_id": job["job_id"], "render_job_id": rid})
         # AI 起名（F9）：按工程的空白术语给中文名建议（前端只写入选中且空白的）
         if path in ("/v1/ai/draft-terms", "/api/llm/draft-terms"):
             if not LLM["configured"]:

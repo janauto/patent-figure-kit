@@ -1,6 +1,6 @@
 // 全局状态与事件总线。plan 是唯一真相（与磁盘上的 plan.json 一一对应）；
 // 界面上的一切改动都收敛为「改 plan → 防抖保存 → 服务器校验」这一条路。
-import { api } from './api.js';
+import { api, normJob } from './api.js';
 
 const listeners = new Map();
 export const bus = {
@@ -15,11 +15,12 @@ export const state = {
   assembly: null,
   plan: null,
   validate: null,       // 服务器 validate 结果 {ok, issues}
-  render: null,         // 最近一次渲染结果
-  // 渲染结果绑定的「输入版本证据」：live 用后端输入快照的 plan_etag，legacy 用「发请求前」捕获的已保存输入摘要。
-  // 没有证据（null）时视为过期并锁定导出——绝不用当前 plan 补造摘要给旧结果背书。
-  // raced=true：该作业在途期间计划被改过（legacy 后端在后台线程里读 plan，无法确定它画的是哪一版）→ 一律锁定。
-  renderInputs: { etag: null, digest: null, raced: false },
+  render: null,         // 已发布的渲染结果（失败的作业不会替换它）
+  renderJob: null,      // 本次（最近一次）渲染作业状态 {id, state, running, ok, error, result, diag}
+  // 渲染结果绑定的版本证据——只用后端给的：输入快照 plan_etag + 结果 ID（版本 rid = render_job_id）。
+  // 没有证据即锁定导出，绝不用当前 plan 补造。conflict=true：导出时后端判定计划已变更（409）。
+  // 旧版后端兼容模式（legacy）不建立任何证据：导出一律锁定（修复轮 7 架构裁决）。
+  renderInputs: { etag: null, version: null, conflict: false },
   rendering: false,
   candidates: [],       // F2-lite 候选分图
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
@@ -144,55 +145,6 @@ export function labelCount(fig) {
 
 // ---- 变更与持久化 ----
 let saveTimer = null;
-// plan 规范化摘要：绑定渲染结果与导出，证明「这张图对应的就是当前这份 plan」。
-// legacy 无 ETag 也能算；键排序后哈希，任何实质改动都会变。
-function canon(v) {
-  if (Array.isArray(v)) return `[${v.map(canon).join(',')}]`;
-  if (v && typeof v === 'object') {
-    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v);
-}
-// 64 位规范化摘要（djb2 + FNV-1a 两路 32 位），键序无关。
-function digest64(v) {
-  const s = canon(v);
-  let h1 = 5381; let h2 = 0x811c9dc5;
-  for (let i = 0; i < s.length; i += 1) {
-    const c = s.charCodeAt(i);
-    h1 = ((h1 << 5) + h1 + c) >>> 0;
-    h2 = Math.imul(h2 ^ c, 0x01000193) >>> 0;
-  }
-  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
-}
-export function planDigest(plan = state.plan) {
-  return plan ? digest64(plan) : '';
-}
-// 渲染结果的身份：整份结果（图、QA、标记表、完成时间、日志）的规范化摘要。
-// legacy 旧后端没有结果 ID，用它把「输入摘要」钉在某一份具体结果上：结果被另一轮渲染替换后身份必变。
-export function resultIdentity(r) {
-  return r ? `${r.finished_at || r.finished || ''}|${digest64(r)}` : '';
-}
-
-// legacy 的「渲染证明」跨会话持久化（每工程一条）：{v, digest（该次渲染的输入摘要）, result（结果身份）}。
-// 只在本页亲手完成、且无竞态的一次渲染后写入；发起新渲染前立即作废（Codex R3f #2）；
-// 跨会话恢复时必须与当前加载到的结果身份一致才采信——工程级摘要本身不再能单独背书。
-const proofKey = (pid) => `inkline-render-proof-${pid}`;
-const legacyDigestKey = (pid) => `inkline-render-digest-${pid}`;   // 轮 3–5 的旧格式（无结果身份），一律不再采信
-export function proofGet(pid) {
-  try {
-    const p = JSON.parse(localStorage.getItem(proofKey(pid)) || 'null');
-    return (p && p.v === 2 && p.digest && p.result) ? p : null;
-  } catch { return null; }
-}
-export function proofSet(pid, proof) {
-  try {
-    localStorage.removeItem(legacyDigestKey(pid));
-    if (proof && proof.digest && proof.result) {
-      localStorage.setItem(proofKey(pid), JSON.stringify({ v: 2, digest: proof.digest, result: proof.result }));
-    } else localStorage.removeItem(proofKey(pid));
-  } catch { /* 隐私模式：不持久化，刷新后锁定 */ }
-}
-
 // ETag 规范化：去掉弱前缀 W/ 与引号再比（代理/框架可能给同一版本加不同修饰）。
 export function normEtag(e) {
   if (!e) return null;
@@ -202,25 +154,25 @@ export function normEtag(e) {
 export function resultEtag(r) {
   return normEtag(r?.inputs?.plan_etag || r?.plan_etag || null);
 }
+// 渲染结果的版本 ID（WP1：render_job_id，即版本目录 rid；子应用结果另带 version）。
+export function resultVersion(r) {
+  return r?.render_job_id || r?.version || null;
+}
 
 // 结果是否过期 / 为何过期：
-//   'unsaved'（有未持久化编辑或保存失败——必须先存好再谈一致）| 'raced'（出图在途期间计划被改过）
-//   | 'no-proof'（无版本证据）| 'changed' | null
+//   'unsaved'（有未持久化编辑或保存失败）| 'legacy'（旧版后端兼容模式：不建立证据，导出恒锁定）
+//   | 'conflict'（导出时后端 409：计划已变更）| 'no-proof'（缺后端版本证据）| 'changed' | null
 export function renderStaleReason() {
   if (!state.render) return null;
-  // 本地还有没落盘的编辑、或上次保存失败 → 立即判过期（live 的 planEtag 此刻还是旧值，不能据此放行）
+  // 本地还有没落盘的编辑、或上次保存失败 → 立即判过期（planEtag 此刻还是旧值，不能据此放行）
   if (state.editVersion > state.savedVersion) return 'unsaved';
   if (state.saveState === 'error' || state.saveState === 'conflict') return 'unsaved';
-  // 判据：有 ETag（live /v1 后端）→ 用 ETag 比对；无 ETag（legacy 旧 /api/*）→ 用输入摘要比对。
-  if (state.planEtag) {                          // live：以后端输入快照的 ETag 为准（权威，冻结于作业提交时）
-    const ev = normEtag(state.renderInputs.etag);
-    if (!ev) return 'no-proof';
-    return ev === normEtag(state.planEtag) ? null : 'changed';
-  }
-  // legacy：以「发请求前」捕获的已保存输入摘要为准（无 ETag）
-  if (state.renderInputs.raced) return 'raced';
-  if (!state.renderInputs.digest) return 'no-proof';
-  return state.renderInputs.digest === planDigest() ? null : 'changed';
+  if (api.isLegacy) return 'legacy';
+  if (state.renderInputs.conflict) return 'conflict';
+  // 只认后端证据：结果冻结输入的 ETag 与结果 ID 都要有，且 ETag 与当前计划一致
+  const ev = normEtag(state.renderInputs.etag);
+  if (!state.planEtag || !ev || !state.renderInputs.version) return 'no-proof';
+  return ev === normEtag(state.planEtag) ? null : 'changed';
 }
 export function renderStale() { return renderStaleReason() !== null; }
 
@@ -312,17 +264,15 @@ export async function boot(projectId) {
   state.plan = planRes.plan;
   state.planEtag = planRes.etag || null;
   state.editVersion = 0; state.savedVersion = 0;
-  // 结果版本证据：绝不用当前 plan 补造。live 用后端结果携带的 plan_etag；legacy 用本工程持久化的渲染证明
-  //（输入摘要 + 结果身份，结果身份不符或后端正在渲染即不采信）。
-  // 没有证据 → renderInputs 全 null → renderStale 判「no-proof」→ 锁定导出并提示「请重新出图」。
-  state.renderInputs = { etag: null, digest: null, raced: false };
-  if (state.render) {
-    state.renderInputs.etag = resultEtag(state.render);                      // live：结果自带的输入快照
-    if (!state.planEtag && !data.rendering) {                                 // legacy：证明须钉在这一份结果上
-      const proof = proofGet(projectId);
-      if (proof && proof.result === resultIdentity(state.render)) state.renderInputs.digest = proof.digest;
-    }
+  // 结果版本证据：只认后端——结果携带的输入快照 plan_etag + 结果 ID（版本）。legacy 兼容模式不建立证据。
+  state.renderInputs = { etag: null, version: null, conflict: false };
+  if (state.render && !api.isLegacy) {
+    state.renderInputs.etag = resultEtag(state.render);
+    state.renderInputs.version = resultVersion(state.render);
   }
+  state.renderJob = data.render_job ? normJob(data.render_job) : null;
+  // 修复轮 5–6 的 legacy 本地证明已作废（裁决：兼容模式不再凭本地记录解锁），顺手清掉残留
+  try { localStorage.removeItem(`inkline-render-proof-${projectId}`); localStorage.removeItem(`inkline-render-digest-${projectId}`); } catch { /* */ }
   indexStructure();
   if (state.structure?.source === 'ai') state.view.colorBy = 'structure';
   const groups = state.structure?.groups || [];

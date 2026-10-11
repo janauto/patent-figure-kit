@@ -52,16 +52,6 @@ SHOTS = [
 ]
 
 
-# 需脚本驱动的状态（无 URL 开关）：legacy 出图在途期间计划被改过 → 结果版本不确定（raced）→ QA 提示 + 导出锁定。
-# 这里在页内直接置出该状态（与 verify_ui.py 的时序用例得到的状态一致），只为截图。
-RACED_JS = """async () => {
-  const st = await import('/js/state.js');
-  st.state.planEtag = null;                      // 旧后端：无 ETag，走输入摘要
-  st.state.renderInputs = { etag: null, digest: st.planDigest(), raced: true };
-  st.bus.emit('rendered');
-}"""
-
-
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -72,16 +62,15 @@ def main():
             page.wait_for_timeout(wait)
             page.screenshot(path=str(OUT / f"{name}.png"))
             print("captured", name)
-        page.goto(f"{B}/index.html?project=gearbox&stage=qa", wait_until="networkidle")
+        # 旧版后端兼容模式（mock 的 /p/{id}/ 子应用 = api.js 的 legacy 分支）：顶栏中性提示 + 导出恒锁定
+        page.goto(f"{B}/p/gearbox/?stage=qa", wait_until="networkidle")
         page.wait_for_timeout(1400)
-        page.evaluate(RACED_JS)
-        page.wait_for_timeout(500)
-        page.screenshot(path=str(OUT / "x5-qa-raced.png"))
-        print("captured", "x5-qa-raced")
-        page.click('.stage-tab[data-stage="export"]')
-        page.wait_for_timeout(900)
-        page.screenshot(path=str(OUT / "x6-export-raced.png"))
-        print("captured", "x6-export-raced")
+        page.screenshot(path=str(OUT / "x5-legacy-qa.png"))
+        print("captured", "x5-legacy-qa")
+        page.goto(f"{B}/p/gearbox/?stage=export", wait_until="networkidle")
+        page.wait_for_timeout(1000)
+        page.screenshot(path=str(OUT / "x6-legacy-export-locked.png"))
+        print("captured", "x6-legacy-export-locked")
         browser.close()
     print("done →", OUT)
 

@@ -294,3 +294,6 @@ body.is-static .hbar-tools [data-open] { display: none; }
   .int-grid { grid-template-columns: 1fr; }
   #home { padding: var(--s-4); }
 }
+/* 旧版后端兼容模式（开发用，不随产品发布）的中性提示 */
+.compat-badge { font: var(--t-caption); color: var(--ink-muted); border: 1px solid var(--hair-strong); border-radius: var(--r-1);
+  padding: 2px 8px; white-space: nowrap; }

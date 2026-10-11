@@ -1,7 +1,8 @@
 // 数据适配器：三种后端形态走同一组方法。
 //   live   —— 新版工作台（§6 /v1/* 契约，带作业 + SSE + 候选分图），对 mock 开发。
-//   legacy —— 仓库现有后端：workbench.py 在 / 挂首页、plan_studio 在 /p/{id}/ 用旧同步 /api/*，
-//             没有候选分图 / 作业 / SSE——优雅降级（轮询代替 SSE，候选分图给出「需要新版后端」提示）。
+//   legacy —— **旧版后端兼容模式（开发用，不随产品发布）**：workbench.py 在 / 挂首页、plan_studio 在
+//             /p/{id}/ 用同步 /api/*，没有候选分图 / 作业 / SSE / 输入冻结——只保留浏览、渲染、术语编辑、
+//             预览；**导出一律锁定**（架构裁决，修复轮 7：旧接口无法证明打包内容对应哪一版计划）。
 //   static —— 读版本化 manifest.json，供 GitHub Pages 等静态演示站只读运行（S2-16）。
 // 选择：?static / file:// → static；页面路径以 home.html|index.html 结尾（mock / 开发入口）→ live；
 //       否则（正式入口 / 与 /p/{id}/）→ legacy。无 token 不 fatal。
@@ -82,7 +83,9 @@ function legacyDetail(s) {
     assembly: s.assembly, structure: s.structure, render: s.render,
     candidates: [], candidates_unsupported: true,    // 旧后端无候选分图
     plan: s.plan, plan_etag: null, llm: legacyLlm(s.llm),
-    rendering: !!s.rendering,                        // 旧后端正在渲染：out/ 已被清空，旧结果不可再背书
+    rendering: !!s.rendering,
+    version: s.version ?? null,                      // 新版子应用：已发布版本 ID（旧后端无）
+    render_job: s.render_job ? normJob(s.render_job) : null,   // 新版子应用：本次渲染作业（旧后端无）
     figures: (s.render?.figures || []).length,
     figures_pass: (s.render?.figures || []).filter((f) => f.pass).length,
     home_url: s.home_url, flowcharts: s.flowcharts || [],
@@ -96,11 +99,20 @@ function legacyLlm(l) {
     configured, dwg_available: true };
 }
 
-// legacy 导出清单：按「每次请求唯一的 ID」各存一份不可变清单（Codex R3f #1）。
-// 旧实现用一个共享的 _lastExport，两次打包的响应交错返回时，后到的旧响应会覆盖它，
-// 新票据随后读到旧 ZIP。现在每次请求的清单只能用它自己的 ID 取回。
-const legacyExports = new Map();
-let legacyExportSeq = 0;
+// 渲染作业状态归一化（openapi RenderJobStatus）：{id, state, running, ok, error, result, diag}。
+// 来源可以是 /v1/jobs/{id}（Job）或子应用 /api/render/status 的 job；两者都归一成同一形状。
+export function normJob(j) {
+  if (!j) return null;
+  const state = j.state || null;
+  return {
+    id: j.id || j.job_id || null, state,
+    running: j.running ?? ['queued', 'running'].includes(state),
+    ok: j.ok ?? (state ? state === 'succeeded' : null),
+    error: j.error || null, result: j.result || null, diag: j.diag || null,
+  };
+}
+const LEGACY_EXPORT_OFF = () => new ApiError('旧版后端兼容模式不支持导出——请升级到新版后端', 0,
+  'legacy_export_disabled', '升级到含 /v1 接口的新版工作台后，导出会绑定版本化的出图结果。');
 
 // -------------------------------------------------------------- 统一接口
 export const api = {
@@ -161,7 +173,8 @@ export const api = {
 
   async render(id, opts = {}) {
     if (MODE === 'legacy') {
-      await call('POST', `${base}api/render`);     // 202 {started}
+      const q = opts.fail ? `?fail=${encodeURIComponent(opts.fail)}` : '';   // 开发用失败场景，后端忽略未知参数
+      await call('POST', `${base}api/render${q}`);
       return { job_id: 'legacy:render' };
     }
     const q = opts.fail ? `?fail=${opts.fail}` : '';
@@ -174,35 +187,34 @@ export const api = {
     const d = await this.getProject(id); return d.render;
   },
 
-  async export(id, opts = {}) {
+  // 渲染状态（WP1 契约 §13.5.4 / openapi RenderStatus）：result = 已发布版本，version = 其 ID，
+  // job = 本次（最近一次）渲染作业。失败时 result 仍是上一成功版本，本次失败只在 job 里。
+  //   legacy：GET api/render/status——新版子应用给出 job/version；旧后端没有，job 为 null。
+  //   live：mock 阶段由 /v1/jobs/{id}（本次作业）+ 工程详情（已发布）拼出同一形状；
+  //         接线时换成 /p/{pid}/api/render/status，调用方只依赖归一化后的形状。
+  async getRenderStatus(id, jobId) {
     if (MODE === 'legacy') {
-      const bundle = (await call('POST', `${base}api/export`, { dwg: (opts.formats || []).includes('dwg') })).body;
-      // 清单按旧后端实际产出来判定——旧后端不出 PDF（F1 属后续工作包），绝不假装生成
-      const files = bundle.files || [];
-      const has = (ext) => files.some((f) => f.toLowerCase().endsWith(ext));
-      const items = [];
-      if (has('.docx')) items.push({ format: 'docx', label: '交底版 Word（说明书附图）', status: 'ok' });
-      if (has('.dxf')) items.push({ format: 'dxf', label: 'DXF 源文件（交底/递交/原始）', status: 'ok' });
-      if (has('.dwg')) items.push({ format: 'dwg', label: 'DWG 源文件', status: 'ok' });
-      else if ((opts.formats || []).includes('dwg')) items.push({ format: 'dwg', label: 'DWG 源文件', status: 'fail', reason: 'DWG 转换器不可用' });
-      if ((opts.formats || []).includes('pdf')) items.push({ format: 'pdf', label: '递交版 PDF', status: 'skip', reason: '现有后端不产出 PDF，接线后由新版提供' });
-      const exportId = `legacy:export:${++legacyExportSeq}:${Date.now().toString(36)}`;
-      legacyExports.set(exportId, Object.freeze({
-        export_id: exportId, job_id: exportId, variant: opts.variant || 'both',
-        // 相对路径（不含 base）：下游统一用 previewUrl 只解析一次挂载前缀，避免 /p/{id}/p/{id}/… 重复
-        zip: bundle.zip, download_url: `api/export-file/${encodeURIComponent(bundle.zip)}`,
-        items: Object.freeze(items), manifest: Object.freeze([...files]), notes: Object.freeze([...(bundle.notes || [])]),
-      }));
-      return { export_id: exportId, job_id: exportId };
+      const st = (await call('GET', `${base}api/render/status`)).body;
+      return { running: !!st.running, result: st.result || null, version: st.version ?? st.result?.version ?? null,
+        job: normJob(st.job) };
     }
+    const [proj, job] = await Promise.all([
+      this.getProject(id),
+      jobId ? call('GET', `${base}v1/jobs/${encodeURIComponent(jobId)}`).then((r) => r.body) : null,
+    ]);
+    const result = proj.render || null;
+    return { running: !!(job && ['queued', 'running'].includes(job.state)), result,
+      version: result?.render_job_id || result?.version || null, job: normJob(job || proj.render_job) };
+  },
+
+  // 导出（live）：请求体须带 render_job_id（要导出的那次成功渲染）+ plan_etag（前端认为的当前计划版本），
+  // 由后端与该渲染的冻结输入原子比对，不符 409（WP1）。legacy 兼容模式不提供导出。
+  async export(id, opts = {}) {
+    if (MODE === 'legacy') throw LEGACY_EXPORT_OFF();
     return (await call('POST', `${base}v1/projects/${id}/export`, opts)).body;
   },
   async getExport(exportId) {
-    if (MODE === 'legacy') {                         // 只返回这一次请求自己的清单
-      const m = legacyExports.get(exportId);
-      if (!m) throw new ApiError('找不到这次打包的清单', 404, 'not_found');
-      return m;
-    }
+    if (MODE === 'legacy') throw LEGACY_EXPORT_OFF();
     return (await call('GET', `${base}v1/exports/${exportId}`)).body;
   },
 
@@ -341,7 +353,8 @@ export const api = {
   },
 };
 
-// legacy：轮询 render/status 模拟进度事件
+// legacy：轮询 render/status 模拟进度事件。新版子应用的 job（本次作业）失败时报失败，
+// 不把仍是上一成功版本的 result 当作本次结果；旧后端没有 job，按 running/result 判定。
 function legacyPoll(jobId, handlers) {
   if (jobId !== 'legacy:render') { setTimeout(() => handlers.done && handlers.done({}), 0); return { close() {} }; }
   let stopped = false; let p = 0.1;
@@ -349,12 +362,15 @@ function legacyPoll(jobId, handlers) {
     if (stopped) return;
     try {
       const st = (await call('GET', `${base}api/render/status`)).body;
-      if (st.running) {
+      const job = normJob(st.job);
+      if (st.running || job?.running) {
         p = Math.min(0.9, p + 0.12);
         handlers.stage && handlers.stage({ stage: '出图中', progress: p });
         setTimeout(tick, 900);
+      } else if (job && job.state && job.state !== 'succeeded') {
+        handlers.fail && handlers.fail({ ...(job.error || {}), message: job.error?.message || '本次出图未成功', job });
       } else {
-        handlers.done && handlers.done({ result: st.result });
+        handlers.done && handlers.done({ result: job?.result || st.result });
       }
     } catch (e) {
       handlers.disconnect && handlers.disconnect();   // 轮询出错 → 让上层校准，不当作业务失败

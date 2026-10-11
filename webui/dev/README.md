@@ -20,8 +20,20 @@ python3 webui/dev/mock_server.py --port 8804 --no-ai --no-dwg
 - 首页 / 工程列表：`http://127.0.0.1:8803/home.html`
 - 规划台：`http://127.0.0.1:8803/index.html?project=gearbox`
 - 静态只读站（读 `manifest.json`，模拟 GitHub Pages）：`http://127.0.0.1:8803/home.html?static`
-- legacy 兼容子应用（仿旧 `plan_studio` 的同步 `/api/*`：后台线程渲染、无 ETag、无结果 ID、同步打包），
-  走 `api.js` 的真实 legacy 分支：`http://127.0.0.1:8803/p/gearbox/?stage=qa`（`verify_ui.py` 的 legacy 用例即对它跑）
+- 旧版后端兼容模式（见下方「legacy 的定位」）：`http://127.0.0.1:8803/p/gearbox/?stage=qa`——mock 的 `/p/{id}/`
+  子应用（同步 `/api/*`、无 ETag；`api/render/status` 按 openapi `RenderStatus` 给 `result/version/job`），
+  页面走 `api.js` 的真实 legacy 分支（`verify_ui.py` 的兼容模式用例即对它跑）。
+
+### legacy 的定位：开发兼容模式，不随产品发布（修复轮 7 架构裁决）
+
+- `api.js` 的 `legacy` 分支（页面在 `/p/{id}/`、走旧同步 `/api/*`）只为**开发期**在旧后端上看新界面，
+  **不随产品发布**。真正要发布的是 `live` 路径（WP1 的 `/v1/*` 契约）。
+- 兼容模式保留：浏览工程与 3D、出图、编辑术语与分图、预览与查看 QA。
+- 兼容模式**导出一律锁定**：旧接口出图不冻结输入、结果没有版本 ID、打包读共享输出目录——跨页面竞态
+  只能由后端关闭（Codex R3g），前端回读无法证明打包内容对应哪一版计划。导出屏只给原因与「升级到新版后端」指引，
+  不凭任何本地摘要 / 结果身份解锁；顶栏显示中性提示「旧版后端兼容模式：导出需升级后端」。
+- 接线（WP1 合并后）：WP1 的工作台同样在 `/p/{id}/` 挂子应用，届时需按后端能力（如 `api/state` 带
+  `version` / `render_job`、根路径有 `/v1`）把这类页面切到 `live`，不能继续按路径判成兼容模式。
 
 三个示例工程：`gearbox`（行星齿轮减速器，全套真实资产）、`bench-vise`（台虎钳，整机候选被闸门拦下的教学样例）、`ball-valve`（球阀，候选为空 → 提示手动框选）。
 
@@ -61,6 +73,12 @@ python3 webui/dev/mock_server.py --port 8804 --no-ai --no-dwg
 3. SSE：事件名 `stage/log/done/error`、带 `id`、可用 `Last-Event-ID` 重连——确认后端一致；
    SSE 不与 GZip 同用。
 4. plan 的 `ETag` / `If-Match` / 409 冲突语义对齐（`state.js` 的 `flush` 已处理 409 → `conflict` 态）。
+   出图证据只认后端：结果的输入快照 `plan_etag` + 结果 ID（`render_job_id` / `version`）；导出请求带
+   `render_job_id` + `plan_etag`，由后端与该渲染的冻结输入原子比对，409 → 前端提示「计划已变更，请重新出图」
+   并锁定。**不传 `sheet_preset`**（WP1 传入即 400）。
+   渲染状态按 openapi `RenderStatus`：`result` = 已发布版本、`job` = 本次作业；失败作业不发布，界面显示
+   `job` 的诊断并标明预览 / 导出属于上一成功版本（`api.getRenderStatus` 已按此归一，接线时把 live 的数据源
+   换成 `/p/{pid}/api/render/status`）。
 5. 预览 SVG 必须仍带 `data-numeral`；GLB 节点名必须仍等于零件名；渲染结果的
    `numerals.numerals[].parts` 用于点击联动。
 6. 导出清单字段：`items[].status in {ok,skip,fail}` + `reason`；DWG 不可用时 `skip` + 原因；

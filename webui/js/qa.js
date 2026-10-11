@@ -1,7 +1,8 @@
 // 屏④ 出图结果与 QA：盖章总览 + 13 格点阵 + 每项「原因 / 建议 / 直达入口」。
-// 四态：未渲染 / 渲染中（SSE 日志）/ 全过（导出解锁）/ 有失败（导出禁用 + 修复引导）。
+// 四态：未渲染 / 渲染中（SSE 日志）/ 全过（导出解锁）/ 失败（本次作业的诊断 + 修复引导）。
+// 「已发布版本」与「本次作业」严格分开（WP1 契约 §13.5.4）：失败的作业不发布，预览与导出仍属上一成功版本。
 // 预览里点 text[data-numeral] → 联动高亮对应零件（数据契约不变）。
-import { bus, state, setSelection, renderStaleReason, planDigest, flush, proofSet, resultIdentity, normEtag, resultEtag } from './state.js';
+import { bus, state, setSelection, renderStaleReason, flush, normEtag, resultEtag, resultVersion } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 
@@ -51,21 +52,62 @@ function applyFailOverride(fig) {
   return f;
 }
 
+// 已发布的渲染结果（?state=empty 为四态截图的「未出图」）
 function currentRender() {
+  if (params.get('state') === 'empty') return null;
+  return state.render;
+}
+
+// 本次（最近一次）渲染作业。?state=fail / novalidate 为四态截图：演示「本次作业失败」——
+// 已发布版本不变，失败诊断来自本次作业（与真实后端的语义一致）。
+function currentJob() {
   const force = params.get('state');
   const r = state.render;
-  if (force === 'empty') return null;
-  if (force === 'novalidate') {          // 四态截图：计划未过校验、无图
-    return { ok: false, figures: [],
-      validate: { ok: false, issues: [
-        { code: 'E_TERM_FORBIDDEN', severity: 'error', message: '术语 3「PGB-0012-A」像内部件号，不是中文技术名词', hint: '改成中文技术名词，如「行星销」' },
-        { code: 'E_FIGURE_EMPTY', severity: 'error', message: '图 fig2 没有任何成员零件', hint: '在 3D 里框选零件后加入该图，或删掉这张空图' }] },
-      log: '校验未通过，未渲染。\nE_TERM_FORBIDDEN /terms/3\nE_FIGURE_EMPTY /figures/1' };
-  }
   if (force === 'fail' && r?.figures?.length) {
-    return { ...r, ok: false, figures: [applyFailOverride(r.figures[0]), ...r.figures.slice(1)] };
+    const f = applyFailOverride(r.figures[0]);
+    return { id: 'demo-failed-job', state: 'failed', running: false, ok: false,
+      error: { code: 'E_RENDER_NOT_OK', message: `出图未全部过闸/有图缺失：['${f.id}']`, hint: '按每张图的 QA 提示改计划后重渲' },
+      result: { ok: false, figures: [f, ...r.figures.slice(1)] }, diag: { failed_figures: [f.id], missing_artefacts: [] } };
   }
-  return r;
+  if (force === 'novalidate') {
+    return { id: 'demo-failed-job', state: 'failed', running: false, ok: false,
+      error: { code: 'E_PLAN_INVALID', message: '计划未通过校验，未渲染', hint: '按校验提示改计划后重渲' },
+      result: { ok: false, figures: [], validate: { ok: false, issues: [
+        { code: 'E_TERM_FORBIDDEN', severity: 'error', message: '术语 3「PGB-0012-A」像内部件号，不是中文技术名词', hint: '改成中文技术名词，如「行星销」' },
+        { code: 'E_FIGURE_EMPTY', severity: 'error', message: '图 fig2 没有任何成员零件', hint: '在 3D 里框选零件后加入该图，或删掉这张空图' }] } },
+      diag: { failed_figures: [], missing_artefacts: [], log_tail: '校验未通过，未渲染。\nE_TERM_FORBIDDEN /terms/3\nE_FIGURE_EMPTY /figures/1' } };
+  }
+  return state.renderJob;
+}
+const jobFailed = (j) => !!j && ['failed', 'interrupted'].includes(j.state);
+
+// 本次作业里未过闸的图：完整 QA（mock / 子应用）或 WP1 精简行（failed_checks）统一成 qa.checks
+function failedFigures(job) {
+  return (job.result?.figures || []).filter((f) => !f.pass).map((f) => (f.qa?.checks ? f : {
+    ...f, qa: { checks: (f.failed_checks || []).map((c) => ({ id: c.check, value: c.value, threshold: '', hint: c.hint, pass: false })) },
+  }));
+}
+
+// 本次作业失败的诊断：错误、校验问题、逐图未过项（白话建议 + 直达入口）、缺失产物、日志尾；
+// 并写明预览 / 导出属于上一成功版本（本次失败的结果没有发布）。
+function jobFailPanel(job, r) {
+  const err = (job.error && typeof job.error === 'object') ? job.error : { message: job.error ? String(job.error) : '' };
+  const issues = job.result?.validate?.issues || [];
+  const missing = job.diag?.missing_artefacts || [];
+  const log = job.diag?.log_tail || job.result?.log || '';
+  const ver = resultVersion(r);
+  return `<section class="job-fail" role="alert">
+    <div class="job-fail-head"><span class="stamp-fail">本次出图${job.state === 'interrupted' ? '中断' : '失败'}</span>
+      <b>${esc(err.message || '本次出图未成功')}</b>${err.code ? ` <span class="mono hint">${esc(err.code)}</span>` : ''}</div>
+    ${err.hint ? `<p class="hint">${esc(err.hint)}</p>` : ''}
+    <p class="job-fail-note">${r ? `下面的预览与导出仍是<b>上一成功版本</b>${ver ? `（版本 <span class="mono">${esc(ver)}</span>${r.finished_at ? ` · ${esc(r.finished_at)}` : ''}）` : ''}；本次失败的结果没有发布。`
+      : '还没有成功出过图；本次失败的结果没有发布。'}</p>
+    ${issues.length ? `<ul class="qa-issues">${issues.map((it) => `<li class="${esc(it.severity || '')}">
+      <b class="mono">${esc(it.code || '')}</b> ${esc(it.message || '')}${it.hint ? `<span class="hint"> ↳ ${esc(it.hint)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${failedFigures(job).map((f) => `<div class="job-fail-fig"><h4>图${esc(f.number ?? '')}（${esc(f.id)}）未过闸</h4>${failItems(f)}</div>`).join('')}
+    ${missing.length ? `<p class="hint">缺失产物：${esc(missing.join('、'))}</p>` : ''}
+    ${log ? `<details class="qa-tech"><summary>日志尾部</summary><pre class="qa-log">${esc(String(log).slice(-2000))}</pre></details>` : ''}
+  </section>`;
 }
 
 function grid(fig) {
@@ -95,28 +137,44 @@ function failItems(fig) {
   }).join('')}</div>`;
 }
 
+function bindCommon() {
+  host.querySelector('#rerender')?.addEventListener('click', () => startRender());
+  host.querySelector('#rerender-stale')?.addEventListener('click', () => startRender());
+  host.querySelector('#qa-render')?.addEventListener('click', () => startRender());
+  host.querySelector('#qa-retry')?.addEventListener('click', () => startRender());
+  host.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => {
+    document.querySelector('.stage-tab[data-stage="plan"]').click();
+    setTimeout(() => document.querySelector(`.rtab[data-tab="${b.dataset.goto}"]`)?.click(), 60);
+  }));
+}
+
 function render() {
   const r = currentRender();
+  const job = currentJob();
   const force = params.get('state');
+  const failNow = jobFailed(job) && !rendering;
   // --- 未渲染 / 渲染中 ---
   // legacy 旧后端一开工就清空 out/：渲染期间旧结果的预览文件已不存在，直接显示「渲染中」，不再去取旧预览。
   if (!r || force === 'empty' || (rendering && api.isLegacy)) {
-    host.innerHTML = `<div class="qa-blank">
+    const running = rendering || force === 'loading';
+    host.innerHTML = `<div class="qa-blank ${failNow && !running ? 'qa-error' : ''}">
       <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
-      ${rendering || force === 'loading' ? `
+      ${running ? `
         <p class="stamp-run"><i class="spin"></i> 渲染中</p>
         <p>正走与模型完全相同的 CLI 与 13 项 QA 闸门，通过后生成交底版与递交版。</p>
         <pre class="qa-log">${esc((logs.length ? logs : ['▶ 解析消隐出图…']).join('\n'))}</pre>`
+      : (failNow && force !== 'empty' ? `${jobFailPanel(job, null)}
+        <button class="btn big" id="qa-retry">改完计划 · 重新出图</button>`
       : `<p class="stamp-run">未出图</p>
         <h2>把当前计划渲染成专利附图</h2>
         <p class="muted">渲染走与模型完全相同的 CLI 与 QA 闸门；通过后自动生成交底版（图号＋件号表）与递交版（仅图号）。</p>
         ${api.readOnly ? '<p class="hint">静态演示站为预计算只读展示，不在浏览器里出图（需本地安装后的后端）。</p>'
-          : '<button class="btn primary big" id="qa-render">渲染出图</button>'}`}
+          : '<button class="btn primary big" id="qa-render">渲染出图</button>'}`)}
     </div>`;
-    host.querySelector('#qa-render')?.addEventListener('click', () => startRender());
+    bindCommon();
     return;
   }
-  // --- 渲染返回了结果但没有图：计划未过校验或渲染异常（plan_studio 返回 {ok:false,figures:[],validate,log}）---
+  // --- 已发布结果但没有图（只有旧后端会把未过校验的结果当作结果返回：{ok:false,figures:[],validate,log}）---
   if (!(r.figures || []).length) {
     const issues = (r.validate?.issues || []);
     host.innerHTML = `<div class="qa-blank qa-error">
@@ -129,10 +187,10 @@ function render() {
       ${r.log ? `<pre class="qa-log">${esc(String(r.log).slice(-2000))}</pre>` : ''}
       <button class="btn big" id="qa-retry">改完计划 · 重新出图</button>
     </div>`;
-    host.querySelector('#qa-retry')?.addEventListener('click', () => startRender());
+    bindCommon();
     return;
   }
-  // --- 全过 / 有失败 ---
+  // --- 已发布结果：全过 / 有失败；本次作业失败时在上方给诊断 ---
   const figs = (r.figures || []).slice().sort((a, b) => (a.number || 99) - (b.number || 99));
   if (!activeFig || !figs.find((f) => f.id === activeFig)) activeFig = figs[0]?.id;
   const cur = figs.find((f) => f.id === activeFig);
@@ -145,24 +203,32 @@ function render() {
     `<button class="seg-btn ${v === variant ? 'on' : ''}" data-variant="${v}">${VARIANTS[v]}</button>`).join('')}</div>` : '';
 
   const staleReason = renderStaleReason();
-  const stale = !!staleReason;
+  const legacy = staleReason === 'legacy';
+  const stale = !!staleReason && !legacy;
   const staleMsg = {
     'no-proof': '无法证明这张图对应当前计划——请重新出图以解锁导出。',
     unsaved: '计划有改动还没保存好——保存并重新出图后再导出。',
-    raced: '出图期间计划被改过，无法确定这张图用的是哪一版——请重新出图以解锁导出。',
+    conflict: '计划已变更（服务端核对不一致）——请重新出图后再导出。',
   }[staleReason] || '计划已修改，下面的预览可能过期——请重新出图后再导出。';
+  const gate = legacy ? '<span class="qa-gate compat">兼容模式 · 导出需升级后端</span>'
+    : `<span class="qa-gate ${allPass && !stale ? 'ok' : 'bad'}">${stale ? '结果已过期，需重新出图'
+      : (allPass ? `13 项全过 · 导出已解锁${failNow ? '（上一成功版本）' : ''}` : `${figs.filter((f) => !f.pass).length} 张未过，导出禁用`)}</span>`;
+  const passHint = legacy ? '13 项全部通过。旧版后端兼容模式下不能导出——升级到新版后端后再打包附图包。'
+    : '13 项全部通过。到「导出」页打包附图包。';
   host.innerHTML = `
-    ${stale ? `<div class="stale-bar">${staleMsg}
-      <button class="btn sm" id="rerender-stale" ${rendering ? 'disabled' : ''}>${rendering ? '出图中…' : '重新出图'}</button></div>` : ''}
+    <div class="qa-notices">
+      ${failNow ? jobFailPanel(job, r) : ''}
+      ${stale ? `<div class="stale-bar">${staleMsg}
+        <button class="btn sm" id="rerender-stale" ${rendering ? 'disabled' : ''}>${rendering ? '出图中…' : '重新出图'}</button></div>` : ''}
+      ${legacy ? `<div class="compat-bar">旧版后端兼容模式：可出图、预览与查看 QA，但无法证明预览对应当前计划；导出需升级到新版后端。</div>` : ''}
+    </div>
     <div class="qa-top">
       <div class="qa-tabs">${tabs}</div>
       ${seg}
       <div class="qa-top-right">
         <button class="btn ghost sm" id="rerender" ${rendering ? 'disabled' : ''}>${rendering ? '<i class="spin"></i> 出图中…' : '↻ 重新出图'}</button>
         <label class="switch sm"><input type="checkbox" id="only-fail" ${onlyFail ? 'checked' : ''}> 仅看失败项</label>
-        <span class="qa-gate ${allPass && !stale ? 'ok' : 'bad'}">
-          ${stale ? '结果已过期，需重新出图'
-            : (allPass ? '13 项全过 · 导出已解锁' : `${figs.filter((f) => !f.pass).length} 张未过，导出禁用`)}</span>
+        ${gate}
       </div>
     </div>
     <div class="qa-body">
@@ -177,21 +243,16 @@ function render() {
           <span class="qa-sum mono">${cur?.qa?.summary?.passed ?? (cur?.qa?.checks?.filter((c) => c.pass).length)}/${cur?.qa?.checks?.length} 项通过</span></div>
         ${grid(cur)}
         ${failItems(cur)}
-        ${!onlyFail && cur?.pass ? `<p class="hint pad">13 项全部通过。到「导出」页打包附图包。</p>` : ''}
+        ${!onlyFail && cur?.pass ? `<p class="hint pad">${passHint}</p>` : ''}
       </aside>
     </div>`;
 
-  host.querySelector('#rerender')?.addEventListener('click', () => startRender());
-  host.querySelector('#rerender-stale')?.addEventListener('click', () => startRender());
+  bindCommon();
   host.querySelectorAll('[data-fig]').forEach((b) => b.addEventListener('click', () => { activeFig = b.dataset.fig; render(); }));
   host.querySelectorAll('[data-variant]').forEach((b) => b.addEventListener('click', () => { variant = b.dataset.variant; render(); }));
   host.querySelector('#only-fail')?.addEventListener('change', (e) => { onlyFail = e.target.checked; render(); });
   host.querySelectorAll('[data-chk]').forEach((b) => b.addEventListener('click', () => {
-    host.querySelector('.qa-fixes')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }));
-  host.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => {
-    document.querySelector('.stage-tab[data-stage="plan"]').click();
-    setTimeout(() => document.querySelector(`.rtab[data-tab="${b.dataset.goto}"]`)?.click(), 60);
+    host.querySelector('.qa-side .qa-fixes')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }));
   if (cur) loadSvg(cur);
 }
@@ -222,31 +283,18 @@ async function loadSvg(fig) {
   } catch { pane.innerHTML = '<p class="hint pad">预览加载失败</p>'; }
 }
 
-// 把一次渲染结果连同「属于它的」输入版本证据一起采纳（Codex R3e #2）。
-//   live（有 ETag）：只认后端证据——结果自带的输入快照 ETag 优先；结果没带、且它确属本作业时，
-//     用本作业提交时后端返回的输入快照（WP1：202 / GET job 的 inputs.plan_etag）。前端自己的记录不算数。
-//   legacy（无 ETag）：用「发请求之前」捕获的已保存输入摘要。旧后端在后台线程里多次读 plan，
-//     作业在途期间计划只要被改过（含改了又改回），就无法确定它画的是哪一版 → raced，锁定直到重渲。
-//   ev 为 null：结果不属于本会话发起的作业（如失败后回读的最近结果）——live 仍可凭结果自带证据，legacy 无证据。
+// 把已发布结果的版本证据绑定好——只认后端给的（WP1 契约）：
+//   结果自带的输入快照 ETag 与结果 ID（render_job_id / version）优先；结果没带、且它确属本作业时，
+//   用本作业提交时后端返回的输入快照（202 / GET job 的 inputs.plan_etag）与作业 ID（= 版本 rid）。
+//   前端自己的记录不作背书。旧版后端兼容模式不建立证据（导出恒锁定）。ev 为 null：结果不属于本会话作业。
 function bindEvidence(result, ev, jobInputs) {
-  if (!(result && (result.figures || []).length)) {
-    state.renderInputs = { etag: null, digest: null, raced: false };
-    if (!state.planEtag) proofSet(state.projectId, null);
-    return;
-  }
-  if (state.planEtag) {
-    const fromJob = ev ? (normEtag(jobInputs?.plan_etag) || ev.serverEtag) : null;
-    state.renderInputs = { etag: resultEtag(result) || fromJob || null, digest: null, raced: false };
-    return;
-  }
-  if (!ev) { state.renderInputs = { etag: null, digest: null, raced: false }; proofSet(state.projectId, null); return; }
-  const raced = ev.editVersion !== state.editVersion || ev.digest !== planDigest();
-  state.renderInputs = { etag: null, digest: ev.digest, raced };
-  // 证明钉在「这一份结果」上（结果身份）；有竞态的结果不持久化背书
-  proofSet(state.projectId, raced ? null : { digest: ev.digest, result: resultIdentity(result) });
+  state.renderInputs = { etag: null, version: null, conflict: false };
+  if (api.isLegacy || !(result && (result.figures || []).length)) return;
+  state.renderInputs.etag = resultEtag(result) || (ev ? (normEtag(jobInputs?.plan_etag) || ev.serverEtag) : null);
+  state.renderInputs.version = resultVersion(result) || (ev ? ev.jobId : null);
 }
 
-// 作业终态：d 是 done 事件或 GET job 的数据；ev 是该作业「发请求前」捕获、只属于它的输入快照。
+// 作业成功：d 是 done 事件或 GET job 的数据；ev 是该作业的后端证据（只属于它）。
 async function applyResult(d, ev) {
   // 读权威结果：优先作业带回的 result，否则回工程/状态取一次（那份不一定属于本作业 → 不用本作业证据）
   let result = (d && d.result && d.result.figures) ? d.result : null;
@@ -256,8 +304,8 @@ async function applyResult(d, ev) {
     catch (err) { rendering = false; toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return; }
   }
   state.render = result || null;
-  // legacy 一次只允许一个渲染（服务端锁），状态里的结果就是本作业的；live 回读的工程结果则未必是本作业的
-  bindEvidence(result, (fromJob || api.isLegacy) ? ev : null, d?.inputs);
+  state.renderJob = { id: ev?.jobId || null, state: 'succeeded', running: false, ok: true, error: null, result: null, diag: null };
+  bindEvidence(result, fromJob ? ev : null, d?.inputs);
   rendering = false;
   activeFig = null;
   bus.emit('rendered');
@@ -269,6 +317,22 @@ async function applyResult(d, ev) {
   else if (allPass) msg = `渲染完成，${figs.length} 张图 13 项 QA 全过`;
   else msg = `渲染完成，但有 ${figs.filter((f) => !f.pass).length} 张未过闸——按提示修改后重渲`;
   toast(msg, allPass ? 'ok' : 'bad');
+  render();
+}
+
+// 作业失败：读渲染状态——result = 已发布版本（仍是上一成功版本），job = 本次作业的诊断。
+async function applyFailure(d, ev) {
+  rendering = false;
+  toast('出图未完成：' + (d?.message || '渲染进程失败'), 'bad');
+  let st = null;
+  try { st = await api.getRenderStatus(state.projectId, ev.jobId); } catch { /* 用事件里的信息兜底 */ }
+  const pub = st ? st.result : state.render;
+  const sameVersion = pub && state.render && resultVersion(pub) && resultVersion(pub) === resultVersion(state.render);
+  if (!sameVersion) { state.render = pub || null; bindEvidence(state.render, null); }   // 另有版本被发布：只凭它自带的证据
+  state.renderJob = st?.job || { id: ev.jobId, state: 'failed', running: false, ok: false,
+    error: d?.code || d?.message ? { code: d.code, message: d.message, hint: d.hint } : null,
+    result: d?.job?.result || null, diag: d?.job?.diag || null };
+  bus.emit('rendered');
   render();
 }
 
@@ -289,44 +353,29 @@ async function startRender() {
   if (state.editVersion > state.savedVersion) {
     rendering = false; toast('计划还在保存中，未渲染——请稍后再出图。', 'bad'); render(); return;
   }
-  // —— 发请求「之前」捕获已保存输入的快照（Codex R3e #2）——
-  // 此刻没有未落盘的编辑，当前 plan 就是服务端那份；请求在途期间的编辑不得被记成本作业的输入。
-  const pre = { digest: planDigest(), etag: normEtag(state.planEtag), editVersion: state.editVersion };
-  if (!state.planEtag) {
-    // legacy（Codex R3f #2）：发起新渲染前立即作废持久化证明与本页证据——旧后端一开工就清空 out/，
-    // 旧结果随即失效；且本页若在完成前被关掉，绝不能让旧证明给下一份结果背书。
-    proofSet(state.projectId, null);
-    state.renderInputs = { etag: null, digest: null, raced: false };
-    bus.emit('render-stale');
-  }
   let job;
   try {
     job = await api.render(state.projectId, { etag: state.planEtag, fail: params.get('rfail') });
   } catch (err) {                        // 被拒绝（409 等）：不碰任何共享证据，直接退出
     rendering = false; toast('无法开始渲染：' + (err.hint || err.message), 'bad'); render(); return;
   }
-  // 请求成功后才把快照交给作业闭包；后端若返回输入快照（WP1 202 的 inputs.plan_etag），以它为准。
-  // （inputs.plan_hash 是服务端文件字节的 sha256，前端无从复算，不作比对依据；可比的是与 GET/PUT 同源的 plan_etag。）
-  const evidence = Object.freeze({ ...pre, jobId: job.job_id, serverEtag: normEtag(job.inputs?.plan_etag) });
-  let settled = false;                   // 同一作业只采纳一次终态（done 与断线校准可能先后到达）
+  // 本作业的后端证据：提交时冻结的输入快照（WP1 202 的 inputs.plan_etag）+ 作业 ID（= 版本 rid）
+  const evidence = Object.freeze({ jobId: job.job_id, serverEtag: normEtag(job.inputs?.plan_etag) });
+  state.renderJob = { id: job.job_id, state: 'running', running: true, ok: null, error: null, result: null, diag: null };
+  let settled = false;                   // 同一作业只采纳一次终态（done / error 与断线校准可能先后到达）
   const finish = (d) => { if (settled) return; settled = true; applyResult(d, evidence); };
+  const fail = (d) => { if (settled) return; settled = true; applyFailure(d, evidence); };
   logs.length = 0; render();
   sub = api.jobEvents(job.job_id, {
     log(d) { logs.push(d.line); render(); },
     stage(d) { if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
     done(d) { finish(d); },
-    fail(d) {
-      if (settled) return; settled = true;
-      rendering = false;
-      toast('出图未完成：' + (d.message || '渲染进程失败'), 'bad');
-      // 回读的是工程最近一次结果，不属于本作业：只凭它自带的证据（legacy 无 → 锁定），绝不挂本作业的快照
-      api.getRenderResult(state.projectId).then((r) => {
-        if (r) { state.render = r; bindEvidence(r, null); bus.emit('rendered'); }
-        render();
-      }).catch(() => render());
-    },
+    fail(d) { fail(d); },
     disconnect() {
-      api.getJob(job.job_id).then((j) => { if (j.state === 'succeeded') finish({ result: j.result, inputs: j.inputs }); }).catch(() => {});
+      api.getJob(job.job_id).then((j) => {
+        if (j.state === 'succeeded') finish({ result: j.result, inputs: j.inputs });
+        else if (['failed', 'interrupted', 'cancelled'].includes(j.state)) fail({ ...(j.error || {}), message: j.error?.message });
+      }).catch(() => {});
     },
   });
 }
