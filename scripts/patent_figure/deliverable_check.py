@@ -367,6 +367,178 @@ def _pdf_gray(page, name: str):
     return None
 
 
+# --------------------------------------------------------------------------- PDF closed set (R2f)
+#
+# Same idea as the Word package: the PDF is accepted only when every object and every content
+# operation is EXACTLY what the writer (matplotlib ``PdfPages`` of ``deliverable.write_pdf``,
+# matplotlib pinned at 3.9.4) produces. Whatever is not on these lists — a clip path, an inline
+# image, a second XObject, an optional-content group, a transparency group, an annotation, text,
+# a shading — makes the document fail, instead of being interpreted.
+
+_TRAILER_KEYS = {"/Size", "/Root", "/Info", "/ID"}
+_INFO_KEYS = {"/Creator", "/Producer", "/Title"}
+_PAGE_KEYS = {"/Type", "/Parent", "/Resources", "/MediaBox", "/Contents", "/Annots"}
+_RES_KEYS = {"/Font", "/XObject", "/ExtGState", "/Pattern", "/Shading", "/ProcSet"}
+_NUM_TOL = 0.01
+
+
+def _pdf_ops_pattern(k: int) -> List[Tuple[bytes, list]]:
+    """The writer's content stream for page ``k``: white page background, a clip equal to the
+    picture rectangle, the opaque graphics state, the picture. ``"X","Y","W","H"`` stand for the
+    picture rectangle (page points) and must be consistent wherever they appear."""
+    pw, ph = _D.PAGE_MM[0] * PT_PER_MM, _D.PAGE_MM[1] * PT_PER_MM
+    return [(b"CS", ["/DeviceRGB"]), (b"cs", ["/DeviceRGB"]), (b"j", [1]), (b"g", [1]),
+            (b"j", [0]), (b"w", [0]), (b"G", [1]), (b"g", [1]),
+            (b"m", [0, 0]), (b"l", [pw, 0]), (b"l", [pw, ph]), (b"l", [0, ph]), (b"h", []),
+            (b"f", []),
+            (b"q", []), (b"re", ["X", "Y", "W", "H"]), (b"W", []), (b"n", []),
+            (b"gs", ["/A1"]), (b"j", [1]), (b"w", [1]), (b"G", [0]), (b"cs", ["/DeviceRGB"]),
+            (b"q", []), (b"cm", [1, 0, 0, 1, "X", "Y"]), (b"cm", ["W", 0, 0, "-H", 0, "H"]),
+            (b"Do", ["/I%d" % k]), (b"Q", []), (b"Q", [])]
+
+
+def _pdf_ops_conform(ops, k: int, where: str) -> Tuple[List[str], Optional[Tuple[float, ...]]]:
+    """Exact operator / operand match of a page's content stream against the writer's pattern.
+    Returns ``(errors, (X, Y, W, H))``."""
+    want = _pdf_ops_pattern(k)
+    got = [(op, list(operands)) for operands, op in ops]
+    if [op for op, _a in got] != [op for op, _a in want]:
+        extra = [op.decode("latin-1") for op, _a in got if op not in {w for w, _ in want}]
+        return (["%s的内容流不是写出端的固定结构（操作序列不同%s）——可能被裁切、覆盖、插入图片或文字"
+                 % (where, "；含未知操作 %s" % sorted(set(extra)) if extra else "")], None)
+    bind: Dict[str, float] = {}
+    errors: List[str] = []
+    for (op, args), (_wop, wargs) in zip(got, want):
+        if len(args) != len(wargs):
+            errors.append("%s的 %s 操作数个数不对" % (where, op.decode("latin-1")))
+            continue
+        for a, w in zip(args, wargs):
+            if isinstance(w, str) and w.startswith("/"):
+                if str(a) != w:
+                    errors.append("%s的 %s 操作数 %s 应为 %s" % (where, op.decode("latin-1"), a, w))
+                continue
+            try:
+                v = float(a)
+            except (TypeError, ValueError):
+                errors.append("%s的 %s 操作数 %r 不是数" % (where, op.decode("latin-1"), a))
+                continue
+            if isinstance(w, str):
+                key, sign = (w[1:], -1.0) if w.startswith("-") else (w, 1.0)
+                v *= sign
+                if key in bind and abs(bind[key] - v) > _NUM_TOL:
+                    errors.append("%s的裁切矩形与图片矩形不一致（%s）" % (where, key))
+                bind.setdefault(key, v)
+            elif abs(v - float(w)) > _NUM_TOL:
+                errors.append("%s的 %s 操作数 %s 不是写出端的取值 %s"
+                              % (where, op.decode("latin-1"), a, w))
+    rect = tuple(bind.get(x, 0.0) for x in ("X", "Y", "W", "H"))
+    return errors, rect
+
+
+def _pdf_structure(reader, n: int) -> List[str]:
+    """Document-level closed set: trailer, catalog (no optional content, actions, forms…), a flat
+    page tree, the shared resources (exactly the n page images, the one opaque graphics state,
+    no fonts / patterns / shadings) and every page dict (A4 MediaBox, no CropBox / Group /
+    Rotate / annotations, one Flate content stream)."""
+    errors: List[str] = []
+    trailer = reader.trailer
+    bad = sorted(set(str(k) for k in trailer.keys()) - _TRAILER_KEYS)
+    if bad or "/Encrypt" in trailer:
+        errors.append("PDF 文件尾带写出端不会产生的键 %s" % bad)
+    root = _obj(trailer["/Root"])
+    if sorted(str(k) for k in root.keys()) != ["/Pages", "/Type"]:
+        errors.append("PDF 目录带写出端不会产生的键 %s（可选内容组 / 动作 / 表单等）"
+                      % sorted(set(str(k) for k in root.keys()) - {"/Type", "/Pages"}))
+    pages = _obj(root["/Pages"])
+    if sorted(str(k) for k in pages.keys()) != ["/Count", "/Kids", "/Type"]:
+        errors.append("PDF 页树带额外键 %s" % sorted(str(k) for k in pages.keys()))
+    kids = [_obj(x) for x in (_obj(pages.get("/Kids")) or [])]
+    if any(str(_obj(kid.get("/Type"))) != "/Page" for kid in kids) or \
+            int(_obj(pages.get("/Count", -1))) != len(kids):
+        errors.append("PDF 页树不是写出端的单层结构")
+    info = _obj(trailer.get("/Info"))
+    if info is not None:
+        bad = sorted(set(str(k) for k in info.keys()) - _INFO_KEYS)
+        if bad:
+            errors.append("PDF 文档信息带额外键 %s" % bad)
+        title = str(_obj(info.get("/Title", "")))
+        if title and title not in _D.DOCX_TITLES:
+            errors.append("PDF 标题 %r 不是写出端的取值" % title)
+    pw, ph = _D.PAGE_MM[0] * PT_PER_MM, _D.PAGE_MM[1] * PT_PER_MM
+    want_x = ["/I%d" % k for k in range(1, n + 1)]
+    for k, page in enumerate(kids, start=1):
+        where = "第 %d 页" % k
+        keys = set(str(x) for x in page.keys())
+        if keys != _PAGE_KEYS:
+            errors.append("%s的页面对象键不是写出端的集合（多 %s，少 %s）"
+                          % (where, sorted(keys - _PAGE_KEYS), sorted(_PAGE_KEYS - keys)))
+        if _obj(page.get("/Annots")):
+            errors.append("%s带注释对象" % where)
+        box = [float(_obj(v)) for v in (_obj(page.get("/MediaBox")) or [])]
+        if len(box) != 4 or any(abs(a - b) > _NUM_TOL for a, b in zip(box, [0, 0, pw, ph])):
+            errors.append("%s的页框 %s 不是 A4" % (where, box))
+        cont = page.get("/Contents")
+        cont = _obj(cont)
+        if isinstance(cont, list) or not hasattr(cont, "get_data"):
+            errors.append("%s的内容流不是单个流" % where)
+        else:
+            ck = sorted(set(str(x) for x in cont.keys()) - {"/Length", "/Filter"})
+            if ck or str(_obj(cont.get("/Filter"))) != "/FlateDecode":
+                errors.append("%s的内容流字典不受控 %s" % (where, ck))
+        res = _obj(page.get("/Resources")) or {}
+        rkeys = set(str(x) for x in res.keys())
+        if rkeys != _RES_KEYS:
+            errors.append("%s的资源键不是写出端的集合 %s" % (where, sorted(rkeys ^ _RES_KEYS)))
+        for name in ("/Font", "/Pattern", "/Shading"):
+            if _obj(res.get(name)):
+                errors.append("%s的资源里多了 %s" % (where, name))
+        xo = _obj(res.get("/XObject")) or {}
+        if sorted(str(x) for x in xo.keys()) != sorted(want_x):
+            errors.append("%s的图片资源不是写出端的 %s（实为 %s）——多出的图片可能覆盖页面"
+                          % (where, want_x, sorted(str(x) for x in xo.keys())))
+        gs = _obj(res.get("/ExtGState")) or {}
+        ok_gs = sorted(str(x) for x in gs.keys()) == ["/A1"]
+        if ok_gs:
+            a1 = _obj(gs["/A1"])
+            ok_gs = sorted(str(x) for x in a1.keys()) == ["/CA", "/Type", "/ca"] and \
+                str(_obj(a1["/Type"])) == "/ExtGState" and float(_obj(a1["/CA"])) == 1.0 \
+                and float(_obj(a1["/ca"])) == 1.0
+        if not ok_gs:
+            errors.append("%s的图形状态不是写出端的唯一不透明状态（透明度 / 软遮罩 / 混合模式）" % where)
+    return errors
+
+
+def render_checker_available() -> bool:
+    try:
+        import fitz  # noqa: F401  (PyMuPDF, optional)
+        return True
+    except ImportError:
+        return False
+
+
+def _render_caption_ink(path: Path, k: int, src: "Source", rect_mm, dpi: int = 100):
+    """Defence in depth (R2f #3): RENDER page ``k`` with an independent PDF engine (PyMuPDF) and
+    measure the non-white share inside the figure-number box as it is actually SEEN — clips,
+    overpaint, transparency, optional content and annotations all take effect there."""
+    import fitz
+    import numpy as np
+    left, top, w, h = rect_mm
+    with fitz.open(str(path)) as doc:
+        pix = doc[k - 1].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+    bx0, by0, bx1, by1 = _D.caption_box(src.caption)
+    wx0, wy0, wx1, wy1 = src.window
+    to_px = dpi / 25.4
+    c0 = int((left + (bx0 - wx0) / (wx1 - wx0) * w) * to_px)
+    c1 = int((left + (bx1 - wx0) / (wx1 - wx0) * w) * to_px) + 1
+    r0 = int((top + (wy1 - by1) / (wy1 - wy0) * h) * to_px)
+    r1 = int((top + (wy1 - by0) / (wy1 - wy0) * h) * to_px) + 1
+    crop = arr[max(r0, 0):r1, max(c0, 0):c1]
+    whole = arr[int(top * to_px):int((top + h) * to_px), int(left * to_px):int((left + w) * to_px)]
+    return (float((crop < _D.INK_LEVEL).mean()) if crop.size else 0.0,
+            float((whole < _D.INK_LEVEL).mean()) if whole.size else 0.0)
+
+
 def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict[str, Any]:
     path = Path(path)
     if not pdf_checker_available():
@@ -378,19 +550,31 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
         pdf_pages = list(reader.pages)
     except Exception as exc:
         return _report(path, "pdf", sources, [], ["PDF 读不了：%s" % exc], -1)
+    try:
+        doc_errors = _pdf_structure(reader, len(pdf_pages))
+    except Exception as exc:                      # an unexpected structure is not ours
+        doc_errors = ["PDF 结构无法按写出端的固定结构解释：%s: %s" % (type(exc).__name__, exc)]
+    render = "pymupdf" if render_checker_available() else "unavailable"
     pages = []
     for k, (page, src) in enumerate(zip(pdf_pages, sources), start=1):
         box = page.mediabox
         pw = float(box.width) / PT_PER_MM
         ph = float(box.height) / PT_PER_MM
         imgs = _pdf_images(page)
-        if len(imgs) != 1:
+        if not imgs:
             pages.append({"page": k, "figure": src.figure, "ok": False,
-                          "errors": ["第 %d 页应恰好 1 张图片，实有 %d 张" % (k, len(imgs))]})
+                          "errors": ["第 %d 页没有图片" % k], "render_caption_ink": None})
             continue
+        # more than one image is already a failure; the first one is still measured (and the
+        # page rendered) so the report shows what a reader actually sees
         name, m, clip, xo = imgs[0]
         where = "第 %d 页" % k
-        extra = _pdf_image_whitelist(xo, where) + _pdf_page_whitelist(page, where)
+        extra = ([] if len(imgs) == 1 else ["第 %d 页应恰好 1 张图片，实有 %d 张" % (k, len(imgs))])
+        extra += _pdf_image_whitelist(xo, where) + _pdf_page_whitelist(page, where)
+        contents = page.get_contents()
+        op_errors, _rect = _pdf_ops_conform(contents.operations if contents is not None else [],
+                                            k, where)
+        extra += op_errors
         # unit square through the CTM → page rectangle (PDF origin bottom-left, points)
         xs = [m[4], m[0] + m[4], m[2] + m[4], m[0] + m[2] + m[4]]
         ys = [m[5], m[1] + m[5], m[3] + m[5], m[1] + m[3] + m[5]]
@@ -412,11 +596,27 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
             if m[0] < 0:
                 gray = np.fliplr(gray)
         px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
-        pages.append(_page_check(k, src, sp, (x0, ph - y1, x1 - x0, y1 - y0), px, gray,
-                                 (pw, ph), extra))
-    rep = _report(path, "pdf", sources, pages, [], len(pdf_pages))
+        rect_mm = (x0, ph - y1, x1 - x0, y1 - y0)
+        rendered = None
+        if render == "pymupdf" and src.caption is not None:
+            try:
+                cap_ink, whole_ink = _render_caption_ink(path, k, src, rect_mm)
+                rendered = round(cap_ink, 4)
+                if cap_ink < INK_FRACTION_MIN:
+                    extra.append("%s渲染后图号位置没有墨迹（%.1f%%）——页面上看不到「图%d」"
+                                 % (where, cap_ink * 100, k))
+                if whole_ink <= 0.0:
+                    extra.append("%s渲染后图片区域一片空白" % where)
+            except Exception as exc:
+                extra.append("%s独立渲染核验失败：%s" % (where, exc))
+        pc = _page_check(k, src, sp, rect_mm, px, gray, (pw, ph), extra)
+        pc["render_caption_ink"] = rendered
+        pages.append(pc)
+    rep = _report(path, "pdf", sources, pages, doc_errors, len(pdf_pages))
     rep.update(layout_verified="file-geometry",
-               layout_note="PDF 的页幅与图片位置取自文件里的绘制指令（CTM）与图片像素")
+               layout_note="PDF 的页幅与图片位置取自文件里的绘制指令（CTM）与图片像素；"
+                           "内容流与对象结构须与写出端固定结构一致",
+               render_check=render)
     return rep
 
 

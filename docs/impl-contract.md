@@ -2454,3 +2454,16 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   DecodeParms/Length），`/SMask`、`/Mask`、`/ImageMask`、`/Decode`、`/OC`、`/SMaskInData` 按名拒绝；8 位；色彩空间只允许
   DeviceGray / DeviceRGB 或它们的 Indexed；页面不得有注释，图形状态只能有 `/CA`、`/ca` 且为 1，图片之后不得再有任何绘制
   操作，裁切区域必须完整包住图片。
+
+### 14.13 修复轮 6（Codex R2f）收敛：PDF 整体封闭 + 独立渲染
+
+- **内容流按写出端操作封闭集**：每页内容流必须与 matplotlib `PdfPages`（版本锁定 3.9.4）写出的固定序列逐个操作相同——
+  白底整页路径填充、与图片矩形相同的 `re W n` 裁切、唯一不透明图形状态 `/A1`、`cm`×2、`Do /I<k>`、`Q Q`；数值操作数
+  在 0.01 pt 内与固定值或彼此一致（裁切矩形 = 图片矩形）。任何别的操作（路径裁切、`INLINE IMAGE`、`sh`、文字、多余的
+  `Do`、`BDC/EMC` 可选内容标记……）都使序列不同 → 不通过。
+- **对象结构封闭**：文件尾只有 Size/Root/Info/ID，无加密；目录只有 Type/Pages（无可选内容组、动作、表单）；单层页树；
+  页面对象键恰为 Type/Parent/Resources/MediaBox/Contents/Annots（无 CropBox/Group/Rotate）、注释为空、MediaBox 为 A4、
+  内容流为单个 Flate 流；资源键固定，Font/Pattern/Shading 为空，XObject 恰为 `/I1…/In`，ExtGState 恰为 `/A1`
+  {Type, CA=1, ca=1}。
+- **独立渲染（可选）**：装了 PyMuPDF（AGPL，不列为依赖，doctor `deliverable-pdf-render` 提示）时逐页渲染，在图号位置与
+  图片区域统计看得见的墨迹，`render_check: "pymupdf"`、`render_caption_ink`；没装则 `render_check: "unavailable"`。

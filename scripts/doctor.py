@@ -421,6 +421,21 @@ def check_deliverable() -> dict:
                       _pip_fix("pypdf"), required=False)
 
 
+def check_deliverable_render() -> dict:
+    """可选的第二道核验（WP2 R2f）：装了 PyMuPDF（import 名 fitz）时，导出包 PDF 每页会被独立渲染，
+    在图号位置统计看得见的墨迹；没装时报告标 render_check="unavailable"，其余核验照常。
+    注意 PyMuPDF 是 AGPL 许可，按需自行安装，本工具不把它列为依赖。"""
+    try:
+        import fitz  # noqa: F401
+        return _check("deliverable-pdf-render", STATUS_OK,
+                      "PyMuPDF 可用 —— 导出包 PDF 逐页独立渲染核验图号可见", required=False)
+    except Exception as exc:  # noqa: BLE001
+        return _check("deliverable-pdf-render", STATUS_MISSING,
+                      "缺 PyMuPDF（%s）—— PDF 仍按固定结构逐页核验，只是少了独立渲染这一道"
+                      % _import_error(exc), "python3 -m pip install pymupdf（AGPL 许可，按需安装）",
+                      required=False)
+
+
 def run_checks() -> dict:
     """Every probe, in a fixed order. Deterministic: no time, no randomness."""
     checks = [
@@ -438,6 +453,7 @@ def run_checks() -> dict:
         check_dwgread(),
         check_plan_studio(),
         check_deliverable(),
+        check_deliverable_render(),
     ]
     ok = all(c["status"] == STATUS_OK for c in checks if c["required"])
     return {"checks": checks, "ok": ok}

@@ -320,7 +320,8 @@ components:
         min_text_mm: {type: number, nullable: true}
         min_text_px: {type: number, nullable: true}
         caption: {type: string, nullable: true, example: 图1}
-        caption_ink: {type: number, nullable: true, description: 图号位置的墨迹占比（从文件里的图片像素算）}
+        caption_ink: {type: number, nullable: true, description: 图号位置的墨迹占比（从文件里的图片像素算，透明度合成到白底）}
+        render_caption_ink: {type: number, nullable: true, description: 仅 PDF 且装了 PyMuPDF：渲染整页后图号位置看得见的墨迹占比}
     DocumentCheck:
       description: 对写出的 PDF / Word 文件本身逐页核验（deliverable_check），不信任写出端自报。
       type: object
@@ -341,6 +342,10 @@ components:
             严格等价核验（单节、规范页幅页边、每段恰一张行内图片、零缩进单倍行距居中、第 2 段起段前分页、
             无额外段落/分页/样式），没有用 Word 排版引擎实测
         layout_note: {type: string, example: "Word 按文档结构核验，实际排版以 Word 打开为准"}
+        render_check:
+          type: string
+          enum: [pymupdf, unavailable]
+          description: 仅 PDF：是否用独立渲染器（可选依赖 PyMuPDF）逐页渲染核验图号可见
     ExportItem:
       description: 导出屏的逐「版本 × 格式」汇总行。
       type: object
@@ -392,6 +397,7 @@ components:
             variants: {type: object}
             pdf_available: {type: boolean}
             pdf_check_available: {type: boolean, description: false = 缺 pypdf，PDF 会被如实报 fail}
+            pdf_render_check_available: {type: boolean, description: 是否装了可选的 PyMuPDF（第二道独立渲染核验）}
             docx_available: {type: boolean}
             dwg_available: {type: boolean, description: false 时前端事前禁选 DWG；后端对 DWG 一律 skip 并给原因}
             dwg_route: {type: string, nullable: true, enum: [autocad, libredwg, null]}

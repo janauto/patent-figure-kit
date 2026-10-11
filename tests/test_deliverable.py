@@ -709,3 +709,104 @@ def test_written_media_passes_the_png_whitelist(two):
         assert C.png_whitelist(pg.png_bytes()) == []
     assert C.png_whitelist(_gray_trns_png(pages[0].png_bytes()))
     assert C.png_whitelist(_rgba_transparent_png(pages[0].png_bytes()))
+
+
+# --------------------------------------------------------------------------- R2f: PDF closed set
+
+
+def _replace_contents(w, page, data: bytes):
+    from pypdf.generic import DecodedStreamObject, NameObject
+    cs = DecodedStreamObject()
+    cs.set_data(data)
+    page[NameObject("/Contents")] = w._add_object(cs)
+
+
+def _pdf_clip_everything(w, page):                  # path clip (not re) that clips the page away
+    _replace_contents(w, page, b"q 0 0 m 1 0 l 1 1 l 0 1 l h W n\n"
+                      + page.get_contents().get_data() + b"\nQ\n")
+
+
+def _pdf_inline_white(w, page):                     # a white 1x1 inline image scaled to the page
+    _replace_contents(w, page, page.get_contents().get_data()
+                      + b"\nq 595.3 0 0 841.9 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \xff EI Q\n")
+
+
+def _pdf_extra_xobject(w, page):                    # a second (white) image painted over it
+    from pypdf.generic import DecodedStreamObject, NameObject, NumberObject
+    img = DecodedStreamObject()
+    img.set_data(b"\xff")
+    img.update({NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Image"),
+                NameObject("/Width"): NumberObject(1), NameObject("/Height"): NumberObject(1),
+                NameObject("/ColorSpace"): NameObject("/DeviceGray"),
+                NameObject("/BitsPerComponent"): NumberObject(8)})
+    xo = page["/Resources"]["/XObject"]
+    xo.get_object()[NameObject("/I9")] = w._add_object(img)
+    _replace_contents(w, page, page.get_contents().get_data()
+                      + b"\nq 595.3 0 0 841.9 0 0 cm /I9 Do Q\n")
+
+
+def _pdf_ocg_off(w, page):                          # the picture inside an optional content group, OFF
+    from pypdf.generic import (ArrayObject, DictionaryObject, NameObject, TextStringObject)
+    oc = DictionaryObject({NameObject("/Type"): NameObject("/OCG"),
+                           NameObject("/Name"): TextStringObject("hide")})
+    ref = w._add_object(oc)
+    w._root_object[NameObject("/OCProperties")] = DictionaryObject({
+        NameObject("/OCGs"): ArrayObject([ref]),
+        NameObject("/D"): DictionaryObject({NameObject("/OFF"): ArrayObject([ref])})})
+    res = page["/Resources"].get_object()
+    res[NameObject("/Properties")] = DictionaryObject({NameObject("/oc1"): ref})
+    _replace_contents(w, page, b"/OC /oc1 BDC\n" + page.get_contents().get_data() + b"\nEMC\n")
+
+
+def _pdf_blend_mode(w, page):
+    from pypdf.generic import NameObject
+    for _n, gs in page["/Resources"]["/ExtGState"].items():
+        gs.get_object()[NameObject("/BM")] = NameObject("/Screen")
+
+
+def _pdf_group(w, page):
+    from pypdf.generic import DictionaryObject, NameObject
+    page[NameObject("/Group")] = DictionaryObject({NameObject("/S"): NameObject("/Transparency")})
+
+
+def _pdf_cropbox(w, page):
+    from pypdf.generic import ArrayObject, FloatObject, NameObject
+    page[NameObject("/CropBox")] = ArrayObject([FloatObject(0), FloatObject(0),
+                                                FloatObject(10), FloatObject(10)])
+
+
+@pytest.mark.parametrize("mutate, expect, invisible", [
+    (_pdf_clip_everything, "内容流", True),
+    (_pdf_inline_white, "内容流", True),
+    (_pdf_extra_xobject, "图片资源", True),
+    (_pdf_ocg_off, "目录", True),
+    (_pdf_alpha_zero, "不透明状态", False),
+    (_pdf_blend_mode, "不透明状态", False),
+    (_pdf_group, "页面对象键", False),
+    (_pdf_cropbox, "页面对象键", False),
+])
+def test_pdf_is_a_closed_set(two, mutate, expect, invisible):
+    """R2f: the PDF must be exactly the writer's structure — a path clip that removes the page,
+    a white inline image or an extra XObject painted over it, the picture in an OFF optional
+    content group, a transparent / blended graphics state, a transparency group or a crop box
+    each fail the full check (the original passes). Where the injection makes the figure number
+    invisible, an independent renderer (PyMuPDF, when installed) confirms it."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    ok = _check(good, rows, sp)
+    assert ok["ok"], (ok["errors"], [p["errors"] for p in ok["page_checks"]])
+    bad = tmp / "bad.pdf"
+    _pdf_mutate(good, bad, mutate)
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert expect in msgs, msgs
+    if invisible and C.render_checker_available():
+        assert rep["render_check"] == "pymupdf"
+        assert ok["page_checks"][0]["render_caption_ink"] > C.INK_FRACTION_MIN
+        assert rep["page_checks"][0]["render_caption_ink"] < C.INK_FRACTION_MIN, rep["page_checks"][0]
+        assert "渲染后图号位置没有墨迹" in msgs

@@ -47,6 +47,7 @@ def export_capabilities() -> Dict[str, Any]:
                      "both": "两版"},
         "pdf_available": True,
         "pdf_check_available": pdf_check,
+        "pdf_render_check_available": _C.render_checker_available(),
         "docx_available": docx_ok,
         "dwg_available": route is not None,
         "dwg_route": route,
