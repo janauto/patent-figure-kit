@@ -1,7 +1,7 @@
 // 屏⑤ 导出：版本段控 + 格式矩阵 + 推荐组合 + 打包进度与清单。
 // 递交版 = PDF / Word；DXF / DWG 标「源文件，供再编辑」，不暗示能递交；DWG 不可用时禁选。
 // 四态：QA 未全过（禁用 + 指向 QA）/ 就绪 / 打包中 / 完成清单。
-import { state, renderStale, renderStaleReason, flush, bus, normEtag, planDigest } from './state.js';
+import { state, renderStale, renderStaleReason, flush, bus, normEtag, planDigest, resultIdentity } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 import { esc } from './esc.js';
@@ -192,6 +192,20 @@ async function doPack() {
   if (saveBroken()) { end(); toast('计划没能保存，未打包——请先解决保存问题。', 'bad'); render(); return; }
   if (state.editVersion > state.savedVersion || !gatePassed()) {
     end(); toast('结果已不对应当前计划或未过闸，未打包——请先到「出图与 QA」重新出图。', 'bad'); render(); return;
+  }
+  if (!state.planEtag) {
+    // legacy（无 ETag、无结果 ID）：旧后端打包的是「服务端此刻的那份结果」。提交前回读一次服务端，
+    // 确认计划与结果仍是本页绑定的那一份（另一页面改计划 / 重新出图后，本页的内存证据不能再背书）。
+    let srv;
+    try { srv = await api.getProject(state.projectId); } catch (err) {
+      if (mine()) { end(); toast('无法核对服务端状态，未打包：' + (err.hint || err.message), 'bad'); render(); }
+      return;
+    }
+    if (!mine()) return;
+    if (srv.rendering || resultIdentity(srv.render) !== resultIdentity(state.render)
+        || planDigest(srv.plan) !== state.renderInputs.digest || !gatePassed()) {
+      end(); toast('服务端的计划或出图结果已在别处变化（如另一页面重新出图），未打包——请刷新后重新出图。', 'bad'); render(); return;
+    }
   }
   // 提交前开票（同步，紧挨着请求）：完成时只认这张票
   const ticket = openTicket(id);

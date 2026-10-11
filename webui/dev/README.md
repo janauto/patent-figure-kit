@@ -20,6 +20,8 @@ python3 webui/dev/mock_server.py --port 8804 --no-ai --no-dwg
 - 首页 / 工程列表：`http://127.0.0.1:8803/home.html`
 - 规划台：`http://127.0.0.1:8803/index.html?project=gearbox`
 - 静态只读站（读 `manifest.json`，模拟 GitHub Pages）：`http://127.0.0.1:8803/home.html?static`
+- legacy 兼容子应用（仿旧 `plan_studio` 的同步 `/api/*`：后台线程渲染、无 ETag、无结果 ID、同步打包），
+  走 `api.js` 的真实 legacy 分支：`http://127.0.0.1:8803/p/gearbox/?stage=qa`（`verify_ui.py` 的 legacy 用例即对它跑）
 
 三个示例工程：`gearbox`（行星齿轮减速器，全套真实资产）、`bench-vise`（台虎钳，整机候选被闸门拦下的教学样例）、`ball-valve`（球阀，候选为空 → 提示手动框选）。
 

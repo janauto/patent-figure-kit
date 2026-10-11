@@ -1,7 +1,7 @@
 // 屏④ 出图结果与 QA：盖章总览 + 13 格点阵 + 每项「原因 / 建议 / 直达入口」。
 // 四态：未渲染 / 渲染中（SSE 日志）/ 全过（导出解锁）/ 有失败（导出禁用 + 修复引导）。
 // 预览里点 text[data-numeral] → 联动高亮对应零件（数据契约不变）。
-import { bus, state, setSelection, renderStaleReason, planDigest, flush, digestStoreSet, normEtag, resultEtag } from './state.js';
+import { bus, state, setSelection, renderStaleReason, planDigest, flush, proofSet, resultIdentity, normEtag, resultEtag } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 
@@ -99,7 +99,8 @@ function render() {
   const r = currentRender();
   const force = params.get('state');
   // --- 未渲染 / 渲染中 ---
-  if (!r || force === 'empty') {
+  // legacy 旧后端一开工就清空 out/：渲染期间旧结果的预览文件已不存在，直接显示「渲染中」，不再去取旧预览。
+  if (!r || force === 'empty' || (rendering && api.isLegacy)) {
     host.innerHTML = `<div class="qa-blank">
       <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
       ${rendering || force === 'loading' ? `
@@ -201,6 +202,7 @@ async function loadSvg(fig) {
   const src = fig.variants?.[variant] || fig.svg;
   try {
     const res = await fetch(api.previewUrl(src));
+    if (!res.ok) throw new Error(`预览 ${res.status}`);   // 错误体不当作 SVG 塞进页面
     pane.innerHTML = await res.text();       // 本机 / 静态站生成的 SVG，可信来源
     const svg = pane.querySelector('svg');
     if (svg) {
@@ -229,7 +231,7 @@ async function loadSvg(fig) {
 function bindEvidence(result, ev, jobInputs) {
   if (!(result && (result.figures || []).length)) {
     state.renderInputs = { etag: null, digest: null, raced: false };
-    if (!state.planEtag) digestStoreSet(state.projectId, null);
+    if (!state.planEtag) proofSet(state.projectId, null);
     return;
   }
   if (state.planEtag) {
@@ -237,10 +239,11 @@ function bindEvidence(result, ev, jobInputs) {
     state.renderInputs = { etag: resultEtag(result) || fromJob || null, digest: null, raced: false };
     return;
   }
-  if (!ev) { state.renderInputs = { etag: null, digest: null, raced: false }; digestStoreSet(state.projectId, null); return; }
+  if (!ev) { state.renderInputs = { etag: null, digest: null, raced: false }; proofSet(state.projectId, null); return; }
   const raced = ev.editVersion !== state.editVersion || ev.digest !== planDigest();
   state.renderInputs = { etag: null, digest: ev.digest, raced };
-  digestStoreSet(state.projectId, raced ? null : ev.digest);   // 有竞态的结果不持久化背书
+  // 证明钉在「这一份结果」上（结果身份）；有竞态的结果不持久化背书
+  proofSet(state.projectId, raced ? null : { digest: ev.digest, result: resultIdentity(result) });
 }
 
 // 作业终态：d 是 done 事件或 GET job 的数据；ev 是该作业「发请求前」捕获、只属于它的输入快照。
@@ -289,6 +292,13 @@ async function startRender() {
   // —— 发请求「之前」捕获已保存输入的快照（Codex R3e #2）——
   // 此刻没有未落盘的编辑，当前 plan 就是服务端那份；请求在途期间的编辑不得被记成本作业的输入。
   const pre = { digest: planDigest(), etag: normEtag(state.planEtag), editVersion: state.editVersion };
+  if (!state.planEtag) {
+    // legacy（Codex R3f #2）：发起新渲染前立即作废持久化证明与本页证据——旧后端一开工就清空 out/，
+    // 旧结果随即失效；且本页若在完成前被关掉，绝不能让旧证明给下一份结果背书。
+    proofSet(state.projectId, null);
+    state.renderInputs = { etag: null, digest: null, raced: false };
+    bus.emit('render-stale');
+  }
   let job;
   try {
     job = await api.render(state.projectId, { etag: state.planEtag, fail: params.get('rfail') });

@@ -153,17 +153,45 @@ function canon(v) {
   }
   return JSON.stringify(v);
 }
-export function planDigest(plan = state.plan) {
-  if (!plan) return '';
-  const s = canon(plan);
-  let h = 5381;
-  for (let i = 0; i < s.length; i += 1) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return h.toString(16);
+// 64 位规范化摘要（djb2 + FNV-1a 两路 32 位），键序无关。
+function digest64(v) {
+  const s = canon(v);
+  let h1 = 5381; let h2 = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s.charCodeAt(i);
+    h1 = ((h1 << 5) + h1 + c) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x01000193) >>> 0;
+  }
+  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
 }
-// legacy 渲染输入摘要跨会话持久化（每工程一条，用 localStorage 以 project 为键）
-const digestKey = (pid) => `inkline-render-digest-${pid}`;
-export function digestStoreGet(pid) { try { return localStorage.getItem(digestKey(pid)) || null; } catch { return null; } }
-export function digestStoreSet(pid, d) { try { if (d) localStorage.setItem(digestKey(pid), d); else localStorage.removeItem(digestKey(pid)); } catch { /* 隐私模式 */ } }
+export function planDigest(plan = state.plan) {
+  return plan ? digest64(plan) : '';
+}
+// 渲染结果的身份：整份结果（图、QA、标记表、完成时间、日志）的规范化摘要。
+// legacy 旧后端没有结果 ID，用它把「输入摘要」钉在某一份具体结果上：结果被另一轮渲染替换后身份必变。
+export function resultIdentity(r) {
+  return r ? `${r.finished_at || r.finished || ''}|${digest64(r)}` : '';
+}
+
+// legacy 的「渲染证明」跨会话持久化（每工程一条）：{v, digest（该次渲染的输入摘要）, result（结果身份）}。
+// 只在本页亲手完成、且无竞态的一次渲染后写入；发起新渲染前立即作废（Codex R3f #2）；
+// 跨会话恢复时必须与当前加载到的结果身份一致才采信——工程级摘要本身不再能单独背书。
+const proofKey = (pid) => `inkline-render-proof-${pid}`;
+const legacyDigestKey = (pid) => `inkline-render-digest-${pid}`;   // 轮 3–5 的旧格式（无结果身份），一律不再采信
+export function proofGet(pid) {
+  try {
+    const p = JSON.parse(localStorage.getItem(proofKey(pid)) || 'null');
+    return (p && p.v === 2 && p.digest && p.result) ? p : null;
+  } catch { return null; }
+}
+export function proofSet(pid, proof) {
+  try {
+    localStorage.removeItem(legacyDigestKey(pid));
+    if (proof && proof.digest && proof.result) {
+      localStorage.setItem(proofKey(pid), JSON.stringify({ v: 2, digest: proof.digest, result: proof.result }));
+    } else localStorage.removeItem(proofKey(pid));
+  } catch { /* 隐私模式：不持久化，刷新后锁定 */ }
+}
 
 // ETag 规范化：去掉弱前缀 W/ 与引号再比（代理/框架可能给同一版本加不同修饰）。
 export function normEtag(e) {
@@ -284,12 +312,16 @@ export async function boot(projectId) {
   state.plan = planRes.plan;
   state.planEtag = planRes.etag || null;
   state.editVersion = 0; state.savedVersion = 0;
-  // 结果版本证据：绝不用当前 plan 补造。live 用后端结果携带的 plan_etag；legacy 用本工程持久化的渲染输入摘要。
+  // 结果版本证据：绝不用当前 plan 补造。live 用后端结果携带的 plan_etag；legacy 用本工程持久化的渲染证明
+  //（输入摘要 + 结果身份，结果身份不符或后端正在渲染即不采信）。
   // 没有证据 → renderInputs 全 null → renderStale 判「no-proof」→ 锁定导出并提示「请重新出图」。
   state.renderInputs = { etag: null, digest: null, raced: false };
   if (state.render) {
     state.renderInputs.etag = resultEtag(state.render);                      // live：结果自带的输入快照
-    if (!state.planEtag) state.renderInputs.digest = digestStoreGet(projectId);   // legacy
+    if (!state.planEtag && !data.rendering) {                                 // legacy：证明须钉在这一份结果上
+      const proof = proofGet(projectId);
+      if (proof && proof.result === resultIdentity(state.render)) state.renderInputs.digest = proof.digest;
+    }
   }
   indexStructure();
   if (state.structure?.source === 'ai') state.view.colorBy = 'structure';

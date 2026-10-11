@@ -82,6 +82,7 @@ function legacyDetail(s) {
     assembly: s.assembly, structure: s.structure, render: s.render,
     candidates: [], candidates_unsupported: true,    // 旧后端无候选分图
     plan: s.plan, plan_etag: null, llm: legacyLlm(s.llm),
+    rendering: !!s.rendering,                        // 旧后端正在渲染：out/ 已被清空，旧结果不可再背书
     figures: (s.render?.figures || []).length,
     figures_pass: (s.render?.figures || []).filter((f) => f.pass).length,
     home_url: s.home_url, flowcharts: s.flowcharts || [],
@@ -94,6 +95,12 @@ function legacyLlm(l) {
   return { provider: l.provider, provider_label: l.provider_label || (configured ? 'AI' : 'AI 未配置'),
     configured, dwg_available: true };
 }
+
+// legacy 导出清单：按「每次请求唯一的 ID」各存一份不可变清单（Codex R3f #1）。
+// 旧实现用一个共享的 _lastExport，两次打包的响应交错返回时，后到的旧响应会覆盖它，
+// 新票据随后读到旧 ZIP。现在每次请求的清单只能用它自己的 ID 取回。
+const legacyExports = new Map();
+let legacyExportSeq = 0;
 
 // -------------------------------------------------------------- 统一接口
 export const api = {
@@ -179,18 +186,23 @@ export const api = {
       if (has('.dwg')) items.push({ format: 'dwg', label: 'DWG 源文件', status: 'ok' });
       else if ((opts.formats || []).includes('dwg')) items.push({ format: 'dwg', label: 'DWG 源文件', status: 'fail', reason: 'DWG 转换器不可用' });
       if ((opts.formats || []).includes('pdf')) items.push({ format: 'pdf', label: '递交版 PDF', status: 'skip', reason: '现有后端不产出 PDF，接线后由新版提供' });
-      api._lastExport = {
-        export_id: 'legacy:export', job_id: 'legacy:export', variant: opts.variant || 'both',
+      const exportId = `legacy:export:${++legacyExportSeq}:${Date.now().toString(36)}`;
+      legacyExports.set(exportId, Object.freeze({
+        export_id: exportId, job_id: exportId, variant: opts.variant || 'both',
         // 相对路径（不含 base）：下游统一用 previewUrl 只解析一次挂载前缀，避免 /p/{id}/p/{id}/… 重复
         zip: bundle.zip, download_url: `api/export-file/${encodeURIComponent(bundle.zip)}`,
-        items, manifest: files, notes: bundle.notes || [],
-      };
-      return { export_id: 'legacy:export', job_id: 'legacy:export' };
+        items: Object.freeze(items), manifest: Object.freeze([...files]), notes: Object.freeze([...(bundle.notes || [])]),
+      }));
+      return { export_id: exportId, job_id: exportId };
     }
     return (await call('POST', `${base}v1/projects/${id}/export`, opts)).body;
   },
   async getExport(exportId) {
-    if (MODE === 'legacy') return api._lastExport;
+    if (MODE === 'legacy') {                         // 只返回这一次请求自己的清单
+      const m = legacyExports.get(exportId);
+      if (!m) throw new ApiError('找不到这次打包的清单', 404, 'not_found');
+      return m;
+    }
     return (await call('GET', `${base}v1/exports/${exportId}`)).body;
   },
 
@@ -303,7 +315,7 @@ export const api = {
     const r = `${base}${rel(p)}`;
     return (MODE === 'legacy' && token) ? `${r}${r.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : r;
   },
-  _manifestSync: null, _lastExport: null,
+  _manifestSync: null,
   _m(id) { return (this._manifestSync?.projects || []).find((x) => x.id === id)?.detail; },
 
   // ---- 作业事件：live 走 SSE；legacy 轮询代替；static 立即完成 ----

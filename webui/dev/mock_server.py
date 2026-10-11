@@ -8,7 +8,9 @@
 * plan 的 ETag 乐观锁与 409 冲突；
 * 失败场景：闸门未过（bench-vise 整机候选被拦）、AI 未配置、DWG 不可用；
 * 三个公开示例工程的真实资产（GLB / SVG / QA JSON / 件号表，来自 webui/dev/fixtures/，
-  由现有 CLI 生成，只作 mock 数据）。
+  由现有 CLI 生成，只作 mock 数据）；
+* legacy 兼容子应用 /p/{id}/ + /api/*（仿旧 plan_studio 的同步接口：后台线程渲染、无 ETag、
+  无结果 ID、同步打包），供 verify_ui.py 走真实的 legacy 适配路径（api.js 的 legacy 分支）。
 
 OpenAPI（docs/openapi.yaml）WP1 尚未提供，本 mock 的契约为自拟，差异点见 webui/dev/README.md。
 
@@ -374,6 +376,63 @@ def run_job(job, kind, fail_stage, speed):
 
 
 # --------------------------------------------------------------------------- #
+#  legacy 兼容子应用：/p/{pid}/ + /api/*（仿旧 scripts/plan_studio.py）            #
+# --------------------------------------------------------------------------- #
+# 与旧后端一致的要点：渲染在后台线程里读 plan（不冻结输入）、开工即作废旧结果、结果无 ID 只有完成时间；
+# 打包同步返回 {zip, files}，打包的是「服务端此刻的那份结果」。前端的 legacy 适配逻辑要在这些约束下成立。
+LEGACY = {}                   # pid -> {"running", "result", "started"}
+LEGACY_RENDER_SECS = 1.6
+LEGACY_EXPORTS = set()        # 已生成的 zip 名
+_legacy_export_seq = [0]
+
+
+def legacy_shape(r):
+    """把（live 形态的）渲染结果改成旧后端形态：无 inputs/ETag，预览走 /api/preview/。"""
+    r.pop("inputs", None)
+    for f in r.get("figures", []):
+        f["svg"] = "/api/preview/%s" % f["svg"].rsplit("/", 1)[-1]
+        f["variants"] = {k: "/api/preview/%s" % v.rsplit("/", 1)[-1]
+                         for k, v in (f.get("variants") or {}).items()}
+    return r
+
+
+def legacy_ws(pid):
+    p = PROJECTS.get(pid)
+    if not p or not p.get("data"):
+        return None
+    ws = LEGACY.get(pid)
+    if ws is None:
+        r = copy.deepcopy(p["data"].get("render"))
+        ws = LEGACY[pid] = {"running": False, "started": None,
+                            "result": legacy_shape(r) if r else None}
+    return ws
+
+
+def legacy_render_job(pid, ws):
+    plan = json.dumps(PROJECTS[pid]["data"]["plan"], ensure_ascii=False, sort_keys=True)  # 线程里读 plan
+    time.sleep(LEGACY_RENDER_SECS)
+    src = (PROJECTS.get("gearbox", {}).get("data") or {}).get("render")
+    r = legacy_shape(copy.deepcopy(src)) if src else {"figures": []}
+    r["ok"] = bool(r.get("figures"))
+    r["finished"] = time.strftime("%H:%M:%S")
+    r["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    r["log"] = "mock legacy 渲染 · 读到的 plan sha256=%s" % hashlib.sha256(plan.encode("utf-8")).hexdigest()[:12]
+    ws["result"] = r
+    ws["running"] = False
+
+
+def legacy_state(pid, ws):
+    p = PROJECTS[pid]
+    d = p["data"]
+    return {"step": "/mock/%s" % p["step"], "workdir": "/mock/%s" % pid,
+            "assembly": d.get("assembly"), "plan": d.get("plan"),
+            "validate": d.get("validate") or {"ok": True, "issues": []},
+            "render": ws["result"], "rendering": ws["running"], "home_url": "/home.html",
+            "flowcharts": [], "llm": {"provider": LLM["provider"], "provider_label": LLM["provider_label"]},
+            "structure": d.get("structure"), "structure_job": {}}
+
+
+# --------------------------------------------------------------------------- #
 #  HTTP                                                                        #
 # --------------------------------------------------------------------------- #
 def project_summary(p):
@@ -478,6 +537,8 @@ class Handler(BaseHTTPRequestHandler):
         path, q = u.path, parse_qs(u.query)
         if path == "/" :
             return self._redirect("/home.html")
+        if path.startswith("/p/"):
+            return self.legacy("GET", path, q)
         if path.startswith("/v1/") or path.startswith("/api/"):
             return self.api_get(path, q)
         return self.static(path)
@@ -487,11 +548,90 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path.startswith("/p/"):
+            return self.legacy("POST", u.path, parse_qs(u.query))
         return self.api_post(u.path, parse_qs(u.query), self._json_body())
 
     def do_PUT(self):
         u = urlparse(self.path)
+        if u.path.startswith("/p/"):
+            return self.legacy("PUT", u.path, parse_qs(u.query))
         return self.api_put(u.path, parse_qs(u.query), self._json_body())
+
+    # ---- legacy 子应用 /p/{pid}/ ----
+    def legacy(self, method, path, q):
+        m = re.fullmatch(r"/p/([\w\-]+)(/.*)?", path)
+        if not m:
+            return self._err(404, "没有这个工程")
+        pid, rest = m.group(1), (m.group(2) or "")
+        if not rest:
+            return self._redirect("/p/%s/" % pid)
+        rest = rest[1:]
+        ws = legacy_ws(pid)
+        if ws is None:
+            return self._err(404, "没有这个工程")
+        if not rest.startswith("api/"):
+            if method != "GET":
+                return self._err(405, "方法不允许")
+            if rest.startswith("v1/"):
+                return self.api_get("/" + rest, q)
+            return self.static("/" + (rest or "index.html"))
+        api, p = rest[4:], PROJECTS[pid]
+        if method == "GET" and api == "state":
+            return self._send(200, legacy_state(pid, ws))
+        if method == "GET" and api == "render/status":
+            return self._send(200, {"running": ws["running"], "result": ws["result"], "started": ws["started"]})
+        if method == "GET" and api == "model.glb":
+            glb = GLB_BY_PROJECT.get(pid)
+            return self.static(f"/dev/fixtures/models/{glb}") if glb else self._err(404, "没有模型")
+        if method == "GET" and api.startswith("preview/"):
+            name = api[len("preview/"):]
+            if not re.fullmatch(r"[\w\-]+\.(svg|png)", name):
+                return self._err(400, "非法文件名")
+            return self.static(f"/dev/fixtures/{pid}/{name}")
+        if method == "GET" and api == "flowcharts":
+            return self._send(200, {"flowcharts": []})
+        if method == "GET" and api.startswith("export-file/"):
+            name = api[len("export-file/"):]
+            if name not in LEGACY_EXPORTS:
+                return self._err(404, "没有这个包")
+            body = ("这是 mock legacy 的占位 zip（%s）。" % name).encode("utf-8")
+            return self._send(200, body, "application/zip",
+                              {"Content-Disposition": 'attachment; filename="%s"' % name})
+        if method == "PUT" and api == "plan":
+            body = self._json_body()
+            plan = body.get("plan")
+            if not isinstance(plan, dict):
+                return self._err(400, "body.plan 必须是对象")
+            p["data"]["plan"] = plan
+            p["plan_rev"] += 1                                  # live 视图同步换版本
+            p["plan_etag"] = 'W/"%s-%d"' % (pid, p["plan_rev"])
+            return self._send(200, {"validate": {"ok": True, "issues": []}})
+        if method == "POST" and api == "render":
+            self._json_body()
+            with LOCK:
+                if ws["running"]:
+                    return self._err(409, "已有一次渲染在进行——几何缓存不支持并发写入")
+                ws["running"] = True
+                ws["started"] = time.strftime("%H:%M:%S")
+            threading.Thread(target=legacy_render_job, args=(pid, ws), daemon=True).start()
+            return self._send(200, {"started": ws["started"]})
+        if method == "POST" and api == "export":
+            body = self._json_body()
+            r = ws["result"]
+            if not (r and r.get("ok") and r.get("figures") and all(f.get("pass") for f in r["figures"])):
+                return self._err(409, "存在未通过 QA 的图，不能导出——按提示改计划后重渲")
+            with LOCK:
+                _legacy_export_seq[0] += 1
+                name = "export-%s-%06d.zip" % (time.strftime("%Y%m%d"), _legacy_export_seq[0])
+                LEGACY_EXPORTS.add(name)
+            files = ["交底版_说明书附图.docx"] + ["%s_%s.dxf" % (f["id"], v) for f in r["figures"]
+                                                for v in ("annotated", "filing", "raw")] + ["附图说明.txt"]
+            if body.get("dwg") and LLM.get("dwg_available", True):
+                files += ["%s_filing.dwg" % f["id"] for f in r["figures"]]
+            return self._send(200, {"zip": name, "files": files, "notes": [],
+                                    "dir": "/mock/%s/%s" % (pid, name[:-4])})
+        return self._err(404, "mock legacy 未实现：%s %s" % (method, api))
 
     def do_DELETE(self):
         u = urlparse(self.path)

@@ -13,6 +13,12 @@
   * 渲染证据捕获时机：A 请求发出→响应未到期间编辑并保存 B→A 完成，证据仍是 A、导出锁定（改回 A 也不解锁）
   * 导出迟到回调：打包 A 期间改存 B→A 完成→B 重渲过闸→回导出页不显示 A 的包；取清单被扣住时同理
 
+修复轮 6（Codex R3f）新增——走真实 legacy 适配路径（mock 的 /p/{id}/ + /api/* 子应用，不再只是把 ETag 置空）：
+  * legacy 渲染证据：A 请求在途期间改存 B，证据仍为 A、判 raced、导出锁定
+  * legacy 跨页面：A 完成并持久化 → 改存 B 起渲染 → 改回 A → 关页 → B 完成后重进，导出锁定；
+    正常刷新仍可凭「钉在结果身份上的证明」解锁；另一页面重新出图后，本页旧内存证据不能打包
+  * legacy 打包交错：A 打包在途 → 改计划重渲 B → 启动 B 打包 → B 响应先回、A 响应后回，展示与下载均为 B
+
 起 mock：python3 webui/dev/mock_server.py --port 8803
 起静态：python3 webui/dev/build_static.py && (cd webui/dev/static-site && python3 -m http.server 8808)
 跑：    python3 webui/dev/verify_ui.py        # 全过退出 0，任一失败退出 1
@@ -244,9 +250,9 @@ def test_flush_after_failure(pg):
 
 
 def test_render_evidence_race(pg):
-    """R3e #2：A 请求发出 → 响应未到期间编辑并保存 B → 响应到 → A 完成；证据必须是 A、导出锁定。
-    legacy 分支（无 ETag，用摘要）：把 planEtag 置空、保存走不带 ETag 的 200，渲染响应扣住到 B 存好后才放行。
-    live 分支：证据只认后端输入快照（202 的 inputs.plan_etag / 结果自带），同样必须是 A。"""
+    """R3e #2（live 分支）：A 请求发出 → 响应未到期间编辑并保存 B → 响应到 → A 完成；
+    证据只认后端输入快照（202 的 inputs.plan_etag / 结果自带），必须是 A、导出锁定。
+    legacy 分支走真实 legacy 适配路径，见 test_legacy_render_evidence_race。"""
     pg.goto(f"{B}/index.html?project=gearbox&stage=qa", wait_until="networkidle")
     pg.wait_for_timeout(2500)
     body = """async (mode) => {""" + JS_HELPERS + """
@@ -290,13 +296,6 @@ def test_render_evidence_race(pg):
                    server202: job202 && job202.inputs ? norm(job202.inputs.plan_etag) : null };
         } finally { release(); window.fetch = realFetch; }
     }"""
-    r = pg.evaluate(body, "legacy")
-    ok_legacy = (r["doneOk"] and r["ev"]["digest"] == r["digestA"] and r["digestA"] != r["digestB"]
-                 and r["reason"] is not None and r["locked"] and r["reasonRevert"] is not None)
-    check("渲染证据（legacy 摘要）：请求在途期间改存 B，证据仍为 A、导出锁定、改回 A 也不解锁", ok_legacy,
-          f"done={r['doneOk']} evIsA={r['ev']['digest'] == r['digestA']} reason={r['reason']} locked={r['locked']} revert={r['reasonRevert']}")
-    pg.goto(f"{B}/index.html?project=gearbox&stage=qa", wait_until="networkidle")
-    pg.wait_for_timeout(2500)
     r = pg.evaluate(body, "live")
     ok_live = (r["doneOk"] and r["ev"]["etag"] == r["etagA"] and r["server202"] == r["etagA"]
                and r["etagA"] != r["etagB"] and r["reason"] == "changed" and r["locked"])
@@ -377,6 +376,208 @@ def test_export_late_callback(pg):
           f"held={r.get('getHeld')} gateC={r.get('gateC')} shownC={r.get('doneShownC')} form={r.get('formC')} packEnabled={r.get('packEnabledC')}")
 
 
+LP = f"{B}/p/gearbox/"          # mock 的 legacy 子应用入口（api.js 判 legacy：/api/* 同步接口、无 ETag）
+JS_LEGACY = """
+  const st = await import('./js/state.js');
+  const apiMod = await import('./js/api.js');
+  const proofKey = 'inkline-render-proof-gearbox';
+  const rerender = async () => {
+    await stage('qa');
+    const r0 = st.state.render;
+    document.querySelector('#rerender, #qa-render').click();
+    const ok = await waitFor(() => st.state.render !== r0 && !document.querySelector('#rerender[disabled]'), 15000);
+    await sleep(200);
+    return ok;
+  };
+"""
+
+
+def legacy_idle():
+    """等 mock legacy 子应用上的渲染跑完（关页后在服务端继续的那一轮）。"""
+    import json as _j, time as _t, urllib.request as _u
+    for _ in range(80):
+        st = _j.loads(_u.urlopen(f"{LP}api/render/status").read())
+        if not st.get("running"):
+            return True
+        _t.sleep(0.15)
+    return False
+
+
+def test_legacy_render_evidence_race(pg):
+    """R3f #3 + R3e #2（真实 legacy 适配路径）：A 渲染请求已到后端、响应未回时编辑并保存 B，
+    A 完成后证据必须是 A、判 raced、导出锁定；改回 A 也不解锁，且不留持久化证明。"""
+    pg.goto(f"{LP}?stage=qa", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """
+        const orig = st.state.plan.terms[0].term;
+        const realFetch = window.fetch;
+        let release; const gate = new Promise((r) => { release = r; }); let sent = false;
+        window.fetch = async (url, init) => {
+          const m = (init && init.method) || 'GET';
+          if (m === 'POST' && /\\/api\\/render$/.test(String(url))) {
+            const res = await realFetch(url, init); sent = true; await gate; return res;
+          }
+          return realFetch(url, init);
+        };
+        try {
+          await stage('qa');
+          const mode = apiMod.api.mode; const etag = st.state.planEtag;
+          const digestA = st.planDigest(); const r0 = st.state.render;
+          document.querySelector('#rerender, #qa-render').click();
+          await waitFor(() => sent, 8000);
+          st.mutate((p) => { p.terms[0].term = uniq('旧后端在途改乙'); }); await st.flush();
+          const digestB = st.planDigest();
+          release();
+          const doneOk = await waitFor(() => st.state.render !== r0 && !document.querySelector('#rerender[disabled]'), 15000);
+          const evDigest = st.state.renderInputs.digest; const reason = st.renderStaleReason();
+          await stage('export');
+          const locked = !!document.querySelector('.exp-blank') && !document.querySelector('#do-pack');
+          st.mutate((p) => { p.terms[0].term = orig; }); await st.flush();
+          await stage('export');
+          const reasonRevert = st.renderStaleReason();
+          const lockedRevert = !!document.querySelector('.exp-blank');
+          return { mode, etag, doneOk, evIsA: evDigest === digestA, aNeB: digestA !== digestB, reason, locked,
+                   reasonRevert, lockedRevert, proof: localStorage.getItem(proofKey) };
+        } finally { release(); window.fetch = realFetch; }
+    }""")
+    ok = (r["mode"] == "legacy" and r["etag"] is None and r["doneOk"] and r["evIsA"] and r["aNeB"]
+          and r["reason"] == "raced" and r["locked"] and r["reasonRevert"] is not None and r["lockedRevert"]
+          and r["proof"] is None)
+    check("legacy 渲染证据（/p/{id}/ + /api/*）：请求在途改存 B，证据仍为 A、raced、锁定，改回 A 也不解锁", ok,
+          f"mode={r['mode']} done={r['doneOk']} evIsA={r['evIsA']} reason={r['reason']} locked={r['locked']} "
+          f"revert={r['reasonRevert']}/{r['lockedRevert']} proof={'有' if r['proof'] else '无'}")
+
+
+def test_legacy_cross_page(ctx):
+    """R3f #2：跨页面证据。① 正常：A 完成 → 刷新仍解锁（证明钉在结果身份上）；
+    ② A 完成并持久化 → 改存 B 起渲染 → 改回 A → 关页 → B 完成后重进：必须锁定；
+    ③ 另一页面改计划并重新出图后，本页的旧内存证据不能打包（零 /api/export 请求）。"""
+    out = {}
+    p1 = ctx.new_page()
+    p1.goto(f"{LP}?stage=qa", wait_until="networkidle"); p1.wait_for_timeout(2500)
+    out.update(p1.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """
+        localStorage.removeItem(proofKey);
+        const orig = st.state.plan.terms[0].term;
+        const ok = await rerender();
+        return { aRendered: ok, reasonA: st.renderStaleReason(), orig };
+    }"""))
+    p1.reload(wait_until="networkidle"); p1.wait_for_timeout(2500)
+    out.update(p1.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """
+        await stage('export');
+        return { reasonReload: st.renderStaleReason(), unlockedReload: !!document.querySelector('#do-pack:not([disabled])') };
+    }"""))
+    # ② 改存 B → 起渲染（后端读到 B）→ 改回 A → 完成前关页
+    out.update(p1.evaluate("""async (orig) => {""" + JS_HELPERS + JS_LEGACY + """
+        const planA = st.planDigest();
+        st.mutate((p) => { p.terms[0].term = uniq('跨页改乙'); }); await st.flush();
+        await stage('qa');
+        document.querySelector('#rerender, #qa-render, #rerender-stale').click();
+        const started = await waitFor(async () => (await (await fetch('api/render/status')).json()).running, 5000);
+        await sleep(150);
+        st.mutate((p) => { p.terms[0].term = orig; }); await st.flush();          // 改回 A（与持久化证明同一份计划）
+        return { bStarted: started, proofDuringB: !!localStorage.getItem(proofKey), backToA: st.planDigest() === planA };
+    }""", out.get("orig")))
+    p1.close()
+    out["bDone"] = legacy_idle()
+    p2 = ctx.new_page()
+    p2.goto(f"{LP}?stage=export", wait_until="networkidle"); p2.wait_for_timeout(2500)
+    out.update(p2.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """
+        return { reasonReenter: st.renderStaleReason(), lockedReenter: !!document.querySelector('.exp-blank') };
+    }"""))
+    ok2 = (out.get("aRendered") and out.get("reasonA") is None
+           and out.get("reasonReload") is None and out.get("unlockedReload"))
+    check("legacy 跨页面①：A 完成后刷新，证明与结果身份一致仍解锁（不误锁）", ok2,
+          f"rendered={out.get('aRendered')} reasonA={out.get('reasonA')} "
+          f"reload={out.get('reasonReload')}/{out.get('unlockedReload')}")
+    ok3 = (out.get("bStarted") and out.get("backToA") and out.get("bDone")
+           and out.get("reasonReenter") is not None and out.get("lockedReenter"))
+    check("legacy 跨页面②：A 持久化→改存 B 起渲染→改回 A→关页→B 完成后重进，导出锁定", ok3,
+          f"bStarted={out.get('bStarted')} backToA={out.get('backToA')} proofDuringB={out.get('proofDuringB')} "
+          f"bDone={out.get('bDone')} reenter={out.get('reasonReenter')} locked={out.get('lockedReenter')}")
+    # ③ 本页（p2）重新出图解锁；另一页（p3）改计划并重新出图；回到 p2 打包必须被拒且不发打包请求
+    p2.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """ await rerender(); await stage('export'); }""")
+    p3 = ctx.new_page()
+    p3.goto(f"{LP}?stage=qa", wait_until="networkidle"); p3.wait_for_timeout(2500)
+    p3.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """
+        st.mutate((p) => { p.terms[0].term = uniq('别页改丙'); }); await st.flush(); await rerender();
+    }""")
+    exports = []
+    p2.on("request", lambda rq: exports.append(rq.url) if rq.method == "POST" and rq.url.endswith("/api/export") else None)
+    r3 = p2.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """
+        const before = !!document.querySelector('#do-pack:not([disabled])');
+        document.querySelector('#do-pack')?.click();
+        await sleep(1500);
+        return { packEnabledBefore: before, done: !!document.querySelector('.exp-done') };
+    }""")
+    p3.evaluate("""async (orig) => {""" + JS_HELPERS + JS_LEGACY + """
+        st.mutate((p) => { p.terms[0].term = orig; }); await st.flush();          // 还原演示计划
+    }""", out.get("orig"))
+    p2.close(); p3.close()
+    ok4 = r3["packEnabledBefore"] and not r3["done"] and len(exports) == 0
+    check("legacy 跨页面③：另一页面改计划并重新出图后，本页旧证据不能打包（零打包请求）", ok4,
+          f"packEnabledBefore={r3['packEnabledBefore']} done={r3['done']} exportPosts={len(exports)}")
+
+
+def test_legacy_export_interleave(pg):
+    """R3f #1：A 打包在途 → 改计划重渲 B → 启动 B 打包 → B 响应先回、A 响应在 B 的完成回调之前回；
+    展示与下载都必须是 B 的包（旧实现共享 _lastExport，B 会读到 A 的清单并带上有效票据）。"""
+    pg.goto(f"{LP}?stage=qa", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + JS_LEGACY + """
+        const orig = st.state.plan.terms[0].term;
+        const realFetch = window.fetch; const zips = [];
+        let releaseA; const gateA = new Promise((r) => { releaseA = r; }); let aHeld = false; let aReleased = false;
+        window.fetch = async (url, init) => {
+          const m = (init && init.method) || 'GET';
+          const res = await realFetch(url, init);
+          if (m === 'POST' && /\\/api\\/export$/.test(String(url))) {
+            zips.push((await res.clone().json()).zip);
+            if (zips.length === 1) { aHeld = true; await gateA; }      // A 的响应扣住
+          }
+          return res;
+        };
+        const origJobEvents = apiMod.api.jobEvents;
+        const out = {};
+        try {
+          out.aRendered = await rerender();
+          await stage('export');
+          document.querySelector('#do-pack').click();                    // ① 打包 A（响应被扣住）
+          await waitFor(() => aHeld, 8000);
+          st.mutate((p) => { p.terms[0].term = uniq('打包在途改乙'); }); await st.flush();   // ② 改计划
+          out.bRendered = await rerender();                              // ③ 重渲 B
+          out.gateB = st.renderStaleReason();
+          // ④ B 的响应先回；在 B 的完成回调之前放行 A 的响应，让 A 的适配器先处理完
+          apiMod.api.jobEvents = (id, h) => {
+            if (!aReleased && String(id).startsWith('legacy:export')) {
+              aReleased = true; releaseA();
+              setTimeout(() => origJobEvents.call(apiMod.api, id, h), 500);
+              return { close() {} };
+            }
+            return origJobEvents.call(apiMod.api, id, h);
+          };
+          await stage('export');
+          document.querySelector('#do-pack').click();                    // ⑤ 打包 B
+          out.shown = await waitFor(() => !!document.querySelector('.exp-done'), 8000);
+          await sleep(300);
+          out.zipA = zips[0]; out.zipB = zips[1];
+          out.shownZip = document.querySelector('.exp-zip b.mono')?.textContent || null;
+          const a = document.querySelector('.exp-zip-acts a[download]');
+          out.href = a ? a.getAttribute('href') : null;
+          if (a) { const res = await realFetch(a.href); out.dlStatus = res.status; out.dlBody = await res.text(); }
+        } finally {
+          releaseA(); apiMod.api.jobEvents = origJobEvents; window.fetch = realFetch;
+          st.mutate((p) => { p.terms[0].term = orig; }); await st.flush();
+        }
+        return out;
+    }""")
+    zb = r.get("zipB") or "?"
+    ok = (r.get("aRendered") and r.get("bRendered") and r.get("gateB") is None and r.get("shown")
+          and r.get("zipA") and r.get("zipA") != zb and r.get("shownZip") == zb
+          and (r.get("href") or "").endswith(zb) and r.get("dlStatus") == 200 and zb in (r.get("dlBody") or ""))
+    check("legacy 打包交错：B 响应先回、A 后回，展示与下载均为 B 的包", ok,
+          f"A={r.get('zipA')} B={r.get('zipB')} shown={r.get('shownZip')} href={r.get('href')} dl={r.get('dlStatus')} gateB={r.get('gateB')}")
+
+
 def test_unsaved_lock(pg):
     pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2500)
@@ -452,6 +653,7 @@ def main():
         ctx = b.new_context(viewport={"width": 1440, "height": 900})
         for fn in (test_xss, test_save_race, test_concurrent_flush, test_flush_noop_then_edit,
                    test_flush_after_failure, test_unsaved_lock, test_render_evidence_race, test_export_late_callback,
+                   test_legacy_render_evidence_race, test_legacy_export_interleave,
                    test_candidate_resolve, test_candidate_bad_member, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:
@@ -463,6 +665,12 @@ def main():
             test_new_session_lock(ctx)
         except Exception as exc:
             check("test_new_session_lock", False, f"异常 {exc!r}")
+        lctx = b.new_context(viewport={"width": 1440, "height": 900})   # 独立 localStorage：跨页面证据用例
+        try:
+            test_legacy_cross_page(lctx)
+        except Exception as exc:
+            check("test_legacy_cross_page", False, f"异常 {exc!r}"[:400])
+        lctx.close()
         test_static_write_guard(ctx)
         test_static_no_write(ctx)
         b.close()
