@@ -1,7 +1,7 @@
 // 屏⑤ 导出：版本段控 + 格式矩阵 + 推荐组合 + 打包进度与清单。
 // 递交版 = PDF / Word；DXF / DWG 标「源文件，供再编辑」，不暗示能递交；DWG 不可用时禁选。
 // 四态：QA 未全过（禁用 + 指向 QA）/ 就绪 / 打包中 / 完成清单。
-import { state, renderStale, bus } from './state.js';
+import { state, renderStale, renderStaleReason, bus } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 import { esc } from './esc.js';
@@ -36,12 +36,18 @@ function render() {
       manifest: ['递交版_图1.pdf', '递交版_图2.pdf', '交底版_说明书附图.docx', 'fig1.dxf', 'fig2.dxf', '附图说明.txt', '核对清单.txt'] };
   }
   if (!gatePassed() && force !== 'done') {
-    const stale = renderStale() && state.render;
+    const reason = renderStaleReason();
+    const stale = reason && state.render;
+    const h2 = reason === 'no-proof' ? '无法证明结果对应当前计划'
+      : (reason === 'changed' ? '计划改过，结果已过期' : '还有图未过 QA，不能导出');
+    const body = reason === 'no-proof' ? '为安全起见，未经本会话重新出图的结果不解锁导出。请到「出图与 QA」重新出图以解锁。'
+      : (reason === 'changed' ? '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」重新出图并过闸再来导出。'
+        : '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」按提示修改并重渲，全过后再来导出。');
     host.innerHTML = `<div class="exp-blank">
       <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
       <p class="stamp-fail">导出锁定</p>
-      <h2>${stale ? '计划改过，结果已过期' : '还有图未过 QA，不能导出'}</h2>
-      <p class="muted">未过闸的图不进交付目录——这是红线。请先到「出图与 QA」${stale ? '重新出图并过闸' : '按提示修改并重渲，全过后'}再来导出。</p>
+      <h2>${h2}</h2>
+      <p class="muted">${body}</p>
       <button class="btn big" id="to-qa">去出图与 QA →</button></div>`;
     host.querySelector('#to-qa')?.addEventListener('click', () => document.querySelector('.stage-tab[data-stage="qa"]').click());
     return;
@@ -91,8 +97,9 @@ function render() {
       </section>
 
       <section class="exp-sec">
-        <button class="btn primary big" id="do-pack" ${packing ? 'disabled' : ''}>
+        <button class="btn primary big" id="do-pack" ${packing || api.readOnly ? 'disabled' : ''}>
           ${packing ? '<i class="spin"></i> 打包中…' : '打包附图包'}</button>
+        ${api.readOnly ? '<p class="hint">静态演示站为预计算只读展示，不在浏览器里打包（需本地安装后的后端）。</p>' : ''}
         ${packing ? `<div class="pack-bar"><i id="pack-fill"></i></div>
           <p class="hint" id="pack-log">正在隔离目录渲染…</p>` : ''}
       </section>
@@ -137,6 +144,7 @@ function renderDone() {
 }
 
 async function doPack() {
+  if (api.readOnly) { toast('静态演示站只读，不能打包', ''); return; }   // 绝不向静态服务器发写请求
   packing = true; render();
   const fill = host.querySelector('#pack-fill');
   const log = host.querySelector('#pack-log');

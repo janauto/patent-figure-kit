@@ -1,11 +1,32 @@
 // 右栏·候选分图（F2-lite）：每个候选渲染 + 过 QA 后才显示状态——
 // 通过打绿章、未过给朱红章与「原因 + 建议」；接受即写进图卡。建议为空不假装零点击。
-import { bus, state, mutate, setActiveFigure } from './state.js';
+import { bus, state, mutate, setActiveFigure, partByName, resolveMembers } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
+import { esc } from './esc.js';
 
 let root;
-import { esc } from './esc.js';
+
+// 把候选的稳定成员引用（{group}/{part}）解析成真实零件名；返回 {parts, display, unresolved}。
+function resolveCandidate(c) {
+  const groups = state.structure?.groups || [];
+  const parts = []; const unresolved = [];
+  (c.members || []).forEach((m) => {
+    if (typeof m === 'string') {                 // 兼容旧形态：当作组名或零件名
+      const g = groups.find((x) => x.name === m || x.id === m);
+      if (g) parts.push(...g.parts);
+      else if (partByName(m) || resolveMembers({ members: [m] }).size) parts.push(m);
+      else unresolved.push(m);
+    } else if (m.group) {
+      const g = groups.find((x) => x.id === m.group);
+      if (g) parts.push(...g.parts); else unresolved.push(`组:${m.group}`);
+    } else if (m.part) {
+      if (partByName(m.part) || resolveMembers({ members: [m.part] }).size) parts.push(m.part);
+      else unresolved.push(m.part);
+    }
+  });
+  return { parts: [...new Set(parts)], display: c.members_display || c.members || [], unresolved };
+}
 
 function candCard(c) {
   const pass = c.status === 'pass';
@@ -13,16 +34,17 @@ function candCard(c) {
   const stamp = pending
     ? '<span class="stamp-run"><i class="spin"></i> 试渲染中</span>'
     : (pass ? '<span class="stamp-pass">合格</span>' : '<span class="stamp-fail">未过闸</span>');
-  const members = (c.members || []).map((m) => `<span class="chip chip-cn">${esc(m)}</span>`).join('');
+  const members = (c.members_display || c.members || [])
+    .map((m) => `<span class="chip chip-cn">${esc(typeof m === 'string' ? m : (m.group || m.part))}</span>`).join('');
   const qaLine = c.qa && !pass
     ? `<ul class="cand-qa">${(c.qa.checks || []).filter((k) => !k.pass)
         .map((k) => `<li><span class="mono">${esc(k.id)}</span> ${esc(k.value)} ${esc(k.threshold)}</li>`).join('')}</ul>`
     : '';
   const acts = pass
-    ? `<button class="btn primary sm" data-accept="${c.fig_id}">接受，建图</button>
-       <button class="btn ghost sm" data-drop="${c.fig_id}">删除</button>`
-    : (pending ? '' : `<button class="btn ghost sm" data-split="${c.fig_id}">按建议拆分</button>
-       <button class="btn ghost sm" data-drop="${c.fig_id}">删除</button>`);
+    ? `<button class="btn primary sm" data-accept="${esc(c.fig_id)}">接受，建图</button>
+       <button class="btn ghost sm" data-drop="${esc(c.fig_id)}">删除</button>`
+    : (pending ? '' : `<button class="btn ghost sm" data-split="${esc(c.fig_id)}">按建议拆分</button>
+       <button class="btn ghost sm" data-drop="${esc(c.fig_id)}">删除</button>`);
   return `<article class="cand-card ${c.status}">
     <header><b>${esc(c.caption)}</b>${stamp}</header>
     <p class="cand-kind mono">${c.kind === 'assembly' ? '装配图' : '分解图'} · ${c.labels ?? '—'} 个标记</p>
@@ -36,7 +58,7 @@ function candCard(c) {
 function render() {
   const cands = state.candidates || [];
   const head = `<div class="panel-head"><span class="seal">候选</span>候选分图
-    ${state.candidatesUnsupported ? '' : '<button class="btn-min head-btn" data-resuggest>重新给候选</button>'}</div>`;
+    ${state.candidatesUnsupported || api.readOnly ? '' : '<button class="btn-min head-btn" data-resuggest>重新给候选</button>'}</div>`;
   if (state.candidatesUnsupported) {
     root.innerHTML = `${head}
       <div class="cand-empty">
@@ -89,24 +111,25 @@ async function resuggest() {
   } catch (err) { toast('无法重算候选：' + (err.hint || err.message), 'bad'); }
 }
 
-// 接受候选：用候选的成员（这里用结构组名→展开成员）建一张图卡
+// 接受候选：把稳定成员引用解析成真实零件名，全部可解析才建图，否则不生成计划并提示
 function accept(figId) {
   const c = (state.candidates || []).find((x) => x.fig_id === figId);
   if (!c) return;
-  const groups = state.structure?.groups || [];
-  const members = [];
-  (c.members || []).forEach((gn) => {
-    const g = groups.find((x) => x.name === gn);
-    if (g) members.push(...g.parts); else members.push(gn);
-  });
+  const { parts: members, unresolved } = resolveCandidate(c);
+  if (unresolved.length) {
+    toast(`候选「${c.caption}」有 ${unresolved.length} 个成员在当前装配里找不到（${unresolved.slice(0, 3).join('、')}）——未建图。`, 'bad');
+    return;
+  }
+  if (!members.length) { toast('这个候选没有可解析的零件，未建图。', 'bad'); return; }
+  const safe = String(c.fig_id || 'fig').replace(/[^\w-]/g, '');   // 图 id 只用安全字符
   mutate((plan) => {
     const ids = new Set(plan.figures.map((f) => f.id));
-    let id = c.fig_id; let n = 2;
-    while (ids.has(id)) { id = `${c.fig_id}-${n}`; n += 1; }
+    let id = safe || 'fig'; let n = 2;
+    while (ids.has(id)) { id = `${safe}-${n}`; n += 1; }
     plan.figures.push({ id, caption: c.caption, kind: c.kind, members });
     setActiveFigure(id);
   });
-  toast(`已接受「${c.caption}」，写入图纸页`, 'ok');
+  toast(`已接受「${c.caption}」，写入图纸页（${members.length} 种零件）`, 'ok');
   document.querySelector('.rtab[data-tab="figures"]')?.click();
 }
 

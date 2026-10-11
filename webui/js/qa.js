@@ -1,7 +1,7 @@
 // 屏④ 出图结果与 QA：盖章总览 + 13 格点阵 + 每项「原因 / 建议 / 直达入口」。
 // 四态：未渲染 / 渲染中（SSE 日志）/ 全过（导出解锁）/ 有失败（导出禁用 + 修复引导）。
 // 预览里点 text[data-numeral] → 联动高亮对应零件（数据契约不变）。
-import { bus, state, setSelection, renderStale, planDigest, flush, digestStoreSet } from './state.js';
+import { bus, state, setSelection, renderStale, renderStaleReason, planDigest, flush, digestStoreSet } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 
@@ -109,7 +109,8 @@ function render() {
       : `<p class="stamp-run">未出图</p>
         <h2>把当前计划渲染成专利附图</h2>
         <p class="muted">渲染走与模型完全相同的 CLI 与 QA 闸门；通过后自动生成交底版（图号＋件号表）与递交版（仅图号）。</p>
-        <button class="btn primary big" id="qa-render">渲染出图</button>`}
+        ${api.readOnly ? '<p class="hint">静态演示站为预计算只读展示，不在浏览器里出图（需本地安装后的后端）。</p>'
+          : '<button class="btn primary big" id="qa-render">渲染出图</button>'}`}
     </div>`;
     host.querySelector('#qa-render')?.addEventListener('click', () => startRender());
     return;
@@ -136,15 +137,19 @@ function render() {
   const cur = figs.find((f) => f.id === activeFig);
   const allPass = r.ok && figs.length && figs.every((f) => f.pass);
   const tabs = figs.map((f) => `<button class="qa-tab ${f.id === activeFig ? 'on' : ''} ${f.pass ? '' : 'fail'}"
-    data-fig="${f.id}">图${f.number || ''} ${f.pass ? '✓' : '✕'}</button>`).join('');
+    data-fig="${esc(f.id)}">图${esc(f.number ?? "")} ${f.pass ? '✓' : '✕'}</button>`).join('');
   const vlist = cur?.variants ? Object.keys(VARIANTS).filter((v) => cur.variants[v]) : [];
   if (cur && vlist.length && !vlist.includes(variant)) [variant] = vlist;
   const seg = vlist.length > 1 ? `<div class="seg">${vlist.map((v) =>
     `<button class="seg-btn ${v === variant ? 'on' : ''}" data-variant="${v}">${VARIANTS[v]}</button>`).join('')}</div>` : '';
 
-  const stale = renderStale();
+  const staleReason = renderStaleReason();
+  const stale = !!staleReason;
+  const staleMsg = staleReason === 'no-proof'
+    ? '无法证明这张图对应当前计划——请重新出图以解锁导出。'
+    : '计划已修改，下面的预览可能过期——请重新出图后再导出。';
   host.innerHTML = `
-    ${stale ? `<div class="stale-bar">计划已修改，下面的预览可能过期——请重新出图后再导出。
+    ${stale ? `<div class="stale-bar">${staleMsg}
       <button class="btn sm" id="rerender-stale">重新出图</button></div>` : ''}
     <div class="qa-top">
       <div class="qa-tabs">${tabs}</div>
@@ -221,9 +226,15 @@ async function applyResult(d) {
     catch (err) { rendering = false; toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return; }
   }
   state.render = result || null;
-  // 把结果绑定到「渲染时的那份 plan」的摘要——之后任何 plan 变更都会使它过期；并持久化扛刷新
-  state.renderDigest = result ? (result.plan_digest || renderDigestAtRender) : null;
-  digestStoreSet(state.projectId, (result && (result.figures || []).length) ? state.renderDigest : null);
+  // 绑定「渲染输入的版本证据」：live 用后端结果携带的 plan_etag；legacy 用渲染时输入摘要并持久化。
+  if (result && (result.figures || []).length) {
+    // live：只认后端结果携带的 inputs.plan_etag——缺失则 null（→ no-proof → 锁定），绝不用当前 etag 补造
+    if (state.planEtag) state.renderInputs = { etag: result.inputs?.plan_etag || null, digest: null };
+    else { state.renderInputs = { etag: null, digest: renderDigestAtRender }; digestStoreSet(state.projectId, renderDigestAtRender); }
+  } else {
+    state.renderInputs = { etag: null, digest: null };
+    if (!state.planEtag) digestStoreSet(state.projectId, null);
+  }
   rendering = false;
   activeFig = null;
   bus.emit('rendered');
@@ -240,6 +251,7 @@ async function applyResult(d) {
 
 let renderDigestAtRender = null;
 async function startRender() {
+  if (api.readOnly) { toast('静态演示站只读，不能出图', ''); return; }   // 不向静态服务器发写请求
   // 先把本地改动落盘成功，确保渲染用的是当前这份 plan（Codex #2）
   await flush();
   if (state.saveState === 'error' || state.saveState === 'conflict') {

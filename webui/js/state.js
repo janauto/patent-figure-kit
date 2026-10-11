@@ -16,12 +16,16 @@ export const state = {
   plan: null,
   validate: null,       // 服务器 validate 结果 {ok, issues}
   render: null,         // 最近一次渲染结果
-  renderDigest: null,   // 该结果所绑定的 plan 摘要；与当前 plan 摘要不一致即过期
+  // 渲染结果绑定的「输入版本证据」：live 用后端结果携带的 plan_etag，legacy 用渲染时输入摘要。
+  // 没有证据（null）时视为过期并锁定导出——绝不用当前 plan 补造摘要给旧结果背书。
+  renderInputs: { etag: null, digest: null },
   rendering: false,
   candidates: [],       // F2-lite 候选分图
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
   activeFigure: null,   // 当前操作的图 id
   saveState: 'clean',   // clean | dirty | saving | saved | error
+  editVersion: 0,       // 每次 mutate +1；保存按版本确认，慢 PUT 期间的新编辑不被吞
+  savedVersion: 0,      // 已持久化到服务端的最高编辑版本
   step: '',
   llm: null,            // 大模型通道状态
   aiBusy: false,
@@ -155,20 +159,28 @@ export function planDigest(plan = state.plan) {
   for (let i = 0; i < s.length; i += 1) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
   return h.toString(16);
 }
-// 渲染摘要跨刷新持久化（每工程一条）
+// legacy 渲染输入摘要跨会话持久化（每工程一条，用 localStorage 以 project 为键）
 const digestKey = (pid) => `inkline-render-digest-${pid}`;
-export function digestStoreGet(pid) { try { return sessionStorage.getItem(digestKey(pid)) || null; } catch { return null; } }
-export function digestStoreSet(pid, d) { try { if (d) sessionStorage.setItem(digestKey(pid), d); else sessionStorage.removeItem(digestKey(pid)); } catch { /* 隐私模式 */ } }
+export function digestStoreGet(pid) { try { return localStorage.getItem(digestKey(pid)) || null; } catch { return null; } }
+export function digestStoreSet(pid, d) { try { if (d) localStorage.setItem(digestKey(pid), d); else localStorage.removeItem(digestKey(pid)); } catch { /* 隐私模式 */ } }
 
-// 当前渲染结果是否已过期：有结果、且其绑定摘要与当前 plan 摘要不一致（或无法证明一致）。
-export function renderStale() {
-  if (!state.render) return false;
-  if (!state.renderDigest) return true;        // 无法证明一致 → 视为过期（锁定导出）
-  return state.renderDigest !== planDigest();
+// 结果是否过期 / 为何过期：'no-proof'（无版本证据，需重新出图）| 'changed'（plan 已改）| null（一致）。
+export function renderStaleReason() {
+  if (!state.render) return null;
+  // 判据：有 ETag（live /v1 后端）→ 用 ETag 比对；无 ETag（legacy 旧 /api/*）→ 用输入摘要比对。
+  if (state.planEtag) {                          // live：以结果绑定的 ETag 为准
+    if (!state.renderInputs.etag) return 'no-proof';
+    return state.renderInputs.etag === state.planEtag ? null : 'changed';
+  }
+  // legacy：以渲染时的输入摘要为准（无 ETag）
+  if (!state.renderInputs.digest) return 'no-proof';
+  return state.renderInputs.digest === planDigest() ? null : 'changed';
 }
+export function renderStale() { return renderStaleReason() !== null; }
 
 export function mutate(fn) {
   fn(state.plan);
+  state.editVersion += 1;                        // 每次编辑递增版本
   state.saveState = 'dirty';
   if (state.render) bus.emit('render-stale');   // 改计划 → 旧结果与缓存 ZIP 失效
   bus.emit('plan');
@@ -177,16 +189,19 @@ export function mutate(fn) {
   saveTimer = setTimeout(flush, 600);
 }
 
-let savingPromise = null;     // 在途保存；flush 会等它，避免渲染用到「保存前的计划」
+let savingPromise = null;     // 在途保存；flush 会等它，直到「当前编辑版本」真正持久化
 async function doSave() {
   if (api.readOnly) { state.saveState = 'readonly'; bus.emit('save-state'); return; }
+  const v = state.editVersion;                   // 本轮要保存的版本（PUT body 在 api 里同步序列化 = 此刻的 plan）
   state.saveState = 'saving';
   bus.emit('save-state');
   try {
     const res = await api.putPlan(state.projectId, state.plan, state.planEtag);
     if (res.etag) state.planEtag = res.etag;
-    if (res.validate) { state.validate = res.validate; bus.emit('validate'); }   // 恢复校验反馈（术语错误）
-    state.saveState = 'saved';
+    if (res.validate) { state.validate = res.validate; bus.emit('validate'); }
+    state.savedVersion = Math.max(state.savedVersion, v);
+    // 只有「期间没有新编辑」才算 saved；否则保持 dirty，由 flush 的循环继续保存最新版
+    state.saveState = (state.editVersion === v) ? 'saved' : 'dirty';
   } catch (err) {
     state.saveState = err.code === 'etag_conflict' ? 'conflict' : 'error';
     console.error('保存失败', err);
@@ -195,11 +210,14 @@ async function doSave() {
 }
 export async function flush() {
   clearTimeout(saveTimer);
-  if (savingPromise) await savingPromise;      // 先等在途保存落定
-  // 等完后若又有新改动（或本来就是脏的），再存一轮，确保保存的是最新 plan
-  if (state.saveState !== 'dirty') return;
-  savingPromise = doSave();
-  try { await savingPromise; } finally { savingPromise = null; }
+  // 循环直到「当前编辑版本」已持久化：慢 PUT 期间连续编辑也不会被吞（服务端最终收到最新版）
+  for (let guard = 0; guard < 20; guard += 1) {
+    if (savingPromise) { await savingPromise; }          // 等在途保存
+    if (state.saveState === 'error' || state.saveState === 'conflict') return;
+    if (state.savedVersion >= state.editVersion) return; // 最新编辑已落盘
+    savingPromise = doSave();
+    try { await savingPromise; } finally { savingPromise = null; }
+  }
 }
 
 export function setSelection(names) {
@@ -233,14 +251,13 @@ export async function boot(projectId) {
   const planRes = await api.getPlan(projectId);
   state.plan = planRes.plan;
   state.planEtag = planRes.etag || null;
-  // 版本绑定要扛住「改完刷新」：摘要持久化到 sessionStorage，优先用存下的那份，
-  // 而不是刷新后无脑把「旧结果 + 新 plan」重新认定为一致（Codex #2 的刷新旁路）。
+  state.editVersion = 0; state.savedVersion = 0;
+  // 结果版本证据：绝不用当前 plan 补造。live 用后端结果携带的 plan_etag；legacy 用本工程持久化的渲染输入摘要。
+  // 没有证据 → renderInputs 全 null → renderStale 判「no-proof」→ 锁定导出并提示「请重新出图」。
+  state.renderInputs = { etag: null, digest: null };
   if (state.render) {
-    const stored = digestStoreGet(projectId);
-    if (stored) state.renderDigest = stored;                 // 用渲染时存下的摘要（可能已与当前 plan 不符 → 过期）
-    else { state.renderDigest = planDigest(state.plan); digestStoreSet(projectId, state.renderDigest); }
-  } else {
-    state.renderDigest = null;
+    state.renderInputs.etag = state.render?.inputs?.plan_etag || null;      // live
+    if (!state.planEtag) state.renderInputs.digest = digestStoreGet(projectId);   // legacy
   }
   indexStructure();
   if (state.structure?.source === 'ai') state.view.colorBy = 'structure';

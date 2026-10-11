@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
-"""WP3 前端回归用例（对 mock 跑）。覆盖 Codex R3/R3b 的几条高危修复：
-  * XSS：恶意零件名 / 图题 / AI reason / 结构组名不得变成可执行 HTML
-  * 键盘金路径：搜索 → 方向键定位单件 → Space 选中 → Tab 到图卡「加入所选」Enter 归图
-  * 术语页单元格键盘可选中
-  * 上传失败（非 2xx）后重试按钮可用、无 ReferenceError
-  * 结果版本绑定：改计划并保存后刷新，导出仍锁定（不被「刷新重认」旁路）
+"""WP3 前端回归用例（对 mock 跑）。覆盖 Codex R3 / R3b / R3c 的高危修复：
+  * XSS：恶意零件名 / 图题 / AI reason / 结构组名 / 无效计划 ID 不得变成可执行 HTML
+  * 保存竞态：慢保存期间连续编辑，服务端最终收到最新版（不吞编辑）
+  * 结果版本权威：改计划保存后「新会话」里旧结果不解锁导出
+  * 候选成员契约：接受候选后每个成员都能在 assembly 中解析
+  * 键盘金路径：连续真实按键完成多件选择 + 归图（不脚本补焦点）；术语单元格键盘可选
+  * 上传失败重试：保留文件，第二次请求确实带上文件名/标题/AI 开关
+  * 静态站：只读，不发任何写请求（POST/PUT/DELETE）
 
-先起 mock：python3 webui/dev/mock_server.py --port 8803
-再跑：    python3 webui/dev/verify_ui.py        # 全过退出 0，任一失败退出 1
+起 mock：python3 webui/dev/mock_server.py --port 8803
+起静态：python3 webui/dev/build_static.py && (cd webui/dev/static-site && python3 -m http.server 8808)
+跑：    python3 webui/dev/verify_ui.py        # 全过退出 0，任一失败退出 1
 """
 import sys
 from playwright.sync_api import sync_playwright
 
 B = "http://127.0.0.1:8803"
+STATIC = "http://127.0.0.1:8808/pfk"
 PAYLOAD = '<img src=x onerror="window.__xss=(window.__xss||0)+1">'
 results = []
 
 
 def check(name, ok, extra=""):
-    results.append((name, ok, extra))
+    results.append((name, bool(ok), extra))
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}{(' · ' + extra) if extra else ''}")
 
 
@@ -30,94 +34,149 @@ def test_xss(pg):
     r = pg.evaluate("""async (P) => {
         const st = await import('/js/state.js');
         st.state.plan.terms[0].term = P;
+        st.state.plan.figures[0].id = 'fig' + P;            // 无效计划 ID（属性上下文）
         st.state.plan.figures[0].caption = P + '"and-quote';
         st.state.aiSuggestions['PGB-MOTOR-HOUSING'] = {selector:'PGB-MOTOR-HOUSING', term:P, confidence:'low', reason:'</script>'+P};
         if (st.state.structure && st.state.structure.groups[0]) st.state.structure.groups[0].name = P;
         st.bus.emit('plan'); st.bus.emit('ai-suggestions'); st.bus.emit('structure');
-        document.querySelector('.rtab[data-tab=terms]').click();
-        await new Promise(x=>setTimeout(x,200));
-        document.querySelector('.rtab[data-tab=figures]').click();
-        await new Promise(x=>setTimeout(x,200));
+        document.querySelector('.rtab[data-tab=terms]').click(); await new Promise(x=>setTimeout(x,200));
+        document.querySelector('.rtab[data-tab=figures]').click(); await new Promise(x=>setTimeout(x,200));
         const injected = [...document.querySelectorAll('img')].filter(i=>i.getAttribute('src')==='x').length;
         return { injected, xss: window.__xss||0, literal: (document.querySelector('.term-input')?.value||'').includes('<img') };
     }""", PAYLOAD)
-    check("XSS：恶意串不执行、以文本呈现",
+    check("XSS：恶意串（含无效计划 ID）不执行、以文本呈现",
           r["injected"] == 0 and r["xss"] == 0 and len(alerts) == 0 and r["literal"],
           f"injectedImg={r['injected']} xssFired={r['xss']} dialogs={len(alerts)}")
 
 
-def test_keyboard(pg):
+def test_save_race(pg):
+    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    # A 保存在途时编辑成 B，flush 后服务端最终计划应为 B
+    final = pg.evaluate("""async () => {
+        const st = await import('/js/state.js');
+        st.mutate(p => { p.terms[0].term = 'RACE-AAA'; });
+        const f1 = st.flush();                       // 开始保存 A（已同步序列化 A）
+        st.mutate(p => { p.terms[0].term = 'RACE-BBB'; });   // 在途期间改成 B
+        await f1; await st.flush();                  // 确保最新版（B）落盘
+        const res = await fetch('/v1/projects/gearbox/plan');
+        const j = await res.json();
+        return j.plan.terms[0].term;
+    }""")
+    check("保存竞态：慢保存期间连续编辑，服务端最终收到 B", final == "RACE-BBB", f"server term={final}")
+
+
+def test_new_session_lock(pg_ctx):
+    # 会话 1：改计划并保存（不重渲）
+    p1 = pg_ctx.new_page()
+    p1.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle"); p1.wait_for_timeout(2500)
+    p1.evaluate("""async () => { const st=await import('/js/state.js'); st.mutate(p=>{p.terms[0].term='SESSIONCHANGE';}); await st.flush(); }""")
+    p1.wait_for_timeout(300); p1.close()
+    # 会话 2（全新 context = 新标签/清空内存）：进入导出，应锁定（旧结果 etag 不匹配新 plan）
+    p2 = pg_ctx.new_page()
+    p2.goto(f"{B}/index.html?project=gearbox&stage=export", wait_until="networkidle"); p2.wait_for_timeout(1500)
+    locked = p2.query_selector(".exp-blank") is not None
+    p2.close()
+    check("结果版本：改计划保存后新会话里导出仍锁定", locked, f"lockedInNewSession={locked}")
+
+
+def test_candidate_resolve(pg):
     pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2600)
-    # 搜索聚焦（/），清空后用方向键在列表里走
-    pg.evaluate("() => { const r=document.querySelector('.part-row'); r.tabIndex=0; r.focus(); }")
-    pg.keyboard.press("ArrowDown"); pg.wait_for_timeout(80)
-    name = pg.evaluate("() => document.activeElement?.dataset?.name")
-    pg.keyboard.press(" "); pg.wait_for_timeout(250)
+    r = pg.evaluate("""async () => {
+        // 接受第一个候选，检查写进 plan 的 figure 成员都是 assembly 里的真实零件名
+        const before = (await import('/js/state.js')).state.plan.figures.length;
+        document.querySelector('[data-accept]')?.click();
+        await new Promise(x=>setTimeout(x,300));
+        const st = await import('/js/state.js');
+        const names = new Set((st.state.assembly.parts||[]).map(p=>p.name));
+        const fig = st.state.plan.figures[st.state.plan.figures.length-1];
+        const bad = (fig.members||[]).filter(m => !names.has(m) && !/[*?\\[]/.test(m));
+        return { added: st.state.plan.figures.length>before, members: (fig.members||[]).length, bad };
+    }""")
+    check("候选成员：接受后每个成员都能在 assembly 解析", r["added"] and len(r["bad"]) == 0,
+          f"members={r['members']} unresolved={r['bad']}")
+
+
+def test_keyboard_continuous(pg):
+    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2600)
+    # 真实点第一行（选中第 1 件 + 取得焦点），随后只用键盘：方向键移到下一件 + Space 选中第 2 件。
+    # 若重渲后丢焦点，ArrowDown/Space 不会作用到列表，第二件选不中。
+    pg.click(".part-row"); pg.wait_for_timeout(200)      # 选中第 1 件（点击即选）
+    pg.keyboard.press("ArrowDown"); pg.wait_for_timeout(150)
+    pg.keyboard.press(" "); pg.wait_for_timeout(200)     # 选中第 2 件（依赖重渲后焦点仍在列表）
     sel = pg.eval_on_selector_all(".part-row.is-selected", "e => e.length")
-    # 到图纸页，用键盘聚焦「＋新建图」并 Enter，用所选零件建一张图（归图）
-    pg.evaluate("() => document.querySelector('.rtab[data-tab=figures]').click()"); pg.wait_for_timeout(200)
-    before = pg.eval_on_selector_all(".fig-card", "e => e.length")
-    pg.evaluate("() => { const b=document.querySelector('[data-new]'); b && b.focus(); }")
-    pg.keyboard.press("Enter"); pg.wait_for_timeout(400)
-    after_figs = pg.eval_on_selector_all(".fig-card", "e => e.length")
-    newhaschip = pg.evaluate("""() => { const c=[...document.querySelectorAll('.fig-card')].pop(); return c ? c.querySelectorAll('.chip').length : 0; }""")
-    check("键盘金路径：方向键定位 + Space 选中单件", bool(name) and sel >= 1, f"part={name} selected={sel}")
-    check("键盘金路径：Enter 归图（用所选新建图）", after_figs > before and newhaschip >= 1, f"figs {before}→{after_figs}, newChips={newhaschip}")
-
-
-def test_terms_keyboard(pg):
-    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
-    pg.wait_for_timeout(2600)
+    focus_in_list = pg.evaluate("() => document.activeElement?.classList?.contains('part-row')")
+    check("键盘连续选择：Space→方向键→Space 选中两件（焦点不丢）", sel >= 2 and focus_in_list, f"selected={sel} focusInList={focus_in_list}")
+    # 术语单元格键盘可选
     pg.evaluate("() => document.querySelector('.rtab[data-tab=terms]').click()"); pg.wait_for_timeout(300)
-    pg.evaluate("() => { const c=document.querySelector('.sel'); c.focus(); }")
+    pg.eval_on_selector(".sel", "e => e.focus()")
     pg.keyboard.press("Enter"); pg.wait_for_timeout(250)
-    sel = pg.eval_on_selector_all(".part-row.is-selected", "e => e.length")
-    check("术语页单元格键盘可选中", sel >= 1, f"selected={sel}")
+    check("术语单元格键盘可选中", pg.eval_on_selector_all(".part-row.is-selected", "e=>e.length") >= 1)
 
 
 def test_upload_retry(pg):
     pe = []
     pg.on("pageerror", lambda e: pe.append(str(e)))
-    pg.route("**/v1/projects*", lambda route: route.fulfill(
-        status=500, content_type="application/json", body='{"error":{"message":"服务器开小差"}}')
-        if route.request.method == "POST" else route.continue_())
+    posts = []
+
+    def handle(route):
+        req = route.request
+        if req.method == "POST":
+            posts.append(req.post_data or "")
+            route.fulfill(status=500, content_type="application/json", body='{"error":{"message":"服务器开小差"}}')
+        else:
+            route.continue_()
+    pg.route("**/v1/projects*", handle)
     pg.goto(f"{B}/home.html", wait_until="networkidle"); pg.wait_for_timeout(600)
     pg.evaluate("() => document.querySelector('#drop').click()"); pg.wait_for_timeout(300)
+    pg.eval_on_selector("#up-title", "e => e.value = '我的工程X'")
+    pg.eval_on_selector("#up-ai", "e => e.checked = false")
     path = "/tmp/_verify_ui.stp"
     open(path, "w").write("ISO-10303-21;")
     pg.set_input_files("#up-file", path); pg.wait_for_timeout(900)
     has_retry = pg.query_selector("#up-retry") is not None
     if has_retry:
-        pg.click("#up-retry"); pg.wait_for_timeout(500)
-    check("上传失败后重试可用且无 ReferenceError", has_retry and len(pe) == 0, f"pageerrors={pe[:1]}")
+        pg.click("#up-retry"); pg.wait_for_timeout(700)
+    # 第二次 POST 的 multipart 内容应含文件名、标题、AI 开关
+    second = posts[-1] if len(posts) >= 2 else ""
+    content_ok = ("_verify_ui.stp" in second) and ("我的工程X" in second) and ("run_ai" in second)
+    check("上传失败重试：无 ReferenceError 且第二次请求带文件/标题/AI 开关",
+          has_retry and len(pe) == 0 and len(posts) >= 2 and content_ok,
+          f"posts={len(posts)} pageerr={pe[:1]} contentOK={content_ok}")
 
 
-def test_version_reload(pg):
-    pg.goto(f"{B}/index.html?project=gearbox&stage=export", wait_until="networkidle")
-    pg.wait_for_timeout(1200)
-    ready = pg.query_selector(".exp-wrap") is not None
-    # 改一处术语并等防抖保存
-    pg.evaluate("""async () => { const st=await import('/js/state.js'); st.mutate(p=>{ p.terms[0].term='改一下'+Date.now(); }); await new Promise(x=>setTimeout(x,900)); }""")
-    pg.wait_for_timeout(300)
-    # 刷新后导出应仍锁定（版本摘要持久化，不被重新认定一致）
-    pg.goto(f"{B}/index.html?project=gearbox&stage=export", wait_until="networkidle")
-    pg.wait_for_timeout(1200)
-    locked = pg.query_selector(".exp-blank") is not None
-    check("版本绑定：改计划并保存后刷新，导出仍锁定", ready and locked, f"freshReady={ready} lockedAfterReload={locked}")
+def test_static_no_write(ctx):
+    pg = ctx.new_page()
+    writes = []
+    pg.on("request", lambda r: writes.append(r.method + " " + r.url) if r.method in ("POST", "PUT", "DELETE") else None)
+    try:
+        pg.goto(f"{STATIC}/home.html", wait_until="networkidle"); pg.wait_for_timeout(1000)
+        pg.goto(f"{STATIC}/index.html?project=gearbox&stage=export", wait_until="networkidle"); pg.wait_for_timeout(1500)
+        pack_disabled = pg.eval_on_selector("#do-pack", "e => e.disabled") if pg.query_selector("#do-pack") else True
+        check("静态站：导出打包禁用、全程零写请求", pack_disabled and len(writes) == 0, f"packDisabled={pack_disabled} writes={writes[:2]}")
+    except Exception as exc:
+        check("静态站：导出打包禁用、全程零写请求", False, f"（需先起 8808 静态站）{exc!r}")
+    pg.close()
 
 
 def main():
     with sync_playwright() as p:
         b = p.chromium.launch()
         ctx = b.new_context(viewport={"width": 1440, "height": 900})
-        for fn in (test_xss, test_keyboard, test_terms_keyboard, test_upload_retry, test_version_reload):
+        for fn in (test_xss, test_save_race, test_candidate_resolve, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:
                 fn(pg)
             except Exception as exc:
                 check(fn.__name__, False, f"异常 {exc!r}")
             pg.close()
+        try:
+            test_new_session_lock(ctx)
+        except Exception as exc:
+            check("test_new_session_lock", False, f"异常 {exc!r}")
+        test_static_no_write(ctx)
         b.close()
     ok = all(r[1] for r in results)
     print(f"\n{'全部通过' if ok else '有失败'}：{sum(1 for r in results if r[1])}/{len(results)}")

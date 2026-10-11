@@ -6,7 +6,10 @@ import { applyBrand } from './brand.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const params = new URLSearchParams(location.search);
-const projectId = params.get('project') || 'gearbox';
+// 工程 ID：正式入口（legacy /p/{pid}/）从路径取真实 ID，不复用示例默认（Codex #4，避免摘要键串用）；
+// 开发入口（mock）用 ?project=，缺省才回示例 gearbox。
+const legacyPid = (location.pathname.match(/\/p\/([\w-]+)(?:\/|$)/) || [])[1];
+const projectId = api.isLegacy ? (legacyPid || '') : (params.get('project') || 'gearbox');
 const forceState = params.get('state') || '';     // empty|loading|ok|fail（四态截图用）
 let viewer = null;
 let viewerMod = null;
@@ -200,7 +203,7 @@ function updateFloatbar() {
   bar.innerHTML = `
     <span class="afb-mark">AI</span>
     <span class="afb-text">已选 <b>${sel.length}</b> 件${blanks.length ? ` · <b>${blanks.length}</b> 件待起名` : '，均已命名'}</span>
-    ${blanks.length && llmOk ? `<button class="btn primary sm" id="afb-name">为 ${blanks.length} 个空白件起名</button>`
+    ${blanks.length && llmOk && !readOnly ? `<button class="btn primary sm" id="afb-name">为 ${blanks.length} 个空白件起名</button>`
       : (!llmOk ? '<span class="hint">AI 未接入，可在术语页手填</span>' : '')}
     <button class="btn ghost sm" id="afb-clear">清空选择</button>`;
   $('#afb-clear')?.addEventListener('click', () => setSelection([]));

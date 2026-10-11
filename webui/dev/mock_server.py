@@ -140,14 +140,19 @@ def build_gearbox():
     return {
         "assembly": load(FIX / "gearbox/assembly.json"),
         "structure": GEARBOX_STRUCTURE, "plan": copy.deepcopy(GEARBOX_PLAN),
+        # inputs.plan_etag：结果绑定的输入版本证据（与 seed 的初始 plan_etag 一致）
         "render": {"ok": True, "figures": figs, "numerals": numerals,
-                   "figure_descriptions": descs, "finished_at": "2026-10-11 10:31"},
+                   "figure_descriptions": descs, "finished_at": "2026-10-11 10:31",
+                   "inputs": {"plan_etag": 'W/"gearbox-1"'}},
+        # 候选成员用稳定引用（结构组 id 或真实零件 selector），显示名单独放 members_display
         "candidates": [
             {"fig_id": "fig1", "caption": "整体结构示意图", "kind": "assembly",
-             "members": ["电机子装配", "输出与密封", "内齿圈"], "status": "pass",
+             "members": [{"group": "g-motor"}, {"group": "g-output"}, {"part": "PGB-RING-GEAR"}],
+             "members_display": ["电机子装配", "输出与密封", "内齿圈"], "status": "pass",
              "reason": "字高 7.0 mm、占用 0.79，13 项 QA 全过", "labels": 6},
             {"fig_id": "fig2", "caption": "齿轮系分解示意图", "kind": "exploded",
-             "members": ["行星齿轮系", "输出轴"], "status": "pass",
+             "members": [{"group": "g-gear"}, {"part": "PGB-OUTPUT-SHAFT"}],
+             "members_display": ["行星齿轮系", "输出轴"], "status": "pass",
              "reason": "沿轴 121.9° 爆炸，9 个标记无交叉，13 项 QA 全过", "labels": 9},
         ],
     }
@@ -215,12 +220,13 @@ def build_vise():
         "render": None,
         "candidates": [
             {"fig_id": "whole", "caption": "台虎钳整机装配图（兜底候选）", "kind": "assembly",
-             "members": ["固定钳身组", "活动钳身组", "丝杠手柄组"], "status": "fail",
+             "members": [{"group": "v-fixed"}, {"group": "v-move"}, {"group": "v-screw"}],
+             "members_display": ["固定钳身组", "活动钳身组", "丝杠手柄组"], "status": "fail",
              "qa": failing_qa(rows),
              "reason": "整机 22 个标记塞进一张图：字高 2.4<3.5 mm、标记 22>20、引线 3 处交叉。"
                        "建议按结构拆成「固定钳身 / 活动钳身 / 丝杠手柄」三张分解图。", "labels": 22},
             {"fig_id": "v-screw", "caption": "丝杠手柄机构分解图", "kind": "exploded",
-             "members": ["丝杠手柄组"], "status": "pass",
+             "members": [{"group": "v-screw"}], "members_display": ["丝杠手柄组"], "status": "pass",
              "reason": "6 个标记、字高 5.0 mm，13 项 QA 全过", "labels": 6},
         ],
     }
@@ -402,9 +408,9 @@ def project_detail(p):
     return out
 
 
-def render_payload(pid, fail):
+def render_payload(pid, fail, plan_etag=None):
     """渲染作业的权威结果：gearbox 用真实出图；其它工程借用 gearbox 演示闭环。
-    fail=True 时把图1 的三项 QA 翻成失败（渲染进程完成，但 QA 未过闸）。"""
+    结果携带 inputs.plan_etag 作为版本证据。fail 时体现 QA/校验未过。"""
     if fail == "validate":                   # 计划未过校验：无图 + validate.issues + log（Codex #4）
         return {"ok": False, "figures": [], "numerals": None, "figure_descriptions": [],
                 "validate": {"ok": False, "issues": [
@@ -427,6 +433,7 @@ def render_payload(pid, fail):
     else:
         r["ok"] = True
     r["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    r["inputs"] = {"plan_etag": plan_etag}   # 绑定渲染时的输入版本
     return r
 
 
@@ -657,7 +664,7 @@ class Handler(BaseHTTPRequestHandler):
             fail = (q.get("fail") or [""])[0]   # ""|"gate"|"validate"
             # 渲染进程照常跑完（4 阶段都成功）；QA 的过/不过与校验失败体现在 result 里，而不是作业失败
             job = new_job("render", project_id=m.group(1),
-                          result=render_payload(m.group(1), fail))
+                          result=render_payload(m.group(1), fail, p.get("plan_etag")))
             return self._send(202, {"job_id": job["job_id"]})
         # 导出
         m = re.fullmatch(r"/v1/projects/([\w\-]+)/export", path)

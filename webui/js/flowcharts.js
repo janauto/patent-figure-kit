@@ -44,7 +44,7 @@ function edgeRows(spec) {
 function render() {
   const list = state.flowcharts || [];
   const cards = list.map((f) => `
-    <article class="flow-card${current?.id === f.id ? ' is-active' : ''}" data-open="${f.id}">
+    <article class="flow-card${current?.id === f.id ? ' is-active' : ''}" data-open="${esc(f.id)}">
       <b>图${f.number}</b> <span>${esc(f.title || f.id)}</span>
       <em class="hint">${f.result?.ok ? `${f.result.steps.length} 步 ✓` : '未出图'}</em>
     </article>`).join('');

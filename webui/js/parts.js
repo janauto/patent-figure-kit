@@ -28,7 +28,7 @@ function matches(p) {
 function partRow(p, missing) {
   const figs = figuresContaining(p.name);
   const dots = figs.map((f) =>
-    `<i class="dot" style="background:${figureColor(f.id)}" title="${f.id}"></i>`).join('');
+    `<i class="dot" style="background:${figureColor(f.id)}" title="${esc(f.id)}"></i>`).join('');
   const sel = state.selection.has(p.name) ? ' is-selected' : '';
   const warn = missing.has(p.name) ? '<span class="tag-warn">未入图</span>' : '';
   const degen = p.degenerate ? '<span class="tag-warn">退化</span>' : '';
@@ -68,7 +68,7 @@ function structureHead() {
   return `<div class="struct-bar">
     <p class="struct-src${job.error ? ' bad' : ''}">${job.error ? `识别失败：${esc(job.error)}` : source}</p>
     <div class="struct-actions">
-      <button class="btn-ai" data-analyze ${job.running || !llmOk ? 'disabled' : ''}
+      <button class="btn-ai" data-analyze ${job.running || !llmOk || api.readOnly ? 'disabled' : ''}
         title="${llmOk ? '' : '未接入 AI；可在术语页手填中文名'}"><span class="ai-mark">AI</span> ${s?.source === 'ai' ? '重新识别' : '识别结构'}</button>
       ${canApply ? `<button class="btn-min" data-apply title="只填术语表里空着的行，人工填过的不动">中文名填入术语${emptyTerms ? `（${emptyTerms} 空）` : ''}</button>` : ''}
     </div></div>`;
@@ -100,7 +100,11 @@ function groupBlock(g, partsByName, missing) {
   </section>`;
 }
 
+let pendingRestoreFocus = null;   // 替换 innerHTML 前记下的「有焦点的零件名」，bind() 重建后恢复
 function render() {
+  // 替换 innerHTML 前先记下键盘焦点所在的零件身份，重建后恢复（Codex #7：选一件后能继续按方向键）
+  const ae = document.activeElement;
+  pendingRestoreFocus = (root && root.contains(ae) && ae.classList?.contains('part-row')) ? ae.dataset.name : null;
   const parts = state.assembly?.parts || [];
   const partsByName = new Map(parts.map((p) => [p.name, p]));
   const missing = new Set(unassignedParts());
@@ -166,13 +170,14 @@ function bind() {
       else if (e.key === 'End') { e.preventDefault(); const r = partRows(); if (r.length) setActivePart(r[r.length - 1].dataset.name, true); }
     });
   });
-  // roving tabindex：让列表第一个可达项（或上次焦点项）可 Tab 进入；重渲后恢复焦点
+  // roving tabindex：让列表第一个可达项（或上次焦点项）可 Tab 进入；若替换前有焦点则恢复到同一零件
   const rows = partRows();
   if (rows.length) {
-    const keep = rows.some((r) => r.dataset.name === activePart) ? activePart : rows[0].dataset.name;
-    const hadFocus = root.contains(document.activeElement) && document.activeElement.classList?.contains('part-row');
-    setActivePart(keep, hadFocus);
+    const wanted = pendingRestoreFocus || (rows.some((r) => r.dataset.name === activePart) ? activePart : null);
+    const keep = (wanted && rows.some((r) => r.dataset.name === wanted)) ? wanted : rows[0].dataset.name;
+    setActivePart(keep, !!pendingRestoreFocus);   // 替换前确有焦点 → 重建后恢复
   }
+  pendingRestoreFocus = null;
   root.querySelectorAll('[data-caret]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.caret;
     if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id);

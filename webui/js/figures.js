@@ -37,15 +37,15 @@ function render() {
         <span class="fig-swatch"></span>
         <input class="fig-caption" data-fig="${esc(fig.id)}" value="${esc(fig.caption || '')}"
                placeholder="图题，如：整体结构示意图">
-        <button class="icon-btn" data-del="${fig.id}" title="删除本图">✕</button>
+        <button class="icon-btn" data-del="${esc(fig.id)}" title="删除本图">✕</button>
       </header>
       <div class="fig-meta">
-        <span class="mono">${fig.id}</span>
+        <span class="mono">${esc(fig.id)}</span>
         <label class="seg">
           <button class="seg-btn${fig.kind === 'assembly' ? ' on' : ''}"
-                  data-kind="assembly" data-fig="${fig.id}">装配</button>
+                  data-kind="assembly" data-fig="${esc(fig.id)}">装配</button>
           <button class="seg-btn${fig.kind === 'exploded' ? ' on' : ''}"
-                  data-kind="exploded" data-fig="${fig.id}">分解</button>
+                  data-kind="exploded" data-fig="${esc(fig.id)}">分解</button>
         </label>
         <span class="badge${over ? ' badge-over' : ''}"
               title="有效标记数（服务器校验为准）">${labels}/${maxLabels()}</span>
@@ -53,11 +53,11 @@ function render() {
       </div>
       <div class="chips">${chips || '<span class="hint">空图——选中零件后点下方按钮加入</span>'}</div>
       <div class="fig-actions">
-        <button class="btn-min" data-add="${fig.id}"
+        <button class="btn-min" data-add="${esc(fig.id)}"
                 ${state.selection.size ? '' : 'disabled'}>加入所选 (${state.selection.size})</button>
-        <button class="btn-min" data-drop="${fig.id}"
+        <button class="btn-min" data-drop="${esc(fig.id)}"
                 ${state.selection.size ? '' : 'disabled'}>移除所选</button>
-        <button class="btn-min" data-pick="${fig.id}">选中本图零件</button>
+        <button class="btn-min" data-pick="${esc(fig.id)}">选中本图零件</button>
       </div>
     </article>`;
   }).join('');

@@ -7,9 +7,10 @@ import { esc } from './esc.js';
 const params = new URLSearchParams(location.search);
 const scene = params.get('scene') || '';          // empty | loading | error | ''
 const keepStatic = params.has('static');
-// 导航 URL 保留后端形态：legacy 走正式 /p/{id}/（带 token）；live/static 走开发入口（保留 ?static）。
+let cookieSessionOk = false;   // 子应用确认接受 Cookie 会话后，链接不再带 token
+// 导航 URL 保留后端形态：legacy 走正式 /p/{id}/（子应用认 Cookie 前仍需带 token）；live/static 走开发入口。
 const toStudio = (id) => (isLegacy
-  ? `/p/${encodeURIComponent(id)}/${token ? `?token=${encodeURIComponent(token)}` : ''}`
+  ? `/p/${encodeURIComponent(id)}/${(token && !cookieSessionOk) ? `?token=${encodeURIComponent(token)}` : ''}`
   : `./index.html?project=${encodeURIComponent(id)}${keepStatic ? '&static' : ''}`);
 
 applyBrand();
@@ -478,14 +479,20 @@ function initDialogs() {
 // （子应用 /p/{id}/ 目前仍需 URL token——那由 WP1 的子应用 Cookie 鉴权合并后统一去除。）
 async function tidyToken() {
   if (!isLegacy || !token || !params.has('token')) return;
+  // 只有当「子应用也接受 Cookie 会话」时才敢去掉地址栏 token——否则去掉后进 /p/{pid}/ 会 401。
+  // 现阶段 plan_studio 的 guard 不认 Cookie（实测 cookie-only 为 401），所以这里基本是安全空操作，
+  // 直到 WP1 的子应用 Cookie 鉴权合并。探测真实子应用，而非只探首页。
+  const pid = (cachedProjects.find((p) => p.status === 'ready') || cachedProjects[0])?.project_id;
+  if (!pid) return;
   try { document.cookie = `wb_token=${encodeURIComponent(token)}; path=/; SameSite=Strict`; } catch { /* */ }
   try {
-    const r = await fetch('api/wb/state', { credentials: 'same-origin' });   // 不带 token 头，靠 Cookie
-    if (r.ok) {
+    const sub = await fetch(`/p/${encodeURIComponent(pid)}/api/state`, { credentials: 'same-origin' });  // 不带 token 头
+    if (sub.ok) {       // 子应用认 Cookie → 可安全去掉地址栏 token，并停止在链接里传播
+      cookieSessionOk = true;
       const u = new URL(location.href); u.searchParams.delete('token');
       history.replaceState(null, '', u.pathname + (u.search ? u.search : '') + u.hash);
     }
-  } catch { /* Cookie 不可用就保留地址栏 token */ }
+  } catch { /* 保留地址栏 token */ }
 }
 
 // ---------------------------------------------------------------- 启动

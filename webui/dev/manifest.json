@@ -684,6 +684,17 @@
       "caption": "整体结构示意图",
       "kind": "assembly",
       "members": [
+       {
+        "group": "g-motor"
+       },
+       {
+        "group": "g-output"
+       },
+       {
+        "part": "PGB-RING-GEAR"
+       }
+      ],
+      "members_display": [
        "电机子装配",
        "输出与密封",
        "内齿圈"
@@ -697,6 +708,14 @@
       "caption": "齿轮系分解示意图",
       "kind": "exploded",
       "members": [
+       {
+        "group": "g-gear"
+       },
+       {
+        "part": "PGB-OUTPUT-SHAFT"
+       }
+      ],
+      "members_display": [
        "行星齿轮系",
        "输出轴"
       ],
@@ -1188,7 +1207,10 @@
       "图1 为行星齿轮减速器的整体结构示意图。",
       "图2 为行星齿轮减速器齿轮系的分解示意图。"
      ],
-     "finished_at": "2026-10-11 10:31"
+     "finished_at": "2026-10-11 10:31",
+     "inputs": {
+      "plan_etag": "W/\"gearbox-1\""
+     }
     },
     "plan": {
      "schema": "patent-figure-plan/1",
@@ -1850,6 +1872,17 @@
       "caption": "台虎钳整机装配图（兜底候选）",
       "kind": "assembly",
       "members": [
+       {
+        "group": "v-fixed"
+       },
+       {
+        "group": "v-move"
+       },
+       {
+        "group": "v-screw"
+       }
+      ],
+      "members_display": [
        "固定钳身组",
        "活动钳身组",
        "丝杠手柄组"
@@ -1978,6 +2011,11 @@
       "caption": "丝杠手柄机构分解图",
       "kind": "exploded",
       "members": [
+       {
+        "group": "v-screw"
+       }
+      ],
+      "members_display": [
        "丝杠手柄组"
       ],
       "status": "pass",
