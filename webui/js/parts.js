@@ -12,7 +12,7 @@ import { toast } from './main.js';
 let root; let query = '';
 let pollTimer = null;
 
-const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+import { esc } from './esc.js';
 
 function sizeText(p) {
   const [w, d, h] = p.bbox_size || [];
@@ -28,24 +28,39 @@ function matches(p) {
 function partRow(p, missing) {
   const figs = figuresContaining(p.name);
   const dots = figs.map((f) =>
-    `<i class="dot" style="background:${figureColor(f.id)}" title="${f.id}"></i>`).join('');
+    `<i class="dot" style="background:${figureColor(f.id)}" title="${esc(f.id)}"></i>`).join('');
   const sel = state.selection.has(p.name) ? ' is-selected' : '';
   const warn = missing.has(p.name) ? '<span class="tag-warn">未入图</span>' : '';
   const degen = p.degenerate ? '<span class="tag-warn">退化</span>' : '';
   const cn = displayName(p.name);
-  return `<li class="part-row${sel}" data-name="${esc(p.name)}" title="${esc(p.name)}">
+  return `<li class="part-row${sel}" data-name="${esc(p.name)}" title="${esc(p.name)}"
+      role="option" aria-selected="${state.selection.has(p.name)}" tabindex="-1">
     <span class="part-name${cn ? '' : ' unnamed'}">${cn ? esc(cn) : '未命名'}</span>
     <span class="part-meta"><span class="mono">${esc(p.name)}</span> · ×${p.instances} · ${sizeText(p)}</span>
     <span class="part-flags">${dots}${warn}${degen}</span>
   </li>`;
 }
 
+let activePart = null;   // 键盘焦点所在的零件（listbox roving tabindex）
+function partRows() { return [...root.querySelectorAll('.part-row')]; }
+function setActivePart(name, focus) {
+  activePart = name;
+  partRows().forEach((li) => { li.tabIndex = li.dataset.name === name ? 0 : -1; });
+  if (focus) { const el = root.querySelector(`.part-row[data-name="${CSS.escape(name)}"]`); el?.focus(); }
+}
+function moveActive(dir) {
+  const rows = partRows(); if (!rows.length) return;
+  let idx = rows.findIndex((r) => r.dataset.name === activePart);
+  idx = idx < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, idx + dir));
+  setActivePart(rows[idx].dataset.name, true);
+}
+
 function structureHead() {
   const s = state.structure;
   const job = state.structureJob || {};
-  const llmOk = state.llm && state.llm.provider !== 'none';
+  const llmOk = state.llm && state.llm.configured;
   const source = job.running
-    ? '<span class="spin dark"></span> AI 正在识别结构…（推理模型约需 2–5 分钟，可继续操作）'
+    ? '<span class="spin"></span> AI 正在识别结构…（可继续操作）'
     : (s?.source === 'ai' ? `AI 识别 · ${esc(s.provider || '')} · ${esc(s.created || '')}`
       : '按 STEP 装配层级自动分组——点「AI 识别结构」换成看得懂的结构名');
   const emptyTerms = (state.plan?.terms || []).filter((t) => !(t.term || '').trim()).length;
@@ -53,8 +68,8 @@ function structureHead() {
   return `<div class="struct-bar">
     <p class="struct-src${job.error ? ' bad' : ''}">${job.error ? `识别失败：${esc(job.error)}` : source}</p>
     <div class="struct-actions">
-      <button class="btn-ai" data-analyze ${job.running || !llmOk ? 'disabled' : ''}
-        title="${llmOk ? '' : '请先在工作台设置里配置大模型'}">✦ ${s?.source === 'ai' ? '重新识别' : 'AI 识别结构'}</button>
+      <button class="btn-ai" data-analyze ${job.running || !llmOk || api.readOnly ? 'disabled' : ''}
+        title="${llmOk ? '' : '未接入 AI；可在术语页手填中文名'}"><span class="ai-mark">AI</span> ${s?.source === 'ai' ? '重新识别' : '识别结构'}</button>
       ${canApply ? `<button class="btn-min" data-apply title="只填术语表里空着的行，人工填过的不动">中文名填入术语${emptyTerms ? `（${emptyTerms} 空）` : ''}</button>` : ''}
     </div></div>`;
 }
@@ -81,11 +96,15 @@ function groupBlock(g, partsByName, missing) {
       <button class="gbtn${hidden ? ' on' : ''}" data-hide="${g.id}" title="在 3D 中隐藏这一组">${hidden ? '显示' : '隐藏'}</button>
       <button class="gbtn" data-newfig="${g.id}" title="用这一组的零件新建一张分解图">＋建图</button>
     </div>
-    ${open ? `<ul class="part-list">${members.map((p) => partRow(p, missing)).join('')}</ul>` : ''}
+    ${open ? `<ul class="part-list" role="listbox" aria-multiselectable="true" aria-label="零件列表">${members.map((p) => partRow(p, missing)).join('')}</ul>` : ''}
   </section>`;
 }
 
+let pendingRestoreFocus = null;   // 替换 innerHTML 前记下的「有焦点的零件名」，bind() 重建后恢复
 function render() {
+  // 替换 innerHTML 前先记下键盘焦点所在的零件身份，重建后恢复（Codex #7：选一件后能继续按方向键）
+  const ae = document.activeElement;
+  pendingRestoreFocus = (root && root.contains(ae) && ae.classList?.contains('part-row')) ? ae.dataset.name : null;
   const parts = state.assembly?.parts || [];
   const partsByName = new Map(parts.map((p) => [p.name, p]));
   const missing = new Set(unassignedParts());
@@ -100,7 +119,7 @@ function render() {
 
   const body = mode === 'structure' && groups.length
     ? `${structureHead()}<div class="sgroups">${groups.map((g) => groupBlock(g, partsByName, missing)).join('')}</div>`
-    : `<ul class="part-list">${parts.filter(matches).map((p) => partRow(p, missing)).join('')}</ul>`;
+    : `<ul class="part-list" role="listbox" aria-multiselectable="true" aria-label="零件列表">${parts.filter(matches).map((p) => partRow(p, missing)).join('')}</ul>`;
 
   root.innerHTML = `
     <div class="panel-head"><span class="stamp">01</span>零件
@@ -142,8 +161,23 @@ function bind() {
     state.partsMode = b.dataset.mode; render();
   }));
   root.querySelectorAll('.part-row').forEach((li) => {
-    li.addEventListener('click', () => toggleSelect(li.dataset.name));
+    li.addEventListener('click', () => { setActivePart(li.dataset.name); toggleSelect(li.dataset.name); });
+    li.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveActive(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); moveActive(-1); }
+      else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleSelect(li.dataset.name); }
+      else if (e.key === 'Home') { e.preventDefault(); const r = partRows(); if (r[0]) setActivePart(r[0].dataset.name, true); }
+      else if (e.key === 'End') { e.preventDefault(); const r = partRows(); if (r.length) setActivePart(r[r.length - 1].dataset.name, true); }
+    });
   });
+  // roving tabindex：让列表第一个可达项（或上次焦点项）可 Tab 进入；若替换前有焦点则恢复到同一零件
+  const rows = partRows();
+  if (rows.length) {
+    const wanted = pendingRestoreFocus || (rows.some((r) => r.dataset.name === activePart) ? activePart : null);
+    const keep = (wanted && rows.some((r) => r.dataset.name === wanted)) ? wanted : rows[0].dataset.name;
+    setActivePart(keep, !!pendingRestoreFocus);   // 替换前确有焦点 → 重建后恢复
+  }
+  pendingRestoreFocus = null;
   root.querySelectorAll('[data-caret]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.caret;
     if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id);
@@ -157,11 +191,20 @@ function bind() {
       flashParts(g.parts);
     });
     if (b.classList.contains('gname')) b.addEventListener('dblclick', async () => {
+      if (api.readOnly) { toast('静态演示站只读，不能改结构组名', ''); return; }
       const g = groupById(b.dataset.gsel);
       const name = window.prompt('结构组名称', g.name);
       if (!name || name.trim() === g.name) return;
-      const res = await api.renameGroups([{ id: g.id, name: name.trim() }]);
-      state.structure = res.structure; indexStructure(); render(); bus.emit('structure');
+      const old = g.name;
+      g.name = name.trim();                 // 乐观更新
+      indexStructure(); render(); bus.emit('structure');
+      try {
+        const res = await api.renameGroups(state.projectId, [{ id: g.id, name: g.name }]);
+        if (res?.structure) { state.structure = res.structure; indexStructure(); render(); bus.emit('structure'); }
+      } catch (err) {                       // 保存失败：回滚 + 报错
+        g.name = old; indexStructure(); render(); bus.emit('structure');
+        toast('改名没保存：' + (err.hint || err.message), 'bad');
+      }
     });
   });
   root.querySelectorAll('[data-solo]').forEach((b) => b.addEventListener('click', () => {
@@ -182,12 +225,7 @@ function bind() {
     toast(`已用「${g.name}」新建 ${id}（${g.parts.length} 种零件）——零件多时出图前可再拆分`, 'ok');
   }));
   root.querySelector('[data-analyze]')?.addEventListener('click', analyze);
-  root.querySelector('[data-apply]')?.addEventListener('click', async () => {
-    const res = await api.applyStructureNames();
-    state.plan = res.plan; state.validate = res.validate;
-    bus.emit('plan'); bus.emit('validate');
-    toast(`已把 ${res.applied.filled.length + res.applied.added.length} 个中文名填入术语表；人工填过的 ${res.applied.kept_human.length} 个未改动`, 'ok');
-  });
+  root.querySelector('[data-apply]')?.addEventListener('click', applyStructureNames);
   const clear = root.querySelector('[data-act="clear"]');
   if (clear) clear.addEventListener('click', () => setSelection([]));
   root.querySelectorAll('.sugg').forEach((btn) => {
@@ -195,29 +233,51 @@ function bind() {
   });
 }
 
+// 结构识别：起一个 suggest 作业演示进度（mock 的结构已预置，作业完成后沿用现有结构）。
 async function analyze() {
   try {
-    const res = await api.analyzeStructure();
-    state.structureJob = res.job;
+    state.structureJob = { running: true };
     render();
-    poll();
-  } catch (err) { toast('无法开始识别：' + err.message, 'bad'); }
+    const res = await api.analyzeStructure(state.projectId);   // legacy → /api/structure/analyze；live → suggest 作业
+    if (api.isLegacy) {
+      // 旧后端：轮询 /api/structure 直到识别作业结束
+      const poll = async () => {
+        const r = await api.getStructure();
+        state.structureJob = r.job || null;
+        if (r.job?.running) { render(); setTimeout(poll, 3000); return; }
+        if (r.structure) { state.structure = r.structure; indexStructure(); }
+        if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
+        bus.emit('structure'); render();
+        if (r.job?.error) toast('结构识别失败：' + r.job.error, 'bad');
+        else toast(`结构识别完成：${state.structure?.groups?.length || 0} 个结构组`, 'ok');
+      };
+      setTimeout(poll, 3000);
+      return;
+    }
+    api.jobEvents(res.job_id, {
+      done() {
+        state.structureJob = null;
+        if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
+        bus.emit('structure'); render();
+        toast(`结构识别完成：${state.structure?.groups?.length || 0} 个结构组`, 'ok');
+      },
+      fail(d) { state.structureJob = { error: d.message }; render(); toast('结构识别失败：' + d.message, 'bad'); },
+    });
+  } catch (err) { state.structureJob = null; render(); toast('无法开始识别：' + (err.hint || err.message), 'bad'); }
 }
 
-function poll() {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(async () => {
-    const res = await api.structure();
-    state.structureJob = res.job;
-    if (res.job.running) { render(); poll(); return; }
-    state.structure = res.structure;
-    indexStructure();
-    if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
-    bus.emit('structure');
-    render();
-    if (res.job.error) toast('结构识别失败：' + res.job.error, 'bad');
-    else toast(`结构识别完成：${state.structure.groups.length} 个结构组`, 'ok');
-  }, 3000);
+// 把结构里的中文名填进术语表的空行（人工填过的不覆盖），本地完成后保存 plan。
+function applyStructureNames() {
+  const names = state.structure?.names || {};
+  let filled = 0;
+  mutate((plan) => {
+    const bySel = new Map((plan.terms || []).map((t) => [t.selector, t]));
+    Object.entries(names).forEach(([sel, info]) => {
+      const row = bySel.get(sel);
+      if (row && !(row.term || '').trim()) { row.term = info.name; filled += 1; }
+    });
+  });
+  toast(`已把 ${filled} 个中文名填入术语表；人工填过的未改动`, 'ok');
 }
 
 function applySuggestion(index) {

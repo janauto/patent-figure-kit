@@ -1,0 +1,418 @@
+{
+  "schema": "patent-assembly/1",
+  "source": {
+    "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-bench-vise.stp",
+    "sha256": "3e0ac05c6d72eaf5ab303e412303c889d08c33f7b4d406ecae935056544da400",
+    "instances": 20,
+    "distinct": 12
+  },
+  "units": "mm",
+  "bbox": {
+    "lo": [
+      -100.0,
+      -80.0,
+      -6.0
+    ],
+    "hi": [
+      150.0,
+      80.0,
+      82.0
+    ],
+    "size": [
+      250.0,
+      160.0,
+      88.0
+    ]
+  },
+  "parts": [
+    {
+      "name": "VISE-BASE",
+      "instances": 1,
+      "bbox_size": [
+        200.0,
+        90.0,
+        32.0
+      ],
+      "max_dim": 200.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          16.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-BASE"
+    },
+    {
+      "name": "VISE-BASE-BOLT",
+      "instances": 4,
+      "bbox_size": [
+        13.0,
+        15.011,
+        26.0
+      ],
+      "max_dim": 26.0,
+      "centers": [
+        [
+          -82.0,
+          -34.0,
+          7.0
+        ],
+        [
+          -82.0,
+          34.0,
+          7.0
+        ],
+        [
+          82.0,
+          -34.0,
+          7.0
+        ],
+        [
+          82.0,
+          34.0,
+          7.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-BASE-BOLT"
+    },
+    {
+      "name": "VISE-FIXED-JAW",
+      "instances": 1,
+      "bbox_size": [
+        40.0,
+        96.0,
+        56.0
+      ],
+      "max_dim": 96.0,
+      "centers": [
+        [
+          -80.0,
+          0.0,
+          42.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-FIXED-JAW-ASM/VISE-FIXED-JAW"
+    },
+    {
+      "name": "VISE-HANDLE-BAR",
+      "instances": 1,
+      "bbox_size": [
+        8.0,
+        140.0,
+        8.0
+      ],
+      "max_dim": 140.0,
+      "centers": [
+        [
+          140.0,
+          0.0,
+          46.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-HANDLE-BAR"
+    },
+    {
+      "name": "VISE-HANDLE-HUB",
+      "instances": 1,
+      "bbox_size": [
+        20.0,
+        26.0,
+        26.0
+      ],
+      "max_dim": 26.0,
+      "centers": [
+        [
+          140.0,
+          0.0,
+          46.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-HANDLE-HUB"
+    },
+    {
+      "name": "VISE-HANDLE-KNOB",
+      "instances": 2,
+      "bbox_size": [
+        16.0,
+        16.0,
+        16.0
+      ],
+      "max_dim": 16.0,
+      "centers": [
+        [
+          140.0,
+          -72.0,
+          46.0
+        ],
+        [
+          140.0,
+          72.0,
+          46.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-HANDLE-KNOB"
+    },
+    {
+      "name": "VISE-JAW-PLATE",
+      "instances": 2,
+      "bbox_size": [
+        5.0,
+        88.0,
+        24.0
+      ],
+      "max_dim": 88.0,
+      "centers": [
+        [
+          -57.5,
+          0.0,
+          58.0
+        ],
+        [
+          -4.5,
+          0.0,
+          58.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-FIXED-JAW-ASM/VISE-JAW-PLATE"
+    },
+    {
+      "name": "VISE-LEAD-NUT",
+      "instances": 1,
+      "bbox_size": [
+        28.0,
+        30.0,
+        26.0
+      ],
+      "max_dim": 30.0,
+      "centers": [
+        [
+          58.0,
+          0.0,
+          46.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-MOVABLE-JAW-ASM/VISE-LEAD-NUT"
+    },
+    {
+      "name": "VISE-LEAD-SCREW",
+      "instances": 1,
+      "bbox_size": [
+        190.0,
+        19.483,
+        19.483
+      ],
+      "max_dim": 190.0,
+      "centers": [
+        [
+          35.0,
+          0.0,
+          46.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-LEAD-SCREW"
+    },
+    {
+      "name": "VISE-MOVABLE-JAW",
+      "instances": 1,
+      "bbox_size": [
+        72.0,
+        96.0,
+        68.0
+      ],
+      "max_dim": 96.0,
+      "centers": [
+        [
+          34.0,
+          0.0,
+          48.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-MOVABLE-JAW-ASM/VISE-MOVABLE-JAW"
+    },
+    {
+      "name": "VISE-PLATE-SCREW",
+      "instances": 4,
+      "bbox_size": [
+        14.5,
+        8.0,
+        8.0
+      ],
+      "max_dim": 14.5,
+      "centers": [
+        [
+          -57.75,
+          -28.0,
+          58.0
+        ],
+        [
+          -57.75,
+          28.0,
+          58.0
+        ],
+        [
+          0.75,
+          -28.0,
+          58.0
+        ],
+        [
+          0.75,
+          28.0,
+          58.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-FIXED-JAW-ASM/VISE-PLATE-SCREW"
+    },
+    {
+      "name": "VISE-THRUST-COLLAR",
+      "instances": 1,
+      "bbox_size": [
+        10.0,
+        30.0,
+        30.0
+      ],
+      "max_dim": 30.0,
+      "centers": [
+        [
+          105.0,
+          0.0,
+          46.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-VISE-ASSY/VISE-SPINDLE-ASM/VISE-THRUST-COLLAR"
+    }
+  ],
+  "principal_axis": {
+    "vector": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "nearest": "x",
+    "spread_ratio": 6.847
+  },
+  "coaxial_groups": [
+    {
+      "id": "g1",
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "origin": [
+        0.0,
+        -28.0,
+        58.0
+      ],
+      "members": [
+        "VISE-PLATE-SCREW"
+      ],
+      "instances": 2,
+      "extent": [
+        -65.0,
+        8.0
+      ]
+    },
+    {
+      "id": "g2",
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "origin": [
+        0.0,
+        28.0,
+        58.0
+      ],
+      "members": [
+        "VISE-PLATE-SCREW"
+      ],
+      "instances": 2,
+      "extent": [
+        -65.0,
+        8.0
+      ]
+    },
+    {
+      "id": "g3",
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "origin": [
+        0.0,
+        0.0,
+        46.0
+      ],
+      "members": [
+        "VISE-HANDLE-HUB",
+        "VISE-LEAD-SCREW",
+        "VISE-THRUST-COLLAR"
+      ],
+      "instances": 3,
+      "extent": [
+        -60.0,
+        150.0
+      ]
+    }
+  ],
+  "stack_order": [
+    "VISE-FIXED-JAW",
+    "VISE-JAW-PLATE",
+    "VISE-PLATE-SCREW",
+    "VISE-BASE",
+    "VISE-BASE-BOLT",
+    "VISE-MOVABLE-JAW",
+    "VISE-LEAD-SCREW",
+    "VISE-LEAD-NUT",
+    "VISE-THRUST-COLLAR",
+    "VISE-HANDLE-BAR",
+    "VISE-HANDLE-HUB",
+    "VISE-HANDLE-KNOB"
+  ],
+  "size_tiers": [
+    {
+      "tier": "large",
+      "members": [
+        "VISE-BASE",
+        "VISE-FIXED-JAW",
+        "VISE-HANDLE-BAR",
+        "VISE-LEAD-SCREW",
+        "VISE-MOVABLE-JAW"
+      ]
+    },
+    {
+      "tier": "medium",
+      "members": [
+        "VISE-JAW-PLATE",
+        "VISE-LEAD-NUT",
+        "VISE-THRUST-COLLAR"
+      ]
+    },
+    {
+      "tier": "small",
+      "members": [
+        "VISE-BASE-BOLT",
+        "VISE-HANDLE-HUB",
+        "VISE-HANDLE-KNOB",
+        "VISE-PLATE-SCREW"
+      ]
+    }
+  ],
+  "split_suggestions": [],
+  "warnings": []
+}

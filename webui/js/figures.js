@@ -4,6 +4,7 @@ import {
   bus, state, mutate, resolveMembers, labelCount, figureColor,
   setActiveFigure, setSelection, displayName,
 } from './state.js';
+import { esc } from './esc.js';
 
 let root;
 
@@ -27,24 +28,24 @@ function render() {
     const chips = (fig.members || []).map((m, i) => {
       const isGlob = /[*?\[]/.test(m);
       const cn = isGlob ? '' : displayName(m);
-      const n = isGlob ? `<i>${m}</i>` : (cn || m);
-      return `<span class="chip${cn ? ' chip-cn' : ' mono'}${isGlob ? ' chip-glob' : ''}" title="${m}">${n}
-        <button data-fig="${fig.id}" data-rm="${i}" title="移除">×</button></span>`;
+      const n = isGlob ? `<i>${esc(m)}</i>` : esc(cn || m);
+      return `<span class="chip${cn ? ' chip-cn' : ' mono'}${isGlob ? ' chip-glob' : ''}" title="${esc(m)}">${n}
+        <button data-fig="${esc(fig.id)}" data-rm="${i}" title="移除">×</button></span>`;
     }).join('');
-    return `<article class="fig-card${active}" data-fig="${fig.id}" style="--fig:${color}">
+    return `<article class="fig-card${active}" data-fig="${esc(fig.id)}" style="--fig:${color}">
       <header>
         <span class="fig-swatch"></span>
-        <input class="fig-caption" data-fig="${fig.id}" value="${fig.caption || ''}"
+        <input class="fig-caption" data-fig="${esc(fig.id)}" value="${esc(fig.caption || '')}"
                placeholder="图题，如：整体结构示意图">
-        <button class="icon-btn" data-del="${fig.id}" title="删除本图">✕</button>
+        <button class="icon-btn" data-del="${esc(fig.id)}" title="删除本图">✕</button>
       </header>
       <div class="fig-meta">
-        <span class="mono">${fig.id}</span>
+        <span class="mono">${esc(fig.id)}</span>
         <label class="seg">
           <button class="seg-btn${fig.kind === 'assembly' ? ' on' : ''}"
-                  data-kind="assembly" data-fig="${fig.id}">装配</button>
+                  data-kind="assembly" data-fig="${esc(fig.id)}">装配</button>
           <button class="seg-btn${fig.kind === 'exploded' ? ' on' : ''}"
-                  data-kind="exploded" data-fig="${fig.id}">分解</button>
+                  data-kind="exploded" data-fig="${esc(fig.id)}">分解</button>
         </label>
         <span class="badge${over ? ' badge-over' : ''}"
               title="有效标记数（服务器校验为准）">${labels}/${maxLabels()}</span>
@@ -52,11 +53,11 @@ function render() {
       </div>
       <div class="chips">${chips || '<span class="hint">空图——选中零件后点下方按钮加入</span>'}</div>
       <div class="fig-actions">
-        <button class="btn-min" data-add="${fig.id}"
+        <button class="btn-min" data-add="${esc(fig.id)}"
                 ${state.selection.size ? '' : 'disabled'}>加入所选 (${state.selection.size})</button>
-        <button class="btn-min" data-drop="${fig.id}"
+        <button class="btn-min" data-drop="${esc(fig.id)}"
                 ${state.selection.size ? '' : 'disabled'}>移除所选</button>
-        <button class="btn-min" data-pick="${fig.id}">选中本图零件</button>
+        <button class="btn-min" data-pick="${esc(fig.id)}">选中本图零件</button>
       </div>
     </article>`;
   }).join('');
@@ -65,7 +66,8 @@ function render() {
     <div class="panel-head"><span class="stamp">02</span>图纸
       <button class="btn-min head-btn" data-new>＋ 新建图</button></div>
     <div class="cards">${cards}</div>
-    <p class="hint pad">快捷键：选中零件后按 <b>1–9</b> 直接归入第 N 张图；<b>Esc</b> 清空选择。</p>
+    <p class="hint pad">框选零件后点图卡上「加入所选」归图；<b>B</b> 框选 · <b>F</b> 对准 · <b>I</b> 只看当前图 ·
+    <b>1/2/3</b> 机位 · <b>Esc</b> 清空。</p>
   `;
 
   root.querySelector('[data-new]').addEventListener('click', () => {

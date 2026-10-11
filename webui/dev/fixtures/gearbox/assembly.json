@@ -1,0 +1,531 @@
+{
+  "schema": "patent-assembly/1",
+  "source": {
+    "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-planetary-gearbox.stp",
+    "sha256": "b3f786bc8ba867bb2b91c7ec0029d5f27a921e58a34bf2812b8b128b88c565d0",
+    "instances": 27,
+    "distinct": 15
+  },
+  "units": "mm",
+  "bbox": {
+    "lo": [
+      -46.0,
+      -46.0,
+      -68.0
+    ],
+    "hi": [
+      46.0,
+      46.0,
+      92.0
+    ],
+    "size": [
+      92.0,
+      92.0,
+      160.0
+    ]
+  },
+  "parts": [
+    {
+      "name": "PGB-END-COVER",
+      "instances": 1,
+      "bbox_size": [
+        92.0,
+        92.0,
+        18.0
+      ],
+      "max_dim": 92.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          45.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-END-COVER"
+    },
+    {
+      "name": "PGB-MOTOR-HOUSING",
+      "instances": 1,
+      "bbox_size": [
+        61.0,
+        61.161,
+        62.0
+      ],
+      "max_dim": 62.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          -29.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-MOTOR-ASM/PGB-MOTOR-HOUSING"
+    },
+    {
+      "name": "PGB-MOTOR-REAR-CAP",
+      "instances": 1,
+      "bbox_size": [
+        60.0,
+        60.0,
+        8.0
+      ],
+      "max_dim": 60.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          -64.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-MOTOR-ASM/PGB-MOTOR-REAR-CAP"
+    },
+    {
+      "name": "PGB-MOTOR-SHAFT",
+      "instances": 1,
+      "bbox_size": [
+        8.0,
+        8.0,
+        30.0
+      ],
+      "max_dim": 30.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          7.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-MOTOR-ASM/PGB-MOTOR-SHAFT"
+    },
+    {
+      "name": "PGB-MOUNT-FLANGE",
+      "instances": 1,
+      "bbox_size": [
+        84.0,
+        84.0,
+        10.0
+      ],
+      "max_dim": 84.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          7.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-MOUNT-FLANGE"
+    },
+    {
+      "name": "PGB-OIL-SEAL",
+      "instances": 1,
+      "bbox_size": [
+        44.0,
+        44.0,
+        5.0
+      ],
+      "max_dim": 44.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          56.5
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-OIL-SEAL"
+    },
+    {
+      "name": "PGB-OUTPUT-BEARING",
+      "instances": 1,
+      "bbox_size": [
+        44.0,
+        44.0,
+        10.0
+      ],
+      "max_dim": 44.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          45.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-OUTPUT-BEARING"
+    },
+    {
+      "name": "PGB-OUTPUT-SHAFT",
+      "instances": 1,
+      "bbox_size": [
+        22.0,
+        20.0,
+        52.0
+      ],
+      "max_dim": 52.0,
+      "centers": [
+        [
+          1.0,
+          0.0,
+          66.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-OUTPUT-SHAFT"
+    },
+    {
+      "name": "PGB-PLANET-CARRIER",
+      "instances": 1,
+      "bbox_size": [
+        64.0,
+        64.0,
+        16.0
+      ],
+      "max_dim": 64.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          42.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-CARRIER-ASM/PGB-PLANET-CARRIER"
+    },
+    {
+      "name": "PGB-PLANET-GEAR",
+      "instances": 3,
+      "bbox_size": [
+        29.945,
+        30.0,
+        14.0
+      ],
+      "max_dim": 30.0,
+      "centers": [
+        [
+          -11.25,
+          -19.485572,
+          25.0
+        ],
+        [
+          -11.25,
+          19.485572,
+          25.0
+        ],
+        [
+          22.5,
+          0.0,
+          25.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-CARRIER-ASM/PGB-PLANET-GEAR"
+    },
+    {
+      "name": "PGB-PLANET-PIN",
+      "instances": 3,
+      "bbox_size": [
+        6.0,
+        6.0,
+        22.0
+      ],
+      "max_dim": 22.0,
+      "centers": [
+        [
+          -11.25,
+          -19.485572,
+          27.0
+        ],
+        [
+          -11.25,
+          19.485572,
+          27.0
+        ],
+        [
+          22.5,
+          0.0,
+          27.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-CARRIER-ASM/PGB-PLANET-PIN"
+    },
+    {
+      "name": "PGB-RING-GEAR",
+      "instances": 1,
+      "bbox_size": [
+        92.0,
+        92.0,
+        24.0
+      ],
+      "max_dim": 92.0,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          24.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-RING-GEAR"
+    },
+    {
+      "name": "PGB-SCREW-M5",
+      "instances": 6,
+      "bbox_size": [
+        8.0,
+        8.0,
+        30.5
+      ],
+      "max_dim": 30.5,
+      "centers": [
+        [
+          -42.0,
+          0.0,
+          33.25
+        ],
+        [
+          -21.0,
+          -36.373067,
+          33.25
+        ],
+        [
+          -21.0,
+          36.373067,
+          33.25
+        ],
+        [
+          21.0,
+          -36.373067,
+          33.25
+        ],
+        [
+          21.0,
+          36.373067,
+          33.25
+        ],
+        [
+          42.0,
+          0.0,
+          33.25
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-SCREW-M5"
+    },
+    {
+      "name": "PGB-SCREW-M6",
+      "instances": 4,
+      "bbox_size": [
+        9.6,
+        9.6,
+        19.4
+      ],
+      "max_dim": 19.4,
+      "centers": [
+        [
+          -32.526912,
+          -32.526912,
+          7.7
+        ],
+        [
+          -32.526912,
+          32.526912,
+          7.7
+        ],
+        [
+          32.526912,
+          -32.526912,
+          7.7
+        ],
+        [
+          32.526912,
+          32.526912,
+          7.7
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-SCREW-M6"
+    },
+    {
+      "name": "PGB-SUN-GEAR",
+      "instances": 1,
+      "bbox_size": [
+        20.926,
+        20.926,
+        16.0
+      ],
+      "max_dim": 20.926,
+      "centers": [
+        [
+          0.0,
+          0.0,
+          24.0
+        ]
+      ],
+      "degenerate": false,
+      "path_sample": "DEMO-PGB-ASSY/PGB-SUN-GEAR"
+    }
+  ],
+  "principal_axis": {
+    "vector": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "nearest": "z",
+    "spread_ratio": 1.513
+  },
+  "coaxial_groups": [
+    {
+      "id": "g1",
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "origin": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "members": [
+        "PGB-END-COVER",
+        "PGB-MOTOR-REAR-CAP",
+        "PGB-MOTOR-SHAFT",
+        "PGB-MOUNT-FLANGE",
+        "PGB-OIL-SEAL",
+        "PGB-OUTPUT-BEARING",
+        "PGB-PLANET-CARRIER",
+        "PGB-RING-GEAR",
+        "PGB-SUN-GEAR"
+      ],
+      "instances": 9,
+      "extent": [
+        -68.0,
+        59.0
+      ]
+    },
+    {
+      "id": "g2",
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "origin": [
+        -11.25,
+        -19.485572,
+        0.0
+      ],
+      "members": [
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN"
+      ],
+      "instances": 2,
+      "extent": [
+        16.0,
+        38.0
+      ]
+    },
+    {
+      "id": "g3",
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "origin": [
+        -11.25,
+        19.485572,
+        0.0
+      ],
+      "members": [
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN"
+      ],
+      "instances": 2,
+      "extent": [
+        16.0,
+        38.0
+      ]
+    },
+    {
+      "id": "g4",
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "origin": [
+        22.5,
+        0.0,
+        0.0
+      ],
+      "members": [
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN"
+      ],
+      "instances": 2,
+      "extent": [
+        16.0,
+        38.0
+      ]
+    }
+  ],
+  "stack_order": [
+    "PGB-MOTOR-REAR-CAP",
+    "PGB-MOTOR-HOUSING",
+    "PGB-MOTOR-SHAFT",
+    "PGB-MOUNT-FLANGE",
+    "PGB-SCREW-M6",
+    "PGB-RING-GEAR",
+    "PGB-SUN-GEAR",
+    "PGB-PLANET-GEAR",
+    "PGB-PLANET-PIN",
+    "PGB-SCREW-M5",
+    "PGB-PLANET-CARRIER",
+    "PGB-END-COVER",
+    "PGB-OUTPUT-BEARING",
+    "PGB-OIL-SEAL",
+    "PGB-OUTPUT-SHAFT"
+  ],
+  "size_tiers": [
+    {
+      "tier": "large",
+      "members": [
+        "PGB-END-COVER",
+        "PGB-MOTOR-HOUSING",
+        "PGB-MOUNT-FLANGE",
+        "PGB-PLANET-CARRIER",
+        "PGB-RING-GEAR"
+      ]
+    },
+    {
+      "tier": "medium",
+      "members": [
+        "PGB-MOTOR-REAR-CAP",
+        "PGB-OIL-SEAL",
+        "PGB-OUTPUT-BEARING",
+        "PGB-OUTPUT-SHAFT",
+        "PGB-SCREW-M5"
+      ]
+    },
+    {
+      "tier": "small",
+      "members": [
+        "PGB-MOTOR-SHAFT",
+        "PGB-PLANET-GEAR",
+        "PGB-PLANET-PIN",
+        "PGB-SCREW-M6",
+        "PGB-SUN-GEAR"
+      ]
+    }
+  ],
+  "split_suggestions": [],
+  "warnings": []
+}

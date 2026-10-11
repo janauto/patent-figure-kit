@@ -1,6 +1,6 @@
 // 全局状态与事件总线。plan 是唯一真相（与磁盘上的 plan.json 一一对应）；
 // 界面上的一切改动都收敛为「改 plan → 防抖保存 → 服务器校验」这一条路。
-import { api } from './api.js';
+import { api, normJob } from './api.js';
 
 const listeners = new Map();
 export const bus = {
@@ -9,19 +9,27 @@ export const bus = {
 };
 
 export const state = {
+  projectId: '',        // 当前工程 id（来自 ?project=）
+  planEtag: null,       // plan 的 ETag，用于乐观锁
+  title: '',
   assembly: null,
   plan: null,
   validate: null,       // 服务器 validate 结果 {ok, issues}
-  render: null,         // 最近一次渲染结果
+  render: null,         // 已发布的渲染结果（失败的作业不会替换它）
+  renderJob: null,      // 本次（最近一次）渲染作业状态 {id, state, running, ok, error, result, diag}
+  // 渲染结果绑定的版本证据——只用后端给的：输入快照 plan_etag + 结果 ID（版本 rid = render_job_id）。
+  // 没有证据即锁定导出，绝不用当前 plan 补造。conflict=true：导出时后端判定计划已变更（409）。
+  // 旧版后端兼容模式（legacy）不建立任何证据：导出一律锁定（修复轮 7 架构裁决）。
+  renderInputs: { etag: null, version: null, conflict: false },
   rendering: false,
+  candidates: [],       // F2-lite 候选分图
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
   activeFigure: null,   // 当前操作的图 id
   saveState: 'clean',   // clean | dirty | saving | saved | error
-  workdir: '',
+  editVersion: 0,       // 每次 mutate +1；保存按版本确认，慢 PUT 期间的新编辑不被吞
+  savedVersion: 0,      // 已持久化到服务端的最高编辑版本
   step: '',
-  homeUrl: null,        // 工作台首页（单工程模式为 null）
   llm: null,            // 大模型通道状态
-  flowcharts: [],       // 本工程的流程图
   aiBusy: false,
   aiSuggestions: {},    // selector -> {term, confidence, reason}
   structure: null,      // {source: ai|fallback, groups:[{id,name,role,parts}], names:{part:{name}}}
@@ -137,29 +145,91 @@ export function labelCount(fig) {
 
 // ---- 变更与持久化 ----
 let saveTimer = null;
+// ETag 规范化：去掉弱前缀 W/ 与引号再比（代理/框架可能给同一版本加不同修饰）。
+export function normEtag(e) {
+  if (!e) return null;
+  return String(e).trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1') || null;
+}
+// 渲染结果自带的输入版本证据：mock / 本前端约定 inputs.plan_etag；WP1 实现放在顶层 plan_etag。
+export function resultEtag(r) {
+  return normEtag(r?.inputs?.plan_etag || r?.plan_etag || null);
+}
+// 渲染结果的版本 ID（WP1：render_job_id，即版本目录 rid；子应用结果另带 version）。
+export function resultVersion(r) {
+  return r?.render_job_id || r?.version || null;
+}
+
+// 结果是否过期 / 为何过期：
+//   'unsaved'（有未持久化编辑或保存失败）| 'legacy'（旧版后端兼容模式：不建立证据，导出恒锁定）
+//   | 'conflict'（导出时后端 409：计划已变更）| 'no-proof'（缺后端版本证据）| 'changed' | null
+export function renderStaleReason() {
+  if (!state.render) return null;
+  // 本地还有没落盘的编辑、或上次保存失败 → 立即判过期（planEtag 此刻还是旧值，不能据此放行）
+  if (state.editVersion > state.savedVersion) return 'unsaved';
+  if (state.saveState === 'error' || state.saveState === 'conflict') return 'unsaved';
+  if (api.isLegacy) return 'legacy';
+  if (state.renderInputs.conflict) return 'conflict';
+  // 只认后端证据：结果冻结输入的 ETag 与结果 ID 都要有，且 ETag 与当前计划一致
+  const ev = normEtag(state.renderInputs.etag);
+  if (!state.planEtag || !ev || !state.renderInputs.version) return 'no-proof';
+  return ev === normEtag(state.planEtag) ? null : 'changed';
+}
+export function renderStale() { return renderStaleReason() !== null; }
+
 export function mutate(fn) {
   fn(state.plan);
+  state.editVersion += 1;                        // 每次编辑递增版本
   state.saveState = 'dirty';
+  if (state.render) bus.emit('render-stale');   // 改计划 → 旧结果与缓存 ZIP 失效
   bus.emit('plan');
   bus.emit('save-state');
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flush, 600);
 }
 
-export async function flush() {
-  if (state.saveState !== 'dirty') return;
+async function doSave() {
+  if (api.readOnly) { state.saveState = 'readonly'; bus.emit('save-state'); return; }
+  const v = state.editVersion;                   // 本轮要保存的版本（PUT body 在 api 里同步序列化 = 此刻的 plan）
   state.saveState = 'saving';
   bus.emit('save-state');
   try {
-    const res = await api.savePlan(state.plan);
-    state.validate = res.validate;
-    state.saveState = 'saved';
-    bus.emit('validate');
+    const res = await api.putPlan(state.projectId, state.plan, state.planEtag);
+    if (res.etag) state.planEtag = res.etag;
+    if (res.validate) { state.validate = res.validate; bus.emit('validate'); }
+    state.savedVersion = Math.max(state.savedVersion, v);
+    state.saveState = (state.editVersion === v) ? 'saved' : 'dirty';
   } catch (err) {
-    state.saveState = 'error';
+    state.saveState = (err.status === 409 || err.code === 'etag_conflict') ? 'conflict' : 'error';
     console.error('保存失败', err);
   }
   bus.emit('save-state');
+}
+// 全局唯一的保存循环：所有 flush() 调用共享同一个 Promise，只有这一个循环负责发送与清理，
+// 杜绝并发 flush 各自发 PUT（同 ETag → 409 / 丢编辑）。循环持续到最新编辑版本已落盘或保存失败。
+//
+// 时序要点（Codex R3e #1）：循环体必须在 flushLoop 赋值「之后」才开始执行。若用立即执行的 async 函数，
+// 无待保存内容时循环在第一个 await 之前就退出，finally 会先同步清空 flushLoop，随后外层赋值又把这个
+// 已完成的 Promise 写回——之后所有 flush() 都拿到它、永不再保存。这里用 Promise.resolve().then 启动，
+// 保证「赋值 → 首次检查」的先后；退出判定与清理在同一段同步代码里完成，中间不留可被插入的窗口。
+let flushLoop = null;
+function saveFailed() { return state.saveState === 'error' || state.saveState === 'conflict'; }
+export function flush() {
+  clearTimeout(saveTimer);
+  if (!flushLoop) {
+    const loop = Promise.resolve().then(async () => {
+      try {
+        for (let guard = 0; guard < 100; guard += 1) {
+          if (saveFailed()) break;                               // 失败后停下，等下一次编辑/重试
+          if (state.savedVersion >= state.editVersion) break;   // 最新编辑已落盘
+          await doSave();                                        // 串行，一次只有一个 PUT 在途
+        }
+      } finally {
+        if (flushLoop === loop) flushLoop = null;                // 与最后一次检查同步完成，无窗口
+      }
+    });
+    flushLoop = loop;
+  }
+  return flushLoop;
 }
 
 export function setSelection(names) {
@@ -176,26 +246,40 @@ export function setActiveFigure(id) {
   bus.emit('active-figure');
 }
 
-export async function boot() {
-  const data = await api.state();
+export async function boot(projectId) {
+  state.projectId = projectId;
+  const data = await api.getProject(projectId);
+  state.title = data.title;
+  state.step = data.step_name;
   state.assembly = data.assembly;
-  state.plan = data.plan;
-  state.validate = data.validate;
   state.render = data.render;
-  state.rendering = data.rendering;
-  state.workdir = data.workdir;
-  state.step = data.step;
-  state.homeUrl = data.home_url ? `${data.home_url}?token=${encodeURIComponent(
-    new URLSearchParams(location.search).get('token') || '')}` : null;
+  state.rendering = false;
+  state.candidates = data.candidates || [];
+  state.candidatesUnsupported = !!data.candidates_unsupported;   // 旧后端无候选分图
+  state.homeUrl = data.home_url || null;
   state.llm = data.llm || null;
-  state.flowcharts = data.flowcharts || [];
   state.structure = data.structure || null;
-  state.structureJob = data.structure_job || null;
+  state.validate = data.validate || { ok: true, issues: [] };
+  const planRes = await api.getPlan(projectId);
+  state.plan = planRes.plan;
+  state.planEtag = planRes.etag || null;
+  state.editVersion = 0; state.savedVersion = 0;
+  // 结果版本证据：只认后端——结果携带的输入快照 plan_etag + 结果 ID（版本）。legacy 兼容模式不建立证据。
+  state.renderInputs = { etag: null, version: null, conflict: false };
+  if (state.render && !api.isLegacy) {
+    state.renderInputs.etag = resultEtag(state.render);
+    state.renderInputs.version = resultVersion(state.render);
+  }
+  // 本次（最近一次）渲染作业：新版后端给 render_job；旧后端只有 rendering 标志 → 视作一个在跑的作业
+  state.renderJob = data.render_job ? normJob(data.render_job)
+    : (data.rendering ? { id: 'legacy:render', state: 'running', running: true, ok: null, error: null, result: null, diag: null } : null);
+  // 修复轮 5–6 的 legacy 本地证明已作废（裁决：兼容模式不再凭本地记录解锁），顺手清掉残留
+  try { localStorage.removeItem(`inkline-render-proof-${projectId}`); localStorage.removeItem(`inkline-render-digest-${projectId}`); } catch { /* */ }
   indexStructure();
   if (state.structure?.source === 'ai') state.view.colorBy = 'structure';
   const groups = state.structure?.groups || [];
   const total = groups.reduce((n, g) => n + g.parts.length, 0);
   groups.forEach((g) => { if (total > 40 && g.parts.length > 12) state.collapsed.add(g.id); });
-  state.activeFigure = data.plan?.figures?.[0]?.id || null;
+  state.activeFigure = state.plan?.figures?.[0]?.id || null;
   bus.emit('booted');
 }

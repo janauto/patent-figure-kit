@@ -3,160 +3,143 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>专利附图工作台</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:,">
+<title>{name} · 工程列表</title>
+<meta name="description" content="从 STEP 到按国家知识产权局形式要求排版的说明书附图。">
+<link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/home.css">
 </head>
 <body class="home">
   <header id="hbar">
-    <div class="brand">专利附图工作台 <span class="brand-sub">Patent Figure Workbench</span></div>
-    <span id="llm-badge" class="tb-llm"></span>
-    <nav class="hnav">
-      <button class="btn-min" data-open="integrate">接入千问办公 / API</button>
-      <button class="btn-min" data-open="settings">设置</button>
-    </nav>
+    <div class="brand-mark">
+      <span class="brand-glyph" aria-hidden="true" data-brand-slot="glyph">墨</span>
+      <span class="brand-text">
+        <b class="brand-name" data-brand-slot="display-name">墨线</b>
+        <span class="brand-by">品胜 AI Lab 开源项目 · <span data-brand-slot="repo">patent-figure-kit</span></span>
+      </span>
+    </div>
+    <div class="hbar-tools">
+      <button class="cmd-trigger" id="cmd-open" title="搜索与命令（/）">
+        <span class="mono">⌕</span> 搜索工程 <kbd>/</kbd></button>
+      <span id="ai-badge" class="ai-badge" title="AI 通道状态">AI</span>
+      <button class="icon-btn" id="theme-toggle" title="切换深浅外壳（图纸恒白）" aria-label="切换主题">◐</button>
+      <button class="btn ghost" data-open="integrate">接入 MCP / API</button>
+      <button class="btn ghost" data-open="settings">设置</button>
+    </div>
   </header>
 
   <main id="home">
-    <section class="hero">
-      <div class="hero-text">
-        <p class="eyebrow"><span class="stamp">01</span> 3D 装配体 → 规范专利附图</p>
-        <h1>从 STEP 到<br>带件号表的专利附图</h1>
-        <p class="lede">大模型先把看不懂的零件代号读成<b>结构组</b>与中文名；在 3D 里调透明、拉爆炸，
-          按结构框选要申请的机构；脚本消隐出图、发附图标记、过质量闸门，再按递交稿规范补上
-          <b>图号</b>与<b>件号名称表</b>。方法类专利的流程图同一处出。</p>
-        <ul class="facts">
-          <li><b>编号只由程序发放</b>——大模型只写中文名与流程语义</li>
-          <li><b>13 项 QA 闸门</b>——未过的图不落地、不能导出</li>
-          <li><b>同计划逐位复现</b>——换人、换机器出同一张图</li>
-        </ul>
-      </div>
-      <div class="carousel" id="carousel" aria-roledescription="carousel">
-        <div class="sheet-frame">
-          <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
-          <div class="slides" id="slides"></div>
-          <button class="nav prev" data-step="-1" aria-label="上一张">‹</button>
-          <button class="nav next" data-step="1" aria-label="下一张">›</button>
-        </div>
-        <div class="cap" id="cap"></div>
-        <div class="dots" id="dots"></div>
-        <div class="progress"><i id="progress"></i></div>
-      </div>
-    </section>
-
-    <section class="showcase">
-      <h2 class="sc-title">看懂模型 · 结构识别、透明与爆炸</h2>
-      <div class="sc-grid">
-        <article class="sc-card" id="card-struct">
-          <header><h3>AI 结构识别</h3><p id="struct-sub">大模型把零件代号归成看得懂的结构组</p></header>
-          <div class="struct-list" id="struct-list"></div>
-        </article>
-        <article class="sc-card" data-snap="xray">
-          <header><h3>透明度 · 看清内部</h3><p>选中的结构保持实心，其余调成半透明</p></header><div class="sc-img"></div></article>
-        <article class="sc-card" data-snap="explode">
-          <header><h3>爆炸视图 · 按结构拉开</h3><p>按结构组整体拉开再逐件散开，方便框选内部件</p></header><div class="sc-img"></div></article>
-      </div>
-
-      <h2 class="sc-title">实用新型 · 看图与出图</h2>
-      <div class="sc-grid">
-        <article class="sc-card" data-slot="full">
-          <header><h3>交底版附图</h3><p>图号「图N」＋ 左下角「序号｜名 称」件号表</p></header><div class="sc-img"></div></article>
-        <article class="sc-card" data-slot="exploded">
-          <header><h3>整机爆炸图</h3><p>沿装配轴斜置爆炸，自动引线与附图标记</p></header><div class="sc-img"></div></article>
-        <article class="sc-card" data-slot="detail">
-          <header><h3>传动机构爆炸图</h3><p>零件太小就按尺寸拆图，13 项质量闸门把关</p></header><div class="sc-img"></div></article>
-      </div>
-
-      <h2 class="sc-title">方法专利与交付</h2>
-      <div class="sc-grid">
-        <article class="sc-card" data-slot="flow">
-          <header><h3>方法流程图</h3><p>一段文字 → S101 步骤号流程图，图号接在结构图后</p></header><div class="sc-img"></div></article>
-        <article class="sc-card" data-slot="filing">
-          <header><h3>递交版</h3><p>仅图号、无件号表；DXF / DWG / 说明书附图 Word 一并导出</p></header><div class="sc-img"></div></article>
-        <article class="sc-card text">
-          <header><h3>千问办公 · API</h3><p>MCP 与 REST 两个入口，编号仍由程序发放</p></header>
-          <ol class="tools">
-            <li><b>读结构</b><span>中文结构组与零件名</span></li>
-            <li><b>写中文名</b><span>只填空白，不覆盖人工</span></li>
-            <li><b>出图</b><span>交底版 / 递交版 + 附图说明</span></li>
-            <li><b>画流程图</b><span>JSON 或一段文字</span></li>
-          </ol>
-          <button class="btn-min" data-open="integrate">查看接入方式</button>
-        </article>
-      </div>
-    </section>
-
-    <section class="pipeline">
-      <ol>
-        <li><b>上传 STEP</b><span>Creo / SolidWorks 导出的整机装配体</span></li>
-        <li><b>AI 识别结构</b><span>代号 → 结构组与中文名</span></li>
-        <li><b>透明 · 爆炸 · 框选</b><span>看清内部，按结构挑选入图</span></li>
-        <li><b>出图 + 质量闸门</b><span>解析消隐、自动引线与附图标记</span></li>
-        <li><b>规范标注</b><span>图号「图N」＋左下角件号名称表</span></li>
-        <li><b>流程图 · 导出</b><span>S101 步骤号；DXF / DWG / Word</span></li>
+    <!-- 首跑引导条：装完第一件事做什么（WP0 §A6） -->
+    <section class="onboard" id="onboard">
+      <ol class="pipeline">
+        <li><span class="seal">01</span><b>载入 / 上传</b><span>示例或 Creo / SolidWorks 导出的 STEP</span></li>
+        <li><span class="seal">02</span><b>看懂 · 框选</b><span>结构树 ↔ 3D 联动，按机构框选入图</span></li>
+        <li><span class="seal">03</span><b>出图 · 过闸</b><span>程序发标号与版面，13 项 QA 把关</span></li>
+        <li><span class="seal">04</span><b>导出附图包</b><span>递交版 PDF + 交底版 Word</span></li>
       </ol>
+      <a class="no-step" id="no-step">我没有 STEP 怎么办？</a>
     </section>
 
     <section class="projects">
-      <div class="sec-head"><h2>工程</h2><span class="hint" id="data-dir"></span></div>
+      <div class="sec-head">
+        <h1>工程</h1>
+        <span class="hint mono" id="data-dir"></span>
+      </div>
       <div class="grid" id="grid"></div>
     </section>
   </main>
 
+  <!-- ② 新建与上传：全屏覆盖，承载拖放与分阶段时间线 -->
+  <div class="upload-scrim" id="upload" hidden>
+    <div class="upload-panel" role="dialog" aria-label="新建工程">
+      <button class="icon-btn upload-close" id="upload-close" aria-label="关闭">✕</button>
+      <div class="upload-body" id="upload-body"></div>
+    </div>
+  </div>
+
+  <!-- 「我没有 STEP」出口 -->
+  <dialog id="dlg-nostep" class="dlg">
+    <div class="dlg-body">
+      <h2 class="dlg-title"><span class="seal">?</span>我没有 STEP 怎么办</h2>
+      <p class="muted">墨线只收 STEP 装配体（.stp / .step）。主流 CAD 一句话导出：</p>
+      <ul class="howto">
+        <li><b>SolidWorks</b><span>文件 → 另存为 → 类型选 STEP AP214（.step）</span></li>
+        <li><b>Creo</b><span>文件 → 另存副本 → 类型 STEP → 实体 + 面</span></li>
+        <li><b>UG / NX</b><span>文件 → 导出 → STEP214</span></li>
+        <li><b>Inventor</b><span>导出 → CAD 格式 → STEP（AP214）</span></li>
+        <li><b>Fusion 360</b><span>文件 → 导出 → STEP（.step）</span></li>
+      </ul>
+      <p class="muted">只有 2D 图纸或照片？本版不收——它把 3D 装配体变成规范附图，不做描边。</p>
+      <div class="dlg-actions">
+        <button class="btn" id="nostep-example">先用示例跑一遍</button>
+        <button class="btn primary" onclick="this.closest('dialog').close()">我去导出 STEP</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 设置 · AI 通道 -->
   <dialog id="dlg-settings" class="dlg">
     <form method="dialog" class="dlg-body" id="form-settings">
-      <h3>设置 · 大模型通道</h3>
-      <p class="hint">大模型只做两件事：给零件起中文名、把方法描述整理成流程图语义。编号与版面一律由程序完成。</p>
+      <h2 class="dlg-title"><span class="seal">设</span>AI 通道</h2>
+      <p class="muted">AI 只做两件事：给零件起中文名、把方法描述整理成流程图语义。
+        编号与版面一律由程序完成。</p>
       <fieldset class="radio">
-        <label><input type="radio" name="provider" value="auto"> 自动（有密钥用 DeepSeek，否则用本机 CodeBuddy）</label>
+        <label><input type="radio" name="provider" value="auto" checked> 自动（有密钥用 API，否则用本机 CodeBuddy）</label>
         <label><input type="radio" name="provider" value="deepseek"> DeepSeek API</label>
-        <label><input type="radio" name="provider" value="codebuddy"> 本机 CodeBuddy · DeepSeek V3.2（备用，无需密钥）</label>
+        <label><input type="radio" name="provider" value="codebuddy"> 本机 CodeBuddy（无需密钥）</label>
       </fieldset>
       <label class="field">DeepSeek API 密钥
         <input type="password" name="api_key" autocomplete="off" placeholder="sk-…（留空则不修改）"></label>
-      <p class="hint" id="key-state"></p>
-      <label class="field">接口地址 <input name="base_url" placeholder="https://api.deepseek.com"></label>
-      <label class="field">模型 <input name="model" placeholder="deepseek-chat"></label>
-      <p class="hint">密钥保存在本机 <span class="mono">~/.config/patent-workbench/config.json</span>（仅本人可读），不会写进任何工程文件或日志，页面上只显示末 4 位。</p>
+      <p class="muted" id="key-state"></p>
       <div class="dlg-actions">
-        <button type="button" class="btn-min" data-clear-key>清除密钥</button>
-        <button type="button" class="btn-min" data-test>测试连接</button>
+        <button type="button" class="btn" data-test>测试连接</button>
         <span class="hint" id="test-result"></span>
-        <button type="button" class="btn-export" data-save>保存</button>
-        <button value="close" class="btn-min">关闭</button>
+        <button value="close" class="btn">关闭</button>
+        <button type="button" class="btn primary" data-save>保存</button>
       </div>
     </form>
   </dialog>
 
+  <!-- 接入 MCP / API（界面任何地方不得出现「千问办公」） -->
   <dialog id="dlg-integrate" class="dlg wide">
     <form method="dialog" class="dlg-body">
-      <h3>外部调用 · 千问办公 / API</h3>
+      <h2 class="dlg-title"><span class="seal">接</span>接入 MCP / API</h2>
       <div class="int-grid">
         <div>
-          <h4>千问办公（MCP）</h4>
-          <p class="hint">在千问办公「连接器 / MCP」里新增一个自定义连接器，地址填下面这行；或把 JSON 片段并进
-            <span class="mono">~/.qwenworkcn/mcp.json</span> 的 <span class="mono">mcpServers</span>。</p>
-          <div class="copy-row"><input readonly id="mcp-url" class="mono"><button type="button" class="btn-min" data-copy="mcp-url">复制</button></div>
-          <textarea readonly id="qwen-json" class="mono" rows="9"></textarea>
-          <button type="button" class="btn-min" data-copy="qwen-json">复制 JSON</button>
-          <p class="hint">可用工具：列出工程、读零件清单、写零件中文名、出图、取附图（含件号表与附图说明）、
-            AI 起草、按 JSON 画流程图、文字生成流程图。千问自己就能当「起名的人」，编号仍由程序发。</p>
-          <p class="hint warn">⚠ 这个地址只在本机可达。若千问办公的 MCP 是从云端连过来的，需要另行部署或内网穿透——那属于对外暴露服务，请先评估。</p>
+          <h3>MCP 客户端</h3>
+          <p class="muted">在 <b data-brand-slot="mcp-clients">MCP 客户端（如 Claude Code、Codex）</b>
+            里新增一个自定义连接器，地址填下面这行。</p>
+          <div class="copy-row"><input readonly id="mcp-url" class="mono" value="http://127.0.0.1:8803/mcp"><button type="button" class="btn" data-copy="mcp-url">复制</button></div>
+          <p class="muted">可用工具：列出工程、读零件清单、写零件中文名、出图（交底版 / 递交版 + 附图说明）、
+            按 JSON 或一段文字画流程图。客户端当「起名的人」，编号仍由程序发。</p>
+          <p class="muted warn">⚠ 这个地址只在本机可达。要从云端连入需另行部署或内网穿透，属对外暴露服务，请先评估。</p>
         </div>
         <div>
-          <h4>REST API</h4>
-          <p>文档（可直接试调）：<a id="docs-link" target="_blank" rel="noopener"></a></p>
-          <p class="hint">所有接口带请求头 <span class="mono">Authorization: Bearer &lt;token&gt;</span>。</p>
-          <div class="copy-row"><input readonly id="token" type="password" class="mono">
-            <button type="button" class="btn-min" data-reveal>显示</button>
-            <button type="button" class="btn-min" data-copy="token">复制</button></div>
-          <textarea readonly id="curl" class="mono" rows="8"></textarea>
-          <p class="hint">token 等同本机工作台的钥匙：别贴到公开的地方。</p>
+          <h3>REST API</h3>
+          <p class="muted">所有接口带请求头 <span class="mono">Authorization: Bearer &lt;token&gt;</span>。</p>
+          <textarea readonly class="mono" rows="7"># 列出工程
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8803/v1/projects
+
+# 提交渲染作业（异步，返回 job_id）
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8803/v1/projects/&lt;id&gt;/render</textarea>
+          <p class="muted">token 等同本机工作台的钥匙：别贴到公开的地方。</p>
         </div>
       </div>
-      <div class="dlg-actions"><button value="close" class="btn-min">关闭</button></div>
+      <div class="dlg-actions"><button value="close" class="btn">关闭</button></div>
     </form>
   </dialog>
+
+  <!-- 命令 / 搜索面板（F5-lite：轻量，不是全套 ⌘K） -->
+  <div class="cmdk-scrim" id="cmdk" hidden>
+    <div class="cmdk-panel" role="dialog" aria-label="搜索与命令">
+      <input id="cmdk-input" class="cmdk-input" placeholder="搜索工程，或输入命令…" autocomplete="off">
+      <ul class="cmdk-list" id="cmdk-list"></ul>
+      <div class="cmdk-foot"><kbd>↑</kbd><kbd>↓</kbd> 选择 · <kbd>↵</kbd> 打开 · <kbd>Esc</kbd> 关闭</div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
 
   <script type="module" src="/static/js/home.js"></script>
 </body>
