@@ -178,6 +178,36 @@ def test_interrupted_job_keeps_event_sequence_for_replay(tmp_path):
     assert fresh[-1]["id"] > last_seen
 
 
+def test_concurrent_saves_keep_terminal_state(tmp_path):
+    """R1b #10: snapshotting inside the save lock totally orders writes, so a late older
+    snapshot can never roll a terminal job back to running on disk."""
+    import threading
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("render", "p")
+
+    def spam_emit():
+        for _ in range(60):
+            job.emit(J.EV_LOG, "tick")
+
+    def finish():
+        job._set_state(J.RUNNING)
+        for _ in range(30):
+            job.emit(J.EV_PROGRESS, None, progress=0.5)
+        job.result = {"ok": True}
+        job._set_state(J.SUCCEEDED)
+        job.emit(J.EV_DONE, job.result, stage=J.SUCCEEDED, progress=1.0)
+
+    t1 = threading.Thread(target=spam_emit)
+    t2 = threading.Thread(target=finish)
+    t1.start(); t2.start(); t1.join(); t2.join()
+    # final persisted state must be the terminal one, with monotonic event ids preserved
+    store2 = J.JobStore(tmp_path)
+    rec = store2.get(job.id)
+    assert rec.state == J.SUCCEEDED
+    ids = [e["id"] for e in rec.events]
+    assert ids == sorted(ids) and len(ids) == len(set(ids))
+
+
 def test_sse_frame_format(tmp_path):
     store = J.JobStore(tmp_path)
     job, _ = store.create("render", "p")

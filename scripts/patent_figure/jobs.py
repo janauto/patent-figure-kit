@@ -183,8 +183,11 @@ class JobStore:
         corrupt. The full event log is persisted (R1 #10)."""
         if self.root is None:
             return
-        payload = json.dumps(job.to_disk(), ensure_ascii=False, indent=1)
         with self._save_lock:
+            # Snapshot INSIDE the save lock (R1b #10): this totally orders writes, so every
+            # persisted state is at least as fresh as the previous one — a concurrent older
+            # snapshot can never land after a newer one and roll the on-disk state back.
+            payload = json.dumps(job.to_disk(), ensure_ascii=False, indent=1)
             self._seq += 1
             tmp = self._path(job.id).with_name(
                 "%s.%d.%d.%s.tmp" % (job.id, os.getpid(), self._seq, os.urandom(4).hex()))

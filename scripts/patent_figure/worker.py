@@ -136,23 +136,35 @@ class Worker:
         self._lock = threading.Lock()
         self._abort_lock = threading.Lock()
         self._current_token: Optional[str] = None
+        self._cancelled: set = set()
+        self._fallback: Dict[str, subprocess.Popen] = {}
         self.rebuilds = 0
 
     def abort_if_running(self, token: str) -> bool:
-        """Kill the child iff it is currently running the job identified by ``token`` (R1 #6).
-
-        Safe to call from another thread while ``run`` is blocked: it does not take the main
-        lock, and killing the child makes the in-flight ``run`` return a non-zero result. The
-        next ``run`` rebuilds the worker. Returns True if a kill was issued."""
+        """Cancel the job identified by ``token`` across all three stages (R1b #9): mark it
+        cancelled (so a job still waiting on ``_lock`` aborts the moment it enters ``run``),
+        kill the worker child if it is currently running that token, and terminate a
+        subprocess-fallback for that token. Safe to call from another thread. Returns True if a
+        process was actually killed."""
         with self._abort_lock:
+            self._cancelled.add(token)
             proc = self._proc if self._current_token == token else None
-        if proc is None:
+            fb = self._fallback.get(token)
+        killed = False
+        for p in (proc, fb):
+            if p is not None:
+                try:
+                    p.kill()
+                    killed = True
+                except Exception:
+                    pass
+        return killed
+
+    def _is_cancelled(self, token: Optional[str]) -> bool:
+        if token is None:
             return False
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return True
+        with self._abort_lock:
+            return token in self._cancelled
 
     # -- lifecycle -----------------------------------------------------------
     def _spawn(self) -> None:
@@ -228,15 +240,23 @@ class Worker:
         argv = [str(a) for a in args]
         basename = Path(argv[0]).name if argv else ""
         limit = float(timeout) if timeout else self.time_limit_s
+        # (A) cancelled before we even start — do not run (R1b #9).
+        if self._is_cancelled(token):
+            return subprocess.CompletedProcess(argv, 125, "", "worker: 任务在启动前已取消")
         if basename not in DISPATCH:
-            return self._subprocess(argv, limit)
+            return self._subprocess(argv, limit, token=token)
 
         with self._lock:
+            # (B) cancelled while waiting for the worker lock (the gap Codex named): the job
+            # held no token yet, so abort_if_running could not reach it — re-check now.
+            if self._is_cancelled(token):
+                return subprocess.CompletedProcess(argv, 125, "", "worker: 任务在排队时被取消")
             try:
                 self._ensure()
             except WorkerError as exc:
                 # Could not get a worker at all — degrade to a subprocess rather than fail.
-                return self._subprocess(argv, limit, note="worker 不可用，回退子进程：%s" % exc)
+                return self._subprocess(argv, limit, note="worker 不可用，回退子进程：%s" % exc,
+                                        token=token)
             assert self._proc is not None and self._queue is not None
             with self._abort_lock:
                 self._current_token = token
@@ -270,11 +290,31 @@ class Worker:
             argv, int(resp.get("rc", 1)), resp.get("stdout", ""), resp.get("stderr", ""))
 
     def _subprocess(self, argv: List[str], timeout: float,
-                    note: str = "") -> subprocess.CompletedProcess:
+                    note: str = "", token: Optional[str] = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env.update(THREAD_ENV)
-        proc = subprocess.run([self.python] + argv, capture_output=True, text=True,
-                              timeout=timeout, cwd=str(self.repo), env=env)
+        if token is None:
+            proc = subprocess.run([self.python] + argv, capture_output=True, text=True,
+                                  timeout=timeout, cwd=str(self.repo), env=env)
+        else:
+            # Keep a killable handle so abort_if_running(token) can terminate the fallback too.
+            popen = subprocess.Popen([self.python] + argv, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, cwd=str(self.repo),
+                                     env=env)
+            with self._abort_lock:
+                self._fallback[token] = popen
+                cancelled = token in self._cancelled
+            if cancelled:
+                try:
+                    popen.kill()
+                except Exception:
+                    pass
+            try:
+                out, err = popen.communicate(timeout=timeout)
+            finally:
+                with self._abort_lock:
+                    self._fallback.pop(token, None)
+            proc = subprocess.CompletedProcess(argv, popen.returncode, out, err)
         if note:
             proc = subprocess.CompletedProcess(
                 proc.args, proc.returncode, proc.stdout, (proc.stderr or "") + "\n" + note)

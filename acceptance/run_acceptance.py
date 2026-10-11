@@ -501,7 +501,16 @@ def n15(ctx):
         assert rs.returncode == 0 and dig(s) == cli_dig, "失败后下一次成功渲染被污染"
     finally:
         worker.close()
-    return "CLI==worker 摘要一致；A→B→A 与 失败→成功 序列稳定（OCP 仅导入一次）"
+
+    # Also verify the PFK_WORKER=0 fallback mode renders the same摘要 (completion standard).
+    import os as _os
+    fb = tmp / "n15_fallback"
+    env = dict(_os.environ); env["PFK_WORKER"] = "0"
+    pf = subprocess.run([PY, RP, str(ctx["plan"]), "--assembly", str(ctx["assembly"]),
+                         "-o", str(fb)], capture_output=True, text=True, cwd=str(REPO), env=env)
+    assert pf.returncode == 0, "PFK_WORKER=0 回退渲染失败"
+    assert dig(fb) == cli_dig, "PFK_WORKER=0 回退摘要与 CLI 不一致"
+    return "CLI==worker==PFK_WORKER=0 摘要一致；A→B→A 与 失败→成功 序列稳定（OCP 仅导入一次）"
 
 
 @node("N16", "过闸后原子发布 · 失败件不得进输出目录")

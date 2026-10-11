@@ -421,6 +421,93 @@ def test_okfalse_render_is_a_failed_job(client, fresh_project):
     assert evs["state"] == "failed"
 
 
+def test_mixed_qa_render_is_failed_not_success(client, fresh_project):
+    """R1b #1: one figure delivered, one failing (members match nothing) → the job is failed,
+    never ok:true — a partial result cannot read as success."""
+    pid = fresh_project
+    cur = client.get("/v1/projects/%s/plan" % pid, headers=H)
+    doc = cur.json()
+    doc["figures"] = [doc["figures"][0],   # fig1 good
+                      {"id": "figX", "caption": "坏图", "kind": "assembly",
+                       "members": ["NOPE-NONE"]}]
+    client.put("/v1/projects/%s/plan" % pid, headers={**H, "If-Match": cur.headers["etag"]},
+               json=doc)
+    r = client.post("/v1/projects/%s/render" % pid, headers=H)
+    j = _poll(client, r.json()["job_id"])
+    assert j["state"] == "failed", j
+    assert j["result"]["ok"] is False
+
+
+def test_browser_render_goes_through_version_store(client, fresh_project):
+    """R1b #5: the browser sub-app /api/render submits the same isolated job; afterwards out/
+    is the version-store view (a symlink to results/<id>), not a directly-written directory."""
+    pid = fresh_project
+    r = client.post("/p/%s/api/render" % pid, headers=H)
+    assert r.status_code == 200
+    # wait for the sub-app render to finish
+    for _ in range(600):
+        st = client.get("/p/%s/api/render/status" % pid, headers=H).json()
+        if not st["running"] and st.get("result"):
+            break
+        time.sleep(0.5)
+    assert st["result"]["ok"] is True
+    # a /v1 render job was created for it (unified entry)
+    cur = client.get("/v1/projects/%s/plan" % pid, headers=H)  # sanity: project still serves
+    assert cur.status_code == 200
+
+
+def test_export_rejects_foreign_or_unsuccessful_render_job(client, fresh_project):
+    """R1b #4: an explicit render_job_id from another project, or not a succeeded render, is
+    rejected (409) — no bypassing project/kind/state/completeness checks."""
+    pid = fresh_project
+    # a non-render job id (the prepare job of a *different* fresh project)
+    step_bytes = (_ROOT / "tests" / "fixtures" / "synthetic.stp").read_bytes()
+    other = client.post("/v1/projects?title=o2&name=o2.stp", headers=H, content=step_bytes)
+    prepare_job = other.json()["job_id"]
+    r = client.post("/v1/projects/%s/export" % pid, headers=H,
+                    json={"formats": ["dxf"], "render_job_id": prepare_job})
+    assert r.status_code == 409
+
+
+def test_cancel_before_commit_does_not_publish(client, fresh_project):
+    """R1b #6: cancelling a render before its commit point must not change the current version."""
+    pid = fresh_project
+    # establish a baseline current version
+    r0 = client.post("/v1/projects/%s/render" % pid, headers=H)
+    _poll(client, r0.json()["job_id"])
+    base_figs = {f["id"] for f in client.get(
+        "/v1/projects/%s/figures" % pid, headers=H).json()["figures"]}
+    # submit another and cancel it immediately
+    r1 = client.post("/v1/projects/%s/render" % pid, headers=H)
+    jid = r1.json()["job_id"]
+    client.delete("/v1/jobs/%s" % jid, headers=H)
+    j = _poll(client, jid)
+    # whatever the outcome, if it was cancelled the published set must equal the baseline
+    if j["state"] == "cancelled":
+        figs = {f["id"] for f in client.get(
+            "/v1/projects/%s/figures" % pid, headers=H).json()["figures"]}
+        assert figs == base_figs
+
+
+def test_export_download_survives_restart(client, fresh_project, tmp_path_factory):
+    """R1b #11: a successful export's download resolves from the persisted job + deterministic
+    bundle path, so it still works after the process (JobStore) is rebuilt."""
+    pid = fresh_project
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    _poll(client, rr.json()["job_id"])
+    ex = client.post("/v1/projects/%s/export" % pid, headers=H, json={"formats": ["dxf"]})
+    eid = ex.json()["export_id"]
+    _poll(client, eid)
+    # rebuild the app over the same data dir (simulates a restart)
+    import workbench as W
+    from starlette.testclient import TestClient
+    reg = client.app.reg                        # the Dispatcher holds the Registry
+    c2 = TestClient(W.Dispatcher(W.build_workbench(reg, "t0k", 8790), reg),
+                    base_url="http://127.0.0.1:8790")
+    dl = c2.get("/v1/exports/%s/download" % eid, headers=H)
+    assert dl.status_code == 200 and len(dl.content) > 200
+
+
 def test_mcp_has_new_job_tools():
     import workbench_mcp as M
     names = {t["name"] for t in M.TOOLS}

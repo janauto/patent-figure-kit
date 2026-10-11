@@ -15,7 +15,10 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
+
+RENDER_CLI = Path(__file__).resolve().parent / "render_patent_figure.py"
 
 SCRIPTS = Path(__file__).resolve().parent
 ANNOTATE_CLI = SCRIPTS / "annotate_figure_sheet.py"
@@ -45,6 +48,57 @@ def _dump(path: Path, data) -> None:
 # --------------------------------------------------------------------------- #
 # 结构附图：出图后自动出交底版 / 递交版                                          #
 # --------------------------------------------------------------------------- #
+
+def render_version(vd: Path, plan_path: Path, assembly_path: Path, cache: Path,
+                   run_cli: Callable, svg_of: Callable) -> tuple:
+    """Render + annotate **into an immutable version directory** ``vd`` and build the result +
+    manifest, WITHOUT publishing (the caller commits under the state lock). Shared by the
+    workbench job and the plan_studio sub-app so there is exactly one render path (R1b #5).
+
+    Success is decided from the renderer's own ``--json`` report, not a directory scan: a figure
+    counts as delivered only if the report marks it ``gate_pass``; ``ok`` requires the process to
+    exit 0, the report to pass, and **every** figure the frozen plan expects to be delivered
+    (R1b #1 — a partial failure can no longer read as success)."""
+    report_path = vd / "render-report.json"
+    proc = run_cli([str(RENDER_CLI), str(plan_path), "--assembly", str(assembly_path),
+                    "-o", str(vd), "--cache", str(cache), "--json", str(report_path)])
+    log = ((proc.stdout or "")[-6000:] + "\n" + (proc.stderr or "")[-2000:]).strip()
+    report = _load(report_path, {}) or {}
+    plan = _load(plan_path, {}) or {}
+    expected = [str(f.get("id")) for f in plan.get("figures", []) if isinstance(f, dict)]
+    delivered = [str(f.get("id")) for f in report.get("figures", []) if f.get("gate_pass")]
+    ok = (proc.returncode == 0 and bool(report.get("pass"))
+          and bool(expected) and set(expected) == set(delivered))
+
+    result: dict = {"figures": [], "ok": ok, "numerals": None, "log": log,
+                    "render_report": {"pass": bool(report.get("pass")),
+                                      "returncode": proc.returncode,
+                                      "errors": report.get("errors", [])}}
+    numerals_file = vd / "reference-numerals.json"
+    if numerals_file.is_file():
+        result["numerals"] = _load(numerals_file, {})
+    for dxf in sorted(vd.glob("*.dxf")):            # only delivered figs land in vd root
+        fid = dxf.stem
+        if fid.endswith(("_annotated", "_filing", "_engineering")):
+            continue
+        (vd / (fid + ".svg")).write_text(svg_of(dxf), encoding="utf-8")
+        qa_file = vd / (fid + ".qa.json")
+        qa = _load(qa_file) if qa_file.is_file() else None
+        result["figures"].append({"id": fid, "pass": bool(qa and qa.get("pass")),
+                                  "qa": qa, "svg": "/api/preview/%s.svg" % fid})
+    present = {f["id"] for f in result["figures"]}
+    for fid in expected:                            # make expected-but-missing visible as failed
+        if fid not in present:
+            result["figures"].append({"id": fid, "pass": False, "qa": None, "svg": None,
+                                      "missing": True})
+    if any(f["pass"] for f in result["figures"]):
+        annotate_all(SimpleNamespace(plan=plan_path, out=vd, root=vd), run_cli, svg_of, result)
+    manifest = {"ok": ok, "expected": expected, "delivered": delivered,
+                "figures": [{"id": f["id"], "pass": bool(f["pass"]),
+                             "variants": sorted((f.get("variants") or {}).keys())}
+                            for f in result["figures"]]}
+    return ok, result, manifest
+
 
 def ensure_preview_png(png_path: Path, dpi: int = EXPORT_PNG_DPI) -> bool:
     """Lazily render a missing PNG from its sibling DXF (WP1-5).

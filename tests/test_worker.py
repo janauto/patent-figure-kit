@@ -142,6 +142,29 @@ def test_snapshot_inputs_hashes(prepared):
     assert W.snapshot_inputs(prepared["plan"]) == snap
 
 
+def test_cancel_while_queued_aborts_before_running(prepared):
+    """R1b #9: a job cancelled while it is still waiting for the worker lock must abort the
+    moment it enters run() (the pre-lock-wait gap), not render."""
+    w = W.Worker()
+    try:
+        import threading
+        # occupy the worker with a long-ish render so the next call queues on _lock
+        busy = threading.Thread(target=lambda: w.run(
+            [RP, str(prepared["plan"]), "--assembly", str(prepared["asm"]),
+             "-o", str(prepared["work"] / "busy")], token="busy"))
+        busy.start()
+        # cancel 'queued' before submitting it
+        w.abort_if_running("queued")
+        res = w.run([RP, str(prepared["plan"]), "--assembly", str(prepared["asm"]),
+                     "-o", str(prepared["work"] / "queued")], token="queued")
+        assert res.returncode == 125, res.stderr      # aborted, never rendered
+        assert not (prepared["work"] / "queued").exists() or \
+            not list((prepared["work"] / "queued").glob("*.dxf"))
+        busy.join(timeout=60)
+    finally:
+        w.close()
+
+
 def test_abort_if_running_kills_the_tagged_render(prepared):
     """R1 #6: a render tagged with a token can be aborted mid-flight from another thread; the
     in-flight run returns non-zero, and the worker stays usable afterwards."""

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import re
 import secrets
 import shutil
@@ -138,8 +139,8 @@ def prepare(ws: Workspace, quiet: bool = False) -> None:
             raise SystemExit("GLB 导出失败，无法启动 Studio")
     if not ws.plan.is_file():
         say("· plan：生成空白计划（零件清单来自 assembly.json）…")
-        ws.plan.write_text(json.dumps(blank_plan(ws), ensure_ascii=False, indent=2),
-                           encoding="utf-8")
+        from patent_figure import project_io as _pio
+        _pio.atomic_write_json(ws.plan, blank_plan(ws))   # R1b #8: one plan-write entry
     ws.remember()
 
 
@@ -387,7 +388,13 @@ async def _run_sync(fn):
     return await run_in_threadpool(fn)
 
 
-def build_app(ws: Workspace, token: str, home_url: str | None = None) -> FastAPI:
+def build_app(ws: Workspace, token: str, home_url: str | None = None,
+              render_service=None) -> FastAPI:
+    """``render_service`` (optional): a late-bound ``Callable[[bool], Optional[dict]]`` the
+    workbench injects so this sub-app's /api/render submits the *same* isolated job as REST/MCP
+    (R1b #5). It returns the render result, or None to fall back to the local version-store
+    render (standalone plan_studio). Either way, nothing ever deletes or writes ``ws.out``
+    directly: both paths go through the immutable version store + atomic current pointer."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     render_lock = threading.Lock()
     structure_lock = threading.Lock()
@@ -494,21 +501,26 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None) -> FastAPI
         assembly = load_json(ws.assembly)
         names = [p["name"] for p in assembly.get("parts", [])]
         matched = match_bom_to_parts(bom, names)
-        plan = load_json(ws.plan)
-        ws.snapshot_plan()
-        filled, kept = [], []
-        by_selector = {t.get("selector"): t for t in plan.get("terms", [])}
-        for part, hit in matched.items():
-            row = by_selector.get(part)
-            if row is None:
-                continue
-            if (row.get("term") or "").strip():
-                kept.append(part)          # 人已填的绝不覆盖
-            else:
-                row["term"] = hit["name"]
-                filled.append(part)
         from patent_figure import project_io as _pio
-        _pio.atomic_write_json(ws.plan, plan)     # WP1 R1 #3/#9: atomic, crash-safe write
+        filled, kept = [], []
+
+        def _mutate(plan):
+            # R1b #8: the whole read-modify-write runs inside project_io.update_plan's plan
+            # lock, so a concurrent MCP update_terms / REST PUT cannot be overwritten by a stale
+            # BOM copy.
+            by_selector = {t.get("selector"): t for t in plan.get("terms", [])}
+            for part, hit in matched.items():
+                row = by_selector.get(part)
+                if row is None:
+                    continue
+                if (row.get("term") or "").strip():
+                    kept.append(part)          # 人已填的绝不覆盖
+                else:
+                    row["term"] = hit["name"]
+                    filled.append(part)
+            return plan
+
+        plan = _pio.update_plan(ws.plan, _mutate, snapshot_cb=ws.snapshot_plan)
         (ws.root / "bom.json").write_text(
             json.dumps({"file": filename, "rows": len(bom), "matched": matched},
                        ensure_ascii=False, indent=2), encoding="utf-8")
@@ -532,45 +544,53 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None) -> FastAPI
             entry["parts"] = sorted(n for n in part_names
                                     if fnmatch.fnmatchcase(n, selector))
 
-    def render_job() -> None:
-        result: dict = {"figures": [], "ok": False, "log": "", "numerals": None,
-                        "finished": None}
+    def _local_render() -> dict:
+        """Version-store render (standalone plan_studio, no workbench job layer). Mirrors the
+        workbench isolated job: freeze → render into an immutable version dir → seal → publish
+        via current.json under the state lock. Never deletes or writes ws.out directly."""
+        from patent_figure import versions as _VS
+        from patent_figure import project_io as _pio
+        result: dict = {"figures": [], "ok": False, "log": "", "numerals": None}
+        vs = _VS.VersionStore(ws.root)
+        rid = "local-" + time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
         try:
-            if ws.out.is_dir():
-                shutil.rmtree(ws.out)
             check = validate_now()
             if not check["ok"]:
                 result["log"] = "计划未通过校验，未渲染。"
                 result["validate"] = check
-                return
-            proc = run_cli([str(SCRIPTS / "render_patent_figure.py"), str(ws.plan),
-                           "--assembly", str(ws.assembly), "-o", str(ws.out),
-                           "--cache", str(ws.cache)])
-            result["log"] = (proc.stdout[-6000:] + "\n" + proc.stderr[-2000:]).strip()
-            result["ok"] = proc.returncode == 0
+                return result
+            with _pio.plan_lock(ws.plan):
+                vd = vs.begin(rid)
+                shutil.copy2(ws.plan, vd / "inputs" / "plan.json")
+                shutil.copy2(ws.assembly, vd / "inputs" / "assembly.json")
+            ok, result, manifest = studio_ext.render_version(
+                vd, vd / "inputs" / "plan.json", vd / "inputs" / "assembly.json",
+                ws.cache, run_cli, dxf_to_svg)
+            manifest["render_job_id"] = rid
+            vs.write_manifest(rid, manifest)
+            with _VS.state_lock(ws.root):
+                vs.publish(rid)
             part_names = [p["name"] for p in load_json(ws.assembly).get("parts", [])]
-            numerals_file = ws.out / "reference-numerals.json"
-            if numerals_file.is_file():
-                result["numerals"] = load_json(numerals_file)
+            if result.get("numerals"):
                 resolve_numeral_parts(result["numerals"], part_names)
-            for dxf in sorted(ws.out.glob("*.dxf")):
-                fig_id = dxf.stem
-                if fig_id.endswith(("_annotated", "_filing", "_engineering")):
-                    continue
-                (ws.out / (fig_id + ".svg")).write_text(dxf_to_svg(dxf), encoding="utf-8")
-                qa_file = ws.out / (fig_id + ".qa.json")
-                qa = load_json(qa_file) if qa_file.is_file() else None
-                result["figures"].append({
-                    "id": fig_id,
-                    "pass": bool(qa and qa.get("pass")),
-                    "qa": qa,
-                    "svg": "/api/preview/%s.svg" % fig_id,
-                })
-            if any(f["pass"] for f in result["figures"]):
-                studio_ext.annotate_all(ws, run_cli, dxf_to_svg, result)
         except Exception as exc:  # surfaced to the UI, never swallowed
+            result.setdefault("log", "")
             result["log"] += "\n渲染进程异常：%r" % exc
+        return result
+
+    def render_job() -> None:
+        try:
+            # Unified entry: prefer the injected workbench job (R1b #5); else render locally.
+            result = None
+            if render_service is not None:
+                try:
+                    result = render_service(True)
+                except Exception as exc:
+                    result = {"figures": [], "ok": False, "log": "作业服务异常：%r" % exc}
+            if result is None:
+                result = _local_render()
         finally:
+            result = result or {"figures": [], "ok": False}
             result["finished"] = time.strftime("%H:%M:%S")
             result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             try:   # 落盘：重启后首页轮播与外部 API 仍能取到最近一次结果

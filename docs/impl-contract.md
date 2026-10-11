@@ -2046,3 +2046,26 @@ produced the bogus "jsonschema missing" reading on the first pass.
 - MCP 配置生成改为 Header 方案（`headers.Authorization: Bearer <token>`），`?token=` 旧配置
   保留一个版本 + 迁移说明（`/api/wb/settings` 的 `mcp_migration_note`）。
 - MCP 新增工具 `submit_render / get_job / cancel_job / get_export`（异步出图/导出 + 查询/取消）。
+
+### 13.5 发布模型（WP1 R1b 重做）
+
+渲染产物采用**不可变版本目录 + 当前版本指针**模型，`out/` 不再是写入目标：
+
+- 每次渲染写入 `studio/results/<render_job_id>/`（图、reference-numerals、标注版、qa 报告、
+  `inputs/` 冻结快照与哈希、`manifest.json`）。`manifest.json` 的 `complete: true` 是唯一完成标记。
+- `studio/current.json` 是**当前版本指针**（单文件原子替换），内容 `{render_job_id}`。替换它
+  就是**提交点**，与取消共享同一把 `versions.state_lock(ws_root)`：提交点之前取消→不发布、版本
+  标 cancelled；提交点之后→返回已提交。`publish()` 拒绝指向未完成版本——指针永远指向完整版本。
+- `out/` 只是**当前版本的视图**：POSIX 下为指向 `results/<id>` 的相对符号链接（原子替换），
+  Windows 下为同步拷贝。所有既有 `ws.out` 读者（REST figures、MCP、文件服务、导出、浏览器
+  `/api/*`）通过它解析到版本目录，无需改动。版本目录**除派生栅格（按需从 DXF 生成的预览 PNG，
+  不进 manifest）外不可变**。
+- **崩溃恢复**：启动时 `VersionStore.recover()` 从 `current.json` 重建 `out/` 视图；未写完
+  `manifest.json` 的版本目录视为 interrupted（其作业由 JobStore 另行标 interrupted）。
+- **统一入口**：浏览器 `/api/render`、MCP `render_project`、REST `/v1/.../render` 都提交同一种
+  隔离作业（`plan_studio.build_app(render_service=...)` 注入；独立运行时回退本地版本库渲染）；
+  同步接口只等待作业；**没有任何路径直接删除或写入共享 `out/`**。
+- **成功判定**：从渲染器 `--json` 报告逐图核对冻结 plan 的预期图集——`ok = 退出码 0 且 report.pass
+  且 预期图集 == 交付(gate_pass)图集`；任何缺失/失败即作业 failed（不得 ok:true）。
+- **导出**绑定一次成功渲染的 `render_job_id`，校验同工程、kind=render、state=succeeded、manifest
+  完整后只读该版本目录；清单按图号×版本×格式逐项 ok/skip/fail。
