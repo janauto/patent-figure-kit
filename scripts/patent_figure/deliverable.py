@@ -224,19 +224,23 @@ def write_pdf(pages: Sequence[Page], path: Path, title: str = "说明书附图")
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
     pw, ph = PAGE_MM
-    with PdfPages(str(tmp), metadata={"Title": title, "Creator": "patent-figure-kit",
-                                      "Producer": "patent-figure-kit", "CreationDate": None,
-                                      "ModDate": None}) as pdf:
-        for page in pages:
-            pl = page.placement
-            fig = Figure(figsize=(pw / 25.4, ph / 25.4), dpi=72)
-            ax = fig.add_axes([pl["x"] / pw, (ph - pl["top"] - pl["h"]) / ph,
-                               pl["w"] / pw, pl["h"] / ph])
-            ax.set_axis_off()
-            ax.imshow(page.gray, cmap="gray", vmin=0, vmax=255, interpolation="none",
-                      aspect="auto")
-            pdf.savefig(fig)
-    tmp.replace(path)
+    try:
+        with PdfPages(str(tmp), metadata={"Title": title, "Creator": "patent-figure-kit",
+                                          "Producer": "patent-figure-kit", "CreationDate": None,
+                                          "ModDate": None}) as pdf:
+            for page in pages:
+                pl = page.placement
+                fig = Figure(figsize=(pw / 25.4, ph / 25.4), dpi=72)
+                ax = fig.add_axes([pl["x"] / pw, (ph - pl["top"] - pl["h"]) / ph,
+                                   pl["w"] / pw, pl["h"] / ph])
+                ax.set_axis_off()
+                ax.imshow(page.gray, cmap="gray", vmin=0, vmax=255, interpolation="none",
+                          aspect="auto")
+                pdf.savefig(fig)
+        tmp.replace(path)
+    finally:                                  # a failed write never leaves a .tmp in the bundle
+        if tmp.exists():
+            tmp.unlink()
     return path
 
 
@@ -278,6 +282,10 @@ def write_docx(pages: Sequence[Page], path: Path, title: str = "说明书附图"
     doc.core_properties.title = title
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
-    doc.save(str(tmp))
-    tmp.replace(path)
+    try:
+        doc.save(str(tmp))
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return path

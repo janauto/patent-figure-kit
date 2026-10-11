@@ -264,9 +264,12 @@ def check_docx(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dic
     from PIL import Image
     path = Path(path)
     try:
-        zf = zipfile.ZipFile(str(path))
-        root = ET.fromstring(zf.read("word/document.xml"))
-        rels = ET.fromstring(zf.read("word/_rels/document.xml.rels"))
+        with zipfile.ZipFile(str(path)) as zf:          # read-only; everything read up front
+            parts = {n: zf.read(n) for n in zf.namelist()
+                     if n in ("word/document.xml", "word/_rels/document.xml.rels")
+                     or n.startswith("word/media/")}
+        root = ET.fromstring(parts["word/document.xml"])
+        rels = ET.fromstring(parts["word/_rels/document.xml.rels"])
     except Exception as exc:
         return _report(path, "docx", sources, [], ["Word 读不了：%s" % exc], -1)
     rel_target = {r.get("Id"): r.get("Target") for r in rels.iter(_q(_PKG_REL, "Relationship"))}
@@ -323,7 +326,7 @@ def check_docx(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dic
         else:
             name = target if target.startswith("word/") else "word/" + target.lstrip("/")
             try:
-                with Image.open(io.BytesIO(zf.read(name))) as im:
+                with Image.open(io.BytesIO(parts[name])) as im:
                     gray = np.asarray(im.convert("L"))
             except Exception as exc:
                 extra.append("第 %d 页图片解不开：%s" % (k, exc))
