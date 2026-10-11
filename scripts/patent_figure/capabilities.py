@@ -48,6 +48,7 @@ def export_capabilities() -> Dict[str, Any]:
         "pdf_available": True,
         "pdf_check_available": pdf_check,
         "pdf_render_check_available": _C.render_checker_available(),
+        "pdf_renderer": _C.render_backend(),
         "docx_available": docx_ok,
         "dwg_available": route is not None,
         "dwg_route": route,

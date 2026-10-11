@@ -422,18 +422,26 @@ def check_deliverable() -> dict:
 
 
 def check_deliverable_render() -> dict:
-    """可选的第二道核验（WP2 R2f）：装了 PyMuPDF（import 名 fitz）时，导出包 PDF 每页会被独立渲染，
-    在图号位置统计看得见的墨迹；没装时报告标 render_check="unavailable"，其余核验照常。
-    注意 PyMuPDF 是 AGPL 许可，按需自行安装，本工具不把它列为依赖。"""
+    """可选的第二道核验（WP2 R2f/R2g）：导出包 PDF 每页用独立渲染器渲染，在图号位置统计看得见的墨迹。
+    推荐 pypdfium2（BSD-3-Clause / Apache-2.0）；PyMuPDF 是 AGPL 许可，**不推荐**，只在已经装了时作为备选。
+    两者都没有时报告标 render_check="unavailable"——核心核验（固定结构 + 像素）不依赖任何渲染器。"""
+    try:
+        import pypdfium2  # noqa: F401
+        return _check("deliverable-pdf-render", STATUS_OK,
+                      "pypdfium2 %s（BSD/Apache）—— 导出包 PDF 逐页独立渲染核验图号可见"
+                      % (_dist_version("pypdfium2") or "?"), required=False)
+    except Exception as exc:  # noqa: BLE001
+        reason = _import_error(exc)
     try:
         import fitz  # noqa: F401
         return _check("deliverable-pdf-render", STATUS_OK,
-                      "PyMuPDF 可用 —— 导出包 PDF 逐页独立渲染核验图号可见", required=False)
-    except Exception as exc:  # noqa: BLE001
-        return _check("deliverable-pdf-render", STATUS_MISSING,
-                      "缺 PyMuPDF（%s）—— PDF 仍按固定结构逐页核验，只是少了独立渲染这一道"
-                      % _import_error(exc), "python3 -m pip install pymupdf（AGPL 许可，按需安装）",
-                      required=False)
+                      "未装推荐的 pypdfium2；已装的 PyMuPDF（AGPL 许可，不推荐）将作为备选渲染器",
+                      "python3 -m pip install pypdfium2", required=False)
+    except Exception:  # noqa: BLE001
+        pass
+    return _check("deliverable-pdf-render", STATUS_MISSING,
+                  "缺 pypdfium2（%s）—— PDF 仍按固定结构逐页核验，只是少了独立渲染这一道" % reason,
+                  "python3 -m pip install pypdfium2（BSD/Apache 许可）", required=False)
 
 
 def run_checks() -> dict:

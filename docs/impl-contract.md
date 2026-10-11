@@ -2465,5 +2465,16 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   页面对象键恰为 Type/Parent/Resources/MediaBox/Contents/Annots（无 CropBox/Group/Rotate）、注释为空、MediaBox 为 A4、
   内容流为单个 Flate 流；资源键固定，Font/Pattern/Shading 为空，XObject 恰为 `/I1…/In`，ExtGState 恰为 `/A1`
   {Type, CA=1, ca=1}。
-- **独立渲染（可选）**：装了 PyMuPDF（AGPL，不列为依赖，doctor `deliverable-pdf-render` 提示）时逐页渲染，在图号位置与
+- **独立渲染（可选）**：有独立渲染器时（修复轮 7 起推荐 pypdfium2，见 §14.14；PyMuPDF 为 AGPL 仅备选）逐页渲染，在图号位置与
   图片区域统计看得见的墨迹，`render_check: "pymupdf"`、`render_caption_ink`；没装则 `render_check: "unavailable"`。
+
+### 14.14 修复轮 7（Codex R2g）收敛：页树按引用、操作数按原生类型、渲染器许可
+
+- **页树按间接引用核对**：目录 `/Pages` 必须是间接引用；根节点只有 Type/Kids/Count（CropBox / Rotate / MediaBox 等可被继承的
+  键一律拒绝）；`/Kids` 是互不相同的页面间接引用、`/Count` 相符；每个页面**原始** `/Parent` 引用必须严格等于目录的 `/Pages`
+  引用（离树父对象无法再下传未检查的裁切 / 旋转）；pypdf 实际迭代的页面序列必须与 `/Kids` 逐一相同。
+- **操作数按 PDF 原生类型**：数值操作数只接受有限的 `NumberObject` / `FloatObject`，名称操作数只接受 `NameObject`；
+  `(1)` 这类字符串不再被 `float()` 当成数——内容流比对与 `_pdf_images` 几何复核都按此。
+- **独立渲染器许可**：第二道渲染核验推荐 **pypdfium2**（BSD-3-Clause / Apache-2.0，doctor `deliverable-pdf-render`、
+  requirements 可选段）；PyMuPDF 为 **AGPL**，不推荐，只在已安装时作为备选；`PFK_PDF_RENDERER=auto|none|pypdfium2|pymupdf`。
+  核心核验不依赖任何渲染器；PDF 封闭集回归在「无渲染器」与「pypdfium2」两种配置下各跑一遍。

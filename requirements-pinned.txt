@@ -31,3 +31,6 @@ pytest==8.4.2
 #   python-docx        旧界面辅助；导出包的「说明书附图」Word 自 WP2 起由内置固定模板写出，不再需要它
 #   pypdf              导出包 PDF 的逐页核验（F1）；缺它 PDF 能生成但会被如实报「无法核验 → 不通过」
 #                      安装：python3 -m pip install pypdf   （doctor 的 deliverable-pdf-check 会提示）
+#   pypdfium2          导出包 PDF 的第二道独立渲染核验（推荐，BSD-3-Clause / Apache-2.0）；不装也能核验
+#                      安装：python3 -m pip install pypdfium2（doctor 的 deliverable-pdf-render 会提示）
+#                      注：PyMuPDF 为 AGPL 许可，不推荐；已装时仅作备选渲染器

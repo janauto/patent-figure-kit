@@ -313,6 +313,27 @@ def _pdf_page_whitelist(page, where: str) -> List[str]:
     return errors
 
 
+def _pdf_num(x) -> float:
+    """A PDF NUMBER operand, as the format defines it (R2g #2): only pypdf's NumberObject /
+    FloatObject, finite. A string such as ``(1)`` is NOT a number to a PDF renderer — Python's
+    ``float()`` would accept it — so anything else raises ``TypeError``."""
+    import math
+    from pypdf.generic import FloatObject, NumberObject
+    if isinstance(x, bool) or not isinstance(x, (NumberObject, FloatObject)):
+        raise TypeError("操作数 %r 不是 PDF 数值（%s）" % (x, type(x).__name__))
+    v = float(x)
+    if not math.isfinite(v):
+        raise TypeError("操作数 %r 不是有限数" % (x,))
+    return v
+
+
+def _pdf_name(x) -> str:
+    from pypdf.generic import NameObject
+    if not isinstance(x, NameObject):
+        raise TypeError("操作数 %r 不是 PDF 名称（%s）" % (x, type(x).__name__))
+    return str(x)
+
+
 def _pdf_images(page) -> List[Tuple[str, List[float], Optional[Tuple[float, float, float, float]]]]:
     """``(xobject name, CTM, clip)`` for every image painted by the page's content stream
     (q/Q/cm/re W). ``clip`` = the intersection (page points) of the clip rectangles in force."""
@@ -330,14 +351,23 @@ def _pdf_images(page) -> List[Tuple[str, List[float], Optional[Tuple[float, floa
     if contents is None:
         return out
     for operands, op in contents.operations:
+        if op in (b"cm", b"re", b"Do"):
+            try:                                  # R2g #2: native PDF types only
+                if op == b"Do":
+                    [_pdf_name(v) for v in operands]
+                else:
+                    [_pdf_num(v) for v in operands]
+            except TypeError:
+                out.append(("<bad operand>", None, None, None))
+                continue
         if op == b"q":
             stack.append((list(ctm), clip))
         elif op == b"Q":
             ctm, clip = stack.pop() if stack else ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], None)
         elif op == b"cm" and len(operands) == 6:
-            ctm = _mat_mul([float(v) for v in operands], ctm)
+            ctm = _mat_mul([_pdf_num(v) for v in operands], ctm)
         elif op == b"re" and len(operands) == 4:
-            x, y, w, h = [float(v) for v in operands]
+            x, y, w, h = [_pdf_num(v) for v in operands]
             pts = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
             tp = [(px * ctm[0] + py * ctm[2] + ctm[4], px * ctm[1] + py * ctm[3] + ctm[5])
                   for px, py in pts]
@@ -414,13 +444,18 @@ def _pdf_ops_conform(ops, k: int, where: str) -> Tuple[List[str], Optional[Tuple
             continue
         for a, w in zip(args, wargs):
             if isinstance(w, str) and w.startswith("/"):
-                if str(a) != w:
+                try:
+                    name = _pdf_name(a)
+                except TypeError as exc:
+                    errors.append("%s的 %s %s" % (where, op.decode("latin-1"), exc))
+                    continue
+                if name != w:
                     errors.append("%s的 %s 操作数 %s 应为 %s" % (where, op.decode("latin-1"), a, w))
                 continue
             try:
-                v = float(a)
-            except (TypeError, ValueError):
-                errors.append("%s的 %s 操作数 %r 不是数" % (where, op.decode("latin-1"), a))
+                v = _pdf_num(a)
+            except TypeError as exc:
+                errors.append("%s的 %s %s" % (where, op.decode("latin-1"), exc))
                 continue
             if isinstance(w, str):
                 key, sign = (w[1:], -1.0) if w.startswith("-") else (w, 1.0)
@@ -451,11 +486,35 @@ def _pdf_structure(reader, n: int) -> List[str]:
                       % sorted(set(str(k) for k in root.keys()) - {"/Type", "/Pages"}))
     pages = _obj(root["/Pages"])
     if sorted(str(k) for k in pages.keys()) != ["/Count", "/Kids", "/Type"]:
-        errors.append("PDF 页树带额外键 %s" % sorted(str(k) for k in pages.keys()))
-    kids = [_obj(x) for x in (_obj(pages.get("/Kids")) or [])]
+        errors.append("PDF 页树带额外键 %s（CropBox / Rotate / MediaBox 等会被页面继承）"
+                      % sorted(str(k) for k in pages.keys()))
+    # R2g #1: the tree is checked by REFERENCE, not by what pypdf resolves. The catalog's /Pages
+    # must be an indirect reference; every kid an indirect reference to a /Page whose RAW /Parent
+    # is that same reference (an off-tree parent could otherwise hand down CropBox / Rotate /
+    # MediaBox no one checked); and the pages pypdf iterates are exactly these kids, in order.
+    def ref(x):
+        return (x.idnum, x.generation) if hasattr(x, "idnum") else None
+    pages_ref = ref(root.raw_get("/Pages"))
+    if pages_ref is None:
+        errors.append("PDF 目录的 /Pages 不是间接引用")
+    raw_kids = _obj(pages.raw_get("/Kids")) if "/Kids" in pages else None
+    raw_kids = list(raw_kids) if isinstance(raw_kids, list) else []
+    kid_refs = [ref(x) for x in raw_kids]
+    if not raw_kids or None in kid_refs or len(set(kid_refs)) != len(kid_refs):
+        errors.append("PDF 页树的 /Kids 不是互不相同的页面间接引用")
+    kids = [_obj(x) for x in raw_kids]
     if any(str(_obj(kid.get("/Type"))) != "/Page" for kid in kids) or \
             int(_obj(pages.get("/Count", -1))) != len(kids):
         errors.append("PDF 页树不是写出端的单层结构")
+    for k, kid in enumerate(kids, start=1):
+        if ref(kid.raw_get("/Parent")) != pages_ref or pages_ref is None:
+            errors.append("第 %d 页的 /Parent 不是目录的页树根（离树父对象可能继承裁切 / 旋转）" % k)
+    try:
+        iter_refs = [ref(pg.indirect_reference) for pg in reader.pages]
+    except Exception:
+        iter_refs = []
+    if iter_refs != kid_refs:
+        errors.append("PDF 实际页面序列与页树 /Kids 不一致")
     info = _obj(trailer.get("/Info"))
     if info is not None:
         bad = sorted(set(str(k) for k in info.keys()) - _INFO_KEYS)
@@ -508,24 +567,61 @@ def _pdf_structure(reader, n: int) -> List[str]:
     return errors
 
 
+#: Optional independent PDF renderers for the second check, in order of preference (R2g #3):
+#: pypdfium2 (BSD-3-Clause / Apache-2.0, recommended) first; PyMuPDF (AGPL-3.0 — not
+#: recommended, used only if it is already installed) second. The core check never needs either.
+#: ``PFK_PDF_RENDERER`` = auto (default) | none | pypdfium2 | pymupdf.
+RENDER_ORDER = ("pypdfium2", "pymupdf")
+
+
+def render_backend() -> Optional[str]:
+    import importlib
+    import os
+    want = os.environ.get("PFK_PDF_RENDERER", "auto").strip().lower()
+    order = RENDER_ORDER if want in ("", "auto") else (() if want == "none" else (want,))
+    for name in order:
+        module = {"pypdfium2": "pypdfium2", "pymupdf": "fitz"}.get(name)
+        if module is None:
+            continue
+        try:
+            importlib.import_module(module)
+            return name
+        except ImportError:
+            continue
+    return None
+
+
 def render_checker_available() -> bool:
-    try:
-        import fitz  # noqa: F401  (PyMuPDF, optional)
-        return True
-    except ImportError:
-        return False
+    return render_backend() is not None
 
 
-def _render_caption_ink(path: Path, k: int, src: "Source", rect_mm, dpi: int = 100):
-    """Defence in depth (R2f #3): RENDER page ``k`` with an independent PDF engine (PyMuPDF) and
-    measure the non-white share inside the figure-number box as it is actually SEEN — clips,
-    overpaint, transparency, optional content and annotations all take effect there."""
-    import fitz
+def _render_gray(path: Path, k: int, dpi: int, backend: str):
     import numpy as np
-    left, top, w, h = rect_mm
+    if backend == "pypdfium2":
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(str(path))
+        try:
+            page = pdf[k - 1]
+            try:
+                arr = np.asarray(page.render(scale=dpi / 72.0, grayscale=True).to_numpy())
+            finally:
+                page.close()
+        finally:
+            pdf.close()
+        return arr.reshape(arr.shape[0], arr.shape[1]) if arr.ndim == 3 else arr
+    import fitz
     with fitz.open(str(path)) as doc:
         pix = doc[k - 1].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
-        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+        return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+
+
+def _render_caption_ink(path: Path, k: int, src: "Source", rect_mm, dpi: int = 100,
+                        backend: str = "pypdfium2"):
+    """Defence in depth (R2f #3): RENDER page ``k`` with an independent PDF engine and measure
+    the non-white share inside the figure-number box as it is actually SEEN — clips, overpaint,
+    transparency, optional content, inherited page boxes and annotations all take effect there."""
+    left, top, w, h = rect_mm
+    arr = _render_gray(path, k, dpi, backend)
     bx0, by0, bx1, by1 = _D.caption_box(src.caption)
     wx0, wy0, wx1, wy1 = src.window
     to_px = dpi / 25.4
@@ -554,13 +650,15 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
         doc_errors = _pdf_structure(reader, len(pdf_pages))
     except Exception as exc:                      # an unexpected structure is not ours
         doc_errors = ["PDF 结构无法按写出端的固定结构解释：%s: %s" % (type(exc).__name__, exc)]
-    render = "pymupdf" if render_checker_available() else "unavailable"
+    render = render_backend() or "unavailable"
     pages = []
     for k, (page, src) in enumerate(zip(pdf_pages, sources), start=1):
         box = page.mediabox
         pw = float(box.width) / PT_PER_MM
         ph = float(box.height) / PT_PER_MM
         imgs = _pdf_images(page)
+        bad_ops = [i for i in imgs if i[0] == "<bad operand>"]
+        imgs = [i for i in imgs if i[0] != "<bad operand>"]
         if not imgs:
             pages.append({"page": k, "figure": src.figure, "ok": False,
                           "errors": ["第 %d 页没有图片" % k], "render_caption_ink": None})
@@ -570,6 +668,8 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
         name, m, clip, xo = imgs[0]
         where = "第 %d 页" % k
         extra = ([] if len(imgs) == 1 else ["第 %d 页应恰好 1 张图片，实有 %d 张" % (k, len(imgs))])
+        if bad_ops:
+            extra.append("%s的内容流里有非 PDF 数值 / 名称类型的操作数（几何无法确定）" % where)
         extra += _pdf_image_whitelist(xo, where) + _pdf_page_whitelist(page, where)
         contents = page.get_contents()
         op_errors, _rect = _pdf_ops_conform(contents.operations if contents is not None else [],
@@ -598,9 +698,9 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
         px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
         rect_mm = (x0, ph - y1, x1 - x0, y1 - y0)
         rendered = None
-        if render == "pymupdf" and src.caption is not None:
+        if render != "unavailable" and src.caption is not None:
             try:
-                cap_ink, whole_ink = _render_caption_ink(path, k, src, rect_mm)
+                cap_ink, whole_ink = _render_caption_ink(path, k, src, rect_mm, backend=render)
                 rendered = round(cap_ink, 4)
                 if cap_ink < INK_FRACTION_MIN:
                     extra.append("%s渲染后图号位置没有墨迹（%.1f%%）——页面上看不到「图%d」"

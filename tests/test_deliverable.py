@@ -92,23 +92,32 @@ def test_good_document_passes_every_page_check(two, fmt):
 
 
 def test_independent_reader_agrees_on_pdf_geometry(two):
-    """Cross-check the checker's PDF geometry with a second, independent PDF library."""
-    fitz = pytest.importorskip("fitz")
+    """Cross-check the checker's PDF geometry with a second, independent PDF engine (pdfium via
+    pypdfium2 — BSD/Apache; the AGPL PyMuPDF is not used by the tests)."""
+    pdfium = pytest.importorskip("pypdfium2")
+    import pypdfium2.raw as pdfium_c
     pytest.importorskip("pypdf")
     tmp, rows = two
     sp = D.spec("standard", 300)
     out = tmp / "doc.pdf"
     _build(rows, sp, out, "pdf")
     rep = _check(out, rows, sp)
-    doc = fitz.open(str(out))
-    for page, pc in zip(doc, rep["page_checks"]):
-        xref = [x for x in page.get_images() if page.get_image_rects(x[0])][0][0]
-        r = page.get_image_rects(xref)[0]
-        mm = 25.4 / 72.0
-        assert abs(r.x0 * mm - pc["image_mm"]["left"]) < 0.2
-        assert abs(r.y0 * mm - pc["image_mm"]["top"]) < 0.2
-        assert abs(r.width * mm - pc["image_mm"]["width"]) < 0.2
-        assert abs(page.rect.width * mm - 210) < 0.2 and abs(page.rect.height * mm - 297) < 0.2
+    pdf = pdfium.PdfDocument(str(out))
+    mm = 25.4 / 72.0
+    try:
+        for i, pc in enumerate(rep["page_checks"]):
+            page = pdf[i]
+            imgs = [o for o in page.get_objects() if o.type == pdfium_c.FPDF_PAGEOBJ_IMAGE]
+            assert len(imgs) == 1
+            l, b, r, t = imgs[0].get_bounds()
+            pw, ph = page.get_size()
+            assert abs(l * mm - pc["image_mm"]["left"]) < 0.2
+            assert abs((ph - t) * mm - pc["image_mm"]["top"]) < 0.2
+            assert abs((r - l) * mm - pc["image_mm"]["width"]) < 0.2
+            assert abs(pw * mm - 210) < 0.2 and abs(ph * mm - 297) < 0.2
+            page.close()
+    finally:
+        pdf.close()
 
 
 # --------------------------------------------------------------------------- fault injection
@@ -776,6 +785,68 @@ def _pdf_cropbox(w, page):
                                                 FloatObject(10), FloatObject(10)])
 
 
+@pytest.fixture(params=["none", "pypdfium2"])
+def renderer(request, monkeypatch):
+    """R2g #3: every PDF closed-set regression runs twice — with NO renderer (the core check must
+    fail on its own) and with the recommended pypdfium2 (BSD/Apache) as the second check."""
+    if request.param == "pypdfium2":
+        pytest.importorskip("pypdfium2")
+    monkeypatch.setenv("PFK_PDF_RENDERER", request.param)
+    return request.param
+
+
+def _pdf_offtree_parent(key):
+    def mutate(w, page):
+        from pypdf.generic import (ArrayObject, DictionaryObject, FloatObject, NameObject,
+                                   NumberObject)
+        value = (ArrayObject([FloatObject(0), FloatObject(0), FloatObject(1), FloatObject(1)])
+                 if key == "/CropBox" else NumberObject(90))
+        node = DictionaryObject({NameObject("/Type"): NameObject("/Pages"),
+                                 NameObject("/Kids"): ArrayObject([page.indirect_reference]),
+                                 NameObject("/Count"): NumberObject(1),
+                                 NameObject(key): value})
+        page[NameObject("/Parent")] = w._add_object(node)
+    return mutate
+
+
+def _pdf_cm_strings(w, page):
+    import re as _re
+    data = page.get_contents().get_data()
+
+    def strs(m):
+        return b" ".join(b"(%s)" % t for t in m.group(1).split()) + b" cm"
+    new = _re.sub(rb"((?:-?[0-9.]+\s+){5}-?[0-9.]+)\s+cm", strs, data)
+    assert new != data
+    _replace_contents(w, page, new)
+
+
+@pytest.mark.parametrize("mutate, expect", [
+    (_pdf_offtree_parent("/CropBox"), "/Parent"),
+    (_pdf_offtree_parent("/Rotate"), "/Parent"),
+    (_pdf_cm_strings, "PDF 数值"),
+])
+def test_pdf_tree_references_and_operand_types_fail_without_a_renderer(two, renderer, mutate,
+                                                                       expect):
+    """R2g #1/#2: a page whose /Parent is an off-tree node handing down CropBox / Rotate, and cm
+    operands written as strings, fail the CORE check — with no renderer at all, and also with
+    pypdfium2 (which confirms the figure number is not visible)."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    ok = _check(good, rows, sp)
+    assert ok["ok"] and ok["render_check"] == ("unavailable" if renderer == "none" else renderer)
+    bad = tmp / "bad.pdf"
+    _pdf_mutate(good, bad, mutate)
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert expect in msgs, msgs
+    if renderer != "none" and mutate is not _pdf_offtree_parent:
+        assert rep["render_check"] == renderer
+
+
 @pytest.mark.parametrize("mutate, expect, invisible", [
     (_pdf_clip_everything, "内容流", True),
     (_pdf_inline_white, "内容流", True),
@@ -786,7 +857,7 @@ def _pdf_cropbox(w, page):
     (_pdf_group, "页面对象键", False),
     (_pdf_cropbox, "页面对象键", False),
 ])
-def test_pdf_is_a_closed_set(two, mutate, expect, invisible):
+def test_pdf_is_a_closed_set(two, renderer, mutate, expect, invisible):
     """R2f: the PDF must be exactly the writer's structure — a path clip that removes the page,
     a white inline image or an extra XObject painted over it, the picture in an OFF optional
     content group, a transparent / blended graphics state, a transparency group or a crop box
@@ -805,8 +876,10 @@ def test_pdf_is_a_closed_set(two, mutate, expect, invisible):
     assert not rep["ok"]
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert expect in msgs, msgs
-    if invisible and C.render_checker_available():
-        assert rep["render_check"] == "pymupdf"
+    if renderer == "none":
+        assert rep["render_check"] == "unavailable"           # the core check alone refused it
+    elif invisible:
+        assert rep["render_check"] == renderer
         assert ok["page_checks"][0]["render_caption_ink"] > C.INK_FRACTION_MIN
         assert rep["page_checks"][0]["render_caption_ink"] < C.INK_FRACTION_MIN, rep["page_checks"][0]
         assert "渲染后图号位置没有墨迹" in msgs
