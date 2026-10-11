@@ -16,9 +16,10 @@ export const state = {
   plan: null,
   validate: null,       // 服务器 validate 结果 {ok, issues}
   render: null,         // 最近一次渲染结果
-  // 渲染结果绑定的「输入版本证据」：live 用后端结果携带的 plan_etag，legacy 用渲染时输入摘要。
+  // 渲染结果绑定的「输入版本证据」：live 用后端输入快照的 plan_etag，legacy 用「发请求前」捕获的已保存输入摘要。
   // 没有证据（null）时视为过期并锁定导出——绝不用当前 plan 补造摘要给旧结果背书。
-  renderInputs: { etag: null, digest: null },
+  // raced=true：该作业在途期间计划被改过（legacy 后端在后台线程里读 plan，无法确定它画的是哪一版）→ 一律锁定。
+  renderInputs: { etag: null, digest: null, raced: false },
   rendering: false,
   candidates: [],       // F2-lite 候选分图
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
@@ -164,19 +165,32 @@ const digestKey = (pid) => `inkline-render-digest-${pid}`;
 export function digestStoreGet(pid) { try { return localStorage.getItem(digestKey(pid)) || null; } catch { return null; } }
 export function digestStoreSet(pid, d) { try { if (d) localStorage.setItem(digestKey(pid), d); else localStorage.removeItem(digestKey(pid)); } catch { /* 隐私模式 */ } }
 
+// ETag 规范化：去掉弱前缀 W/ 与引号再比（代理/框架可能给同一版本加不同修饰）。
+export function normEtag(e) {
+  if (!e) return null;
+  return String(e).trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1') || null;
+}
+// 渲染结果自带的输入版本证据：mock / 本前端约定 inputs.plan_etag；WP1 实现放在顶层 plan_etag。
+export function resultEtag(r) {
+  return normEtag(r?.inputs?.plan_etag || r?.plan_etag || null);
+}
+
 // 结果是否过期 / 为何过期：
-//   'unsaved'（有未持久化编辑或保存失败——必须先存好再谈一致）| 'no-proof'（无版本证据）| 'changed' | null
+//   'unsaved'（有未持久化编辑或保存失败——必须先存好再谈一致）| 'raced'（出图在途期间计划被改过）
+//   | 'no-proof'（无版本证据）| 'changed' | null
 export function renderStaleReason() {
   if (!state.render) return null;
   // 本地还有没落盘的编辑、或上次保存失败 → 立即判过期（live 的 planEtag 此刻还是旧值，不能据此放行）
   if (state.editVersion > state.savedVersion) return 'unsaved';
   if (state.saveState === 'error' || state.saveState === 'conflict') return 'unsaved';
   // 判据：有 ETag（live /v1 后端）→ 用 ETag 比对；无 ETag（legacy 旧 /api/*）→ 用输入摘要比对。
-  if (state.planEtag) {                          // live：以结果绑定的 ETag 为准
-    if (!state.renderInputs.etag) return 'no-proof';
-    return state.renderInputs.etag === state.planEtag ? null : 'changed';
+  if (state.planEtag) {                          // live：以后端输入快照的 ETag 为准（权威，冻结于作业提交时）
+    const ev = normEtag(state.renderInputs.etag);
+    if (!ev) return 'no-proof';
+    return ev === normEtag(state.planEtag) ? null : 'changed';
   }
-  // legacy：以渲染时的输入摘要为准（无 ETag）
+  // legacy：以「发请求前」捕获的已保存输入摘要为准（无 ETag）
+  if (state.renderInputs.raced) return 'raced';
   if (!state.renderInputs.digest) return 'no-proof';
   return state.renderInputs.digest === planDigest() ? null : 'changed';
 }
@@ -212,19 +226,28 @@ async function doSave() {
 }
 // 全局唯一的保存循环：所有 flush() 调用共享同一个 Promise，只有这一个循环负责发送与清理，
 // 杜绝并发 flush 各自发 PUT（同 ETag → 409 / 丢编辑）。循环持续到最新编辑版本已落盘或保存失败。
+//
+// 时序要点（Codex R3e #1）：循环体必须在 flushLoop 赋值「之后」才开始执行。若用立即执行的 async 函数，
+// 无待保存内容时循环在第一个 await 之前就退出，finally 会先同步清空 flushLoop，随后外层赋值又把这个
+// 已完成的 Promise 写回——之后所有 flush() 都拿到它、永不再保存。这里用 Promise.resolve().then 启动，
+// 保证「赋值 → 首次检查」的先后；退出判定与清理在同一段同步代码里完成，中间不留可被插入的窗口。
 let flushLoop = null;
+function saveFailed() { return state.saveState === 'error' || state.saveState === 'conflict'; }
 export function flush() {
   clearTimeout(saveTimer);
   if (!flushLoop) {
-    flushLoop = (async () => {
+    const loop = Promise.resolve().then(async () => {
       try {
         for (let guard = 0; guard < 100; guard += 1) {
-          if (state.saveState === 'error' || state.saveState === 'conflict') break;
+          if (saveFailed()) break;                               // 失败后停下，等下一次编辑/重试
           if (state.savedVersion >= state.editVersion) break;   // 最新编辑已落盘
           await doSave();                                        // 串行，一次只有一个 PUT 在途
         }
-      } finally { flushLoop = null; }
-    })();
+      } finally {
+        if (flushLoop === loop) flushLoop = null;                // 与最后一次检查同步完成，无窗口
+      }
+    });
+    flushLoop = loop;
   }
   return flushLoop;
 }
@@ -263,9 +286,9 @@ export async function boot(projectId) {
   state.editVersion = 0; state.savedVersion = 0;
   // 结果版本证据：绝不用当前 plan 补造。live 用后端结果携带的 plan_etag；legacy 用本工程持久化的渲染输入摘要。
   // 没有证据 → renderInputs 全 null → renderStale 判「no-proof」→ 锁定导出并提示「请重新出图」。
-  state.renderInputs = { etag: null, digest: null };
+  state.renderInputs = { etag: null, digest: null, raced: false };
   if (state.render) {
-    state.renderInputs.etag = state.render?.inputs?.plan_etag || null;      // live
+    state.renderInputs.etag = resultEtag(state.render);                      // live：结果自带的输入快照
     if (!state.planEtag) state.renderInputs.digest = digestStoreGet(projectId);   // legacy
   }
   indexStructure();

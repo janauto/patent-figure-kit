@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import mimetypes
 import re
@@ -663,9 +664,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(404, "没有这个工程")
             fail = (q.get("fail") or [""])[0]   # ""|"gate"|"validate"
             # 渲染进程照常跑完（4 阶段都成功）；QA 的过/不过与校验失败体现在 result 里，而不是作业失败
+            # 输入快照随作业固化（对齐 WP1 openapi：202 带 inputs{plan_hash, plan_etag, …}）
+            plan_raw = json.dumps((p.get("data") or {}).get("plan"), ensure_ascii=False, sort_keys=True)
+            inputs = {"plan_etag": p.get("plan_etag"),
+                      "plan_hash": hashlib.sha256(plan_raw.encode("utf-8")).hexdigest()}
             job = new_job("render", project_id=m.group(1),
                           result=render_payload(m.group(1), fail, p.get("plan_etag")))
-            return self._send(202, {"job_id": job["job_id"]})
+            job["inputs"] = inputs
+            return self._send(202, {"job_id": job["job_id"], "inputs": inputs})
         # 导出
         m = re.fullmatch(r"/v1/projects/([\w\-]+)/export", path)
         if m:

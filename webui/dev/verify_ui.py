@@ -8,6 +8,11 @@
   * 上传失败重试：保留文件，第二次请求确实带上文件名/标题/AI 开关
   * 静态站：只读，不发任何写请求（POST/PUT/DELETE）
 
+修复轮 5（Codex R3e）新增：
+  * 空循环 flush：无改动时 flush 一次后再编辑，必须照常保存；保存失败后再 flush、再编辑也必须恢复
+  * 渲染证据捕获时机：A 请求发出→响应未到期间编辑并保存 B→A 完成，证据仍是 A、导出锁定（改回 A 也不解锁）
+  * 导出迟到回调：打包 A 期间改存 B→A 完成→B 重渲过闸→回导出页不显示 A 的包；取清单被扣住时同理
+
 起 mock：python3 webui/dev/mock_server.py --port 8803
 起静态：python3 webui/dev/build_static.py && (cd webui/dev/static-site && python3 -m http.server 8808)
 跑：    python3 webui/dev/verify_ui.py        # 全过退出 0，任一失败退出 1
@@ -24,6 +29,20 @@ results = []
 def check(name, ok, extra=""):
     results.append((name, bool(ok), extra))
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}{(' · ' + extra) if extra else ''}")
+
+
+# 页内公共工具：等待条件、生成不含「字母+数字」形状的唯一中文术语（避免触发 mock 的件号校验）
+JS_HELPERS = """
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const waitFor = async (fn, ms = 15000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) { if (await fn()) return true; await sleep(80); }
+    return false;
+  };
+  const uniq = (p) => p + String(Date.now()).slice(-6).split('').map((d) => '零一二三四五六七八九'[d]).join('');
+  const stage = async (name) => { document.querySelector(`.stage-tab[data-stage="${name}"]`).click(); await sleep(450); };
+  const norm = (e) => (e ? String(e).trim().replace(/^W\\//, '').replace(/^"(.*)"$/, '$1') : null);
+"""
 
 
 def test_xss(pg):
@@ -167,6 +186,197 @@ def test_concurrent_flush(pg):
           f"term={r['term']} sameLoop={r['sameLoop']} saved={r['saved']} edit={r['edit']}")
 
 
+def test_flush_noop_then_edit(pg):
+    """R3e #1：干净计划上 flush 一次（空循环）后，再编辑必须照常保存（旧实现在此永久毒化保存循环）。"""
+    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + """
+        const st = await import('/js/state.js');
+        const noop = st.flush();                       // 无待保存内容：首次检查即退出
+        await noop;
+        const term = uniq('空刷后编辑');
+        st.mutate((p) => { p.terms[0].term = term; });
+        const f = st.flush();
+        await Promise.race([f, sleep(5000)]);
+        const res = await (await fetch('/v1/projects/gearbox/plan')).json();
+        return { server: res.plan.terms[0].term, term, fresh: f !== noop,
+                 saved: st.state.savedVersion, edit: st.state.editVersion, ss: st.state.saveState };
+    }""")
+    check("空循环 flush：无改动 flush 后再编辑，照常保存到服务端",
+          r["server"] == r["term"] and r["fresh"] and r["saved"] >= r["edit"],
+          f"server={r['server']!r} want={r['term']!r} newLoop={r['fresh']} saved={r['saved']} edit={r['edit']} state={r['ss']}")
+
+
+def test_flush_after_failure(pg):
+    """R3e #1：保存失败 → 无新编辑时再 flush（旧实现在此毒化）→ 再编辑 → 必须恢复保存。"""
+    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + """
+        const st = await import('/js/state.js');
+        const realFetch = window.fetch; let failNext = true; let puts = 0;
+        window.fetch = (url, init) => {
+          if (init && init.method === 'PUT' && /\/plan$/.test(String(url))) {
+            puts += 1;
+            if (failNext) {
+              failNext = false;
+              return Promise.resolve(new Response(JSON.stringify({ error: { code: 'boom', message: '模拟保存失败' } }),
+                { status: 500, headers: { 'Content-Type': 'application/json' } }));
+            }
+          }
+          return realFetch(url, init);
+        };
+        try {
+          st.mutate((p) => { p.terms[0].term = uniq('失败前'); });
+          await Promise.race([st.flush(), sleep(5000)]);
+          const afterFail = st.state.saveState;
+          await Promise.race([st.flush(), sleep(5000)]);   // 失败后、无新编辑时再 flush
+          const term = uniq('失败后编辑');
+          st.mutate((p) => { p.terms[0].term = term; });
+          await Promise.race([st.flush(), sleep(5000)]);
+          const res = await (await realFetch('/v1/projects/gearbox/plan')).json();
+          return { afterFail, server: res.plan.terms[0].term, term, puts,
+                   ss: st.state.saveState, saved: st.state.savedVersion, edit: st.state.editVersion };
+        } finally { window.fetch = realFetch; }
+    }""")
+    check("保存失败后恢复：失败→空 flush→再编辑，照常保存",
+          r["afterFail"] == "error" and r["server"] == r["term"] and r["ss"] == "saved" and r["saved"] >= r["edit"],
+          f"afterFail={r['afterFail']} server={r['server']!r} want={r['term']!r} puts={r['puts']} state={r['ss']}")
+
+
+def test_render_evidence_race(pg):
+    """R3e #2：A 请求发出 → 响应未到期间编辑并保存 B → 响应到 → A 完成；证据必须是 A、导出锁定。
+    legacy 分支（无 ETag，用摘要）：把 planEtag 置空、保存走不带 ETag 的 200，渲染响应扣住到 B 存好后才放行。
+    live 分支：证据只认后端输入快照（202 的 inputs.plan_etag / 结果自带），同样必须是 A。"""
+    pg.goto(f"{B}/index.html?project=gearbox&stage=qa", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    body = """async (mode) => {""" + JS_HELPERS + """
+        const st = await import('/js/state.js');
+        const orig = st.state.plan.terms[0].term;
+        if (mode === 'legacy') st.state.planEtag = null;        // 旧后端：无 ETag，走输入摘要
+        const realFetch = window.fetch;
+        let release; const gate = new Promise((r) => { release = r; });
+        let sent = false; let job202 = null;
+        window.fetch = async (url, init) => {
+          const m = (init && init.method) || 'GET'; const u = String(url);
+          if (mode === 'legacy' && m === 'PUT' && /\/plan$/.test(u)) {   // 旧后端保存：200、无 ETag
+            return new Response(JSON.stringify({ ok: true, validate: { ok: true, issues: [] } }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } });
+          }
+          if (m === 'POST' && /\/render(\?|$)/.test(u)) {               // 请求已到后端，响应扣住
+            const res = await realFetch(url, init);
+            job202 = await res.clone().json(); sent = true; await gate; return res;
+          }
+          return realFetch(url, init);
+        };
+        try {
+          await stage('qa');
+          const etagA = norm(st.state.planEtag); const digestA = st.planDigest();
+          const r0 = st.state.render;
+          document.querySelector('#rerender, #qa-render').click();
+          await waitFor(() => sent, 8000);
+          st.mutate((p) => { p.terms[0].term = uniq('在途改乙'); });   // 响应未到：编辑并保存 B
+          await st.flush();
+          const digestB = st.planDigest(); const etagB = norm(st.state.planEtag);
+          release();
+          const doneOk = await waitFor(() => st.state.render !== r0 && !document.querySelector('#rerender[disabled]'), 15000);
+          const ev = { ...st.state.renderInputs, etag: norm(st.state.renderInputs.etag) };
+          const reason = st.renderStaleReason();
+          await stage('export');
+          const locked = !!document.querySelector('.exp-blank') && !document.querySelector('#do-pack');
+          // 再改回 A 的内容并保存：legacy 下旧作业不得因摘要「碰巧相同」而解锁
+          st.mutate((p) => { p.terms[0].term = orig; }); await st.flush();
+          const reasonRevert = st.renderStaleReason();
+          return { mode, doneOk, ev, etagA, etagB, digestA, digestB, reason, locked, reasonRevert,
+                   server202: job202 && job202.inputs ? norm(job202.inputs.plan_etag) : null };
+        } finally { release(); window.fetch = realFetch; }
+    }"""
+    r = pg.evaluate(body, "legacy")
+    ok_legacy = (r["doneOk"] and r["ev"]["digest"] == r["digestA"] and r["digestA"] != r["digestB"]
+                 and r["reason"] is not None and r["locked"] and r["reasonRevert"] is not None)
+    check("渲染证据（legacy 摘要）：请求在途期间改存 B，证据仍为 A、导出锁定、改回 A 也不解锁", ok_legacy,
+          f"done={r['doneOk']} evIsA={r['ev']['digest'] == r['digestA']} reason={r['reason']} locked={r['locked']} revert={r['reasonRevert']}")
+    pg.goto(f"{B}/index.html?project=gearbox&stage=qa", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate(body, "live")
+    ok_live = (r["doneOk"] and r["ev"]["etag"] == r["etagA"] and r["server202"] == r["etagA"]
+               and r["etagA"] != r["etagB"] and r["reason"] == "changed" and r["locked"])
+    check("渲染证据（live ETag）：以后端输入快照为准，请求在途期间改存 B，证据仍为 A、导出锁定", ok_live,
+          f"done={r['doneOk']} ev={r['ev']['etag']} A={r['etagA']} 202={r['server202']} reason={r['reason']} locked={r['locked']}")
+
+
+def test_export_late_callback(pg):
+    """R3e #3：打包 A 期间编辑保存 B → A 完成 → B 重渲通过 → 回导出页，不得显示 A 的包；
+    再测更晚的回调：打包 B 的清单请求被扣住，期间改存 C 并重渲过闸，放行后也不得发布 B 的包。"""
+    pg.goto(f"{B}/index.html?project=gearbox&stage=qa", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + """
+        const st = await import('/js/state.js');
+        const orig = st.state.plan.terms[0].term;
+        const realFetch = window.fetch; const posts = [];
+        let holdGet = null; let getHeld = false;
+        window.fetch = async (url, init) => {
+          const m = (init && init.method) || 'GET'; const u = String(url);
+          const res = await realFetch(url, init);
+          if (m === 'POST' && /\/export$/.test(u)) posts.push(await res.clone().json());
+          if (m === 'GET' && /\/v1\/exports\/[^/]+$/.test(u) && holdGet) { getHeld = true; await holdGet; }
+          return res;
+        };
+        const rerender = async () => {
+          await stage('qa');
+          const r0 = st.state.render;
+          document.querySelector('#rerender, #qa-render').click();
+          await waitFor(() => st.state.render !== r0 && !document.querySelector('#rerender[disabled]'), 15000);
+          await sleep(200);
+          return st.renderStaleReason();
+        };
+        const jobDone = (id) => waitFor(async () => (await (await realFetch('/v1/jobs/' + id)).json()).state === 'succeeded', 15000);
+        const out = {};
+        try {
+          // ① 当前计划 A 出图过闸 → 打包 A
+          out.gateA = await rerender();
+          await stage('export');
+          if (!document.querySelector('#do-pack')) { out.noPack = 'A'; return out; }
+          document.querySelector('#do-pack').click();
+          await waitFor(() => posts.length === 1, 8000);
+          // ② 打包期间编辑并保存 B
+          st.mutate((p) => { p.terms[0].term = uniq('打包中改乙'); }); await st.flush();
+          // ③ A 打包作业在服务端完成，迟到的完成回调到达
+          out.aDone = await jobDone(posts[0].job_id); await sleep(900);
+          out.doneShownAfterA = !!document.querySelector('.exp-done');
+          // ④ B 重新出图并过闸 → ⑤ 回导出页
+          out.gateB = await rerender();
+          await stage('export');
+          out.doneShownB = !!document.querySelector('.exp-done');
+          out.formB = !!document.querySelector('.exp-wrap');
+          out.packEnabledB = !!document.querySelector('#do-pack:not([disabled])');
+          // ⑥ 更晚的回调：打包 B，取清单时扣住；改存 C 并重渲过闸后再放行
+          let releaseGet; holdGet = new Promise((r) => { releaseGet = r; });
+          if (!document.querySelector('#do-pack')) { out.noPack = 'B'; return out; }
+          document.querySelector('#do-pack').click();
+          out.getHeld = await waitFor(() => getHeld, 12000);
+          st.mutate((p) => { p.terms[0].term = uniq('取单时改丙'); }); await st.flush();
+          out.gateC = await rerender();
+          releaseGet(); holdGet = null; await sleep(600);
+          await stage('export');
+          out.doneShownC = !!document.querySelector('.exp-done');
+          out.formC = !!document.querySelector('.exp-wrap');
+          out.packEnabledC = !!document.querySelector('#do-pack:not([disabled])');
+        } finally {
+          window.fetch = realFetch;
+          st.mutate((p) => { p.terms[0].term = orig; }); await st.flush();
+        }
+        return out;
+    }""")
+    ok1 = (r.get("gateA") is None and r.get("aDone") and not r.get("doneShownAfterA") and r.get("gateB") is None
+           and not r.get("doneShownB") and r.get("formB") and r.get("packEnabledB"))
+    check("导出迟到回调：打包 A 期间改存 B→A 完成→B 重渲过闸→回导出页，不显示 A 的包", ok1,
+          f"gateA={r.get('gateA')} aDone={r.get('aDone')} shownAfterA={r.get('doneShownAfterA')} gateB={r.get('gateB')} "
+          f"shownB={r.get('doneShownB')} form={r.get('formB')} packEnabled={r.get('packEnabledB')} noPack={r.get('noPack')}")
+    ok2 = (r.get("getHeld") and r.get("gateC") is None and not r.get("doneShownC") and r.get("formC") and r.get("packEnabledC"))
+    check("导出迟到回调：取清单被扣住期间改存 C 并重渲过闸，放行后不发布 B 的包", ok2,
+          f"held={r.get('getHeld')} gateC={r.get('gateC')} shownC={r.get('doneShownC')} form={r.get('formC')} packEnabled={r.get('packEnabledC')}")
+
+
 def test_unsaved_lock(pg):
     pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2500)
@@ -240,7 +450,8 @@ def main():
     with sync_playwright() as p:
         b = p.chromium.launch()
         ctx = b.new_context(viewport={"width": 1440, "height": 900})
-        for fn in (test_xss, test_save_race, test_concurrent_flush, test_unsaved_lock,
+        for fn in (test_xss, test_save_race, test_concurrent_flush, test_flush_noop_then_edit,
+                   test_flush_after_failure, test_unsaved_lock, test_render_evidence_race, test_export_late_callback,
                    test_candidate_resolve, test_candidate_bad_member, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:

@@ -249,6 +249,8 @@ input, select, textarea { font: inherit; color: var(--ink-1); }
 /* ---- 屏④ 出图与 QA ---- */
 .stage-qa { display: block; }
 #qa-host { height: 100%; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+/* 结果过期时多一条提示栏：留出第三行，否则 qa-top（图号页签/版本/门禁）被挤成 0 高 */
+#qa-host:has(> .stale-bar) { grid-template-rows: auto auto minmax(0, 1fr); }
 #qa-host > .qa-blank { grid-row: 1 / -1; align-self: center; justify-self: center; margin: 0; }
 .stage-export { overflow-y: auto; }
 #export-host { min-height: 100%; }

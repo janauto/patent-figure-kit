@@ -11,7 +11,7 @@ WP1 的 `docs/openapi.yaml` 在 WP3 开发时**尚未提供**，故本 mock 的�
 - `GET /v1/projects/{id}/plan` → `{plan}` + `ETag` 头
 - `PUT /v1/projects/{id}/plan`（`If-Match`）→ 200 新 `ETag` / 409 `etag_conflict`
 - `POST /v1/projects/{id}/plan/suggest` `{label_standard_parts}` → 202 job
-- `POST /v1/projects/{id}/render` `{plan_etag}` → 202 `{job_id}`
+- `POST /v1/projects/{id}/render` `{plan_etag}` → 202 `{job_id, inputs}`（`inputs` = 提交时冻结的输入快照 `{plan_etag, plan_hash}`，对齐 WP1 openapi 的 `InputSnapshot`；前端以其 `plan_etag` 作结果版本证据。WP1 的渲染结果把 `plan_etag` 放在顶层，mock 放在 `result.inputs.plan_etag`，`state.js:resultEtag` 两处都认）
 - `GET /v1/jobs/{job_id}` → `{state, stage, progress, logs, stages, inputs, result, error}`
 - `GET /v1/jobs/{job_id}/events` → SSE：`stage/log/done/error`，带 `id`，支持 `Last-Event-ID`
 - `DELETE /v1/jobs/{job_id}` → 取消

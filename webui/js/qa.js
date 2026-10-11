@@ -1,7 +1,7 @@
 // 屏④ 出图结果与 QA：盖章总览 + 13 格点阵 + 每项「原因 / 建议 / 直达入口」。
 // 四态：未渲染 / 渲染中（SSE 日志）/ 全过（导出解锁）/ 有失败（导出禁用 + 修复引导）。
 // 预览里点 text[data-numeral] → 联动高亮对应零件（数据契约不变）。
-import { bus, state, setSelection, renderStale, renderStaleReason, planDigest, flush, digestStoreSet } from './state.js';
+import { bus, state, setSelection, renderStaleReason, planDigest, flush, digestStoreSet, normEtag, resultEtag } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 
@@ -145,11 +145,11 @@ function render() {
 
   const staleReason = renderStaleReason();
   const stale = !!staleReason;
-  const staleMsg = staleReason === 'no-proof'
-    ? '无法证明这张图对应当前计划——请重新出图以解锁导出。'
-    : (staleReason === 'unsaved'
-      ? '计划有改动还没保存好——保存并重新出图后再导出。'
-      : '计划已修改，下面的预览可能过期——请重新出图后再导出。');
+  const staleMsg = {
+    'no-proof': '无法证明这张图对应当前计划——请重新出图以解锁导出。',
+    unsaved: '计划有改动还没保存好——保存并重新出图后再导出。',
+    raced: '出图期间计划被改过，无法确定这张图用的是哪一版——请重新出图以解锁导出。',
+  }[staleReason] || '计划已修改，下面的预览可能过期——请重新出图后再导出。';
   host.innerHTML = `
     ${stale ? `<div class="stale-bar">${staleMsg}
       <button class="btn sm" id="rerender-stale" ${rendering ? 'disabled' : ''}>${rendering ? '出图中…' : '重新出图'}</button></div>` : ''}
@@ -220,23 +220,41 @@ async function loadSvg(fig) {
   } catch { pane.innerHTML = '<p class="hint pad">预览加载失败</p>'; }
 }
 
-// evidence：本次渲染作业「启动成功时」捕获的输入证据（{etag,digest}），只属于这一个作业。
-async function applyResult(d, evidence) {
-  // 读权威结果：优先作业 done 带回的 result，否则回工程/状态取一次
+// 把一次渲染结果连同「属于它的」输入版本证据一起采纳（Codex R3e #2）。
+//   live（有 ETag）：只认后端证据——结果自带的输入快照 ETag 优先；结果没带、且它确属本作业时，
+//     用本作业提交时后端返回的输入快照（WP1：202 / GET job 的 inputs.plan_etag）。前端自己的记录不算数。
+//   legacy（无 ETag）：用「发请求之前」捕获的已保存输入摘要。旧后端在后台线程里多次读 plan，
+//     作业在途期间计划只要被改过（含改了又改回），就无法确定它画的是哪一版 → raced，锁定直到重渲。
+//   ev 为 null：结果不属于本会话发起的作业（如失败后回读的最近结果）——live 仍可凭结果自带证据，legacy 无证据。
+function bindEvidence(result, ev, jobInputs) {
+  if (!(result && (result.figures || []).length)) {
+    state.renderInputs = { etag: null, digest: null, raced: false };
+    if (!state.planEtag) digestStoreSet(state.projectId, null);
+    return;
+  }
+  if (state.planEtag) {
+    const fromJob = ev ? (normEtag(jobInputs?.plan_etag) || ev.serverEtag) : null;
+    state.renderInputs = { etag: resultEtag(result) || fromJob || null, digest: null, raced: false };
+    return;
+  }
+  if (!ev) { state.renderInputs = { etag: null, digest: null, raced: false }; digestStoreSet(state.projectId, null); return; }
+  const raced = ev.editVersion !== state.editVersion || ev.digest !== planDigest();
+  state.renderInputs = { etag: null, digest: ev.digest, raced };
+  digestStoreSet(state.projectId, raced ? null : ev.digest);   // 有竞态的结果不持久化背书
+}
+
+// 作业终态：d 是 done 事件或 GET job 的数据；ev 是该作业「发请求前」捕获、只属于它的输入快照。
+async function applyResult(d, ev) {
+  // 读权威结果：优先作业带回的 result，否则回工程/状态取一次（那份不一定属于本作业 → 不用本作业证据）
   let result = (d && d.result && d.result.figures) ? d.result : null;
+  const fromJob = !!result;
   if (!result) {
     try { result = await api.getRenderResult(state.projectId); }
     catch (err) { rendering = false; toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return; }
   }
   state.render = result || null;
-  // 绑定版本证据，只用「该作业自己的 evidence」——绝不读共享可变量，避免被后来的点击/被拒作业篡改。
-  if (result && (result.figures || []).length) {
-    if (state.planEtag) state.renderInputs = { etag: result.inputs?.plan_etag || null, digest: null };  // live：只认后端 ETag
-    else { state.renderInputs = { etag: null, digest: evidence.digest }; digestStoreSet(state.projectId, evidence.digest); }  // legacy：该作业输入摘要
-  } else {
-    state.renderInputs = { etag: null, digest: null };
-    if (!state.planEtag) digestStoreSet(state.projectId, null);
-  }
+  // legacy 一次只允许一个渲染（服务端锁），状态里的结果就是本作业的；live 回读的工程结果则未必是本作业的
+  bindEvidence(result, (fromJob || api.isLegacy) ? ev : null, d?.inputs);
   rendering = false;
   activeFig = null;
   bus.emit('rendered');
@@ -251,33 +269,54 @@ async function applyResult(d, evidence) {
   render();
 }
 
+const saveBroken = () => state.saveState === 'error' || state.saveState === 'conflict';
+
 async function startRender() {
   if (rendering) return;                 // 重入锁：渲染在途时不再启动第二次（按钮也禁用）
   if (api.readOnly) { toast('静态演示站只读，不能出图', ''); return; }
   rendering = true; render();            // 先锁，再 await（任何 await 之前就已置位）
-  await flush();                         // 先把本地改动落盘成功，确保渲染用的是当前这份 plan
-  if (state.saveState === 'error' || state.saveState === 'conflict') {
+  // 先把本地改动落盘成功，确保渲染用的是当前这份 plan（保存期间又有新编辑就再存一轮）
+  for (let i = 0; i < 3; i += 1) {
+    await flush();
+    if (saveBroken() || state.editVersion <= state.savedVersion) break;
+  }
+  if (saveBroken()) {
     rendering = false; toast('计划没能保存，未渲染——请先解决保存问题（可能是与他处的冲突）。', 'bad'); render(); return;
   }
+  if (state.editVersion > state.savedVersion) {
+    rendering = false; toast('计划还在保存中，未渲染——请稍后再出图。', 'bad'); render(); return;
+  }
+  // —— 发请求「之前」捕获已保存输入的快照（Codex R3e #2）——
+  // 此刻没有未落盘的编辑，当前 plan 就是服务端那份；请求在途期间的编辑不得被记成本作业的输入。
+  const pre = { digest: planDigest(), etag: normEtag(state.planEtag), editVersion: state.editVersion };
   let job;
   try {
     job = await api.render(state.projectId, { etag: state.planEtag, fail: params.get('rfail') });
   } catch (err) {                        // 被拒绝（409 等）：不碰任何共享证据，直接退出
     rendering = false; toast('无法开始渲染：' + (err.hint || err.message), 'bad'); render(); return;
   }
-  const evidence = { digest: planDigest(), etag: state.planEtag };   // 作业启动成功后才捕获，封闭在闭包里
+  // 请求成功后才把快照交给作业闭包；后端若返回输入快照（WP1 202 的 inputs.plan_etag），以它为准。
+  // （inputs.plan_hash 是服务端文件字节的 sha256，前端无从复算，不作比对依据；可比的是与 GET/PUT 同源的 plan_etag。）
+  const evidence = Object.freeze({ ...pre, jobId: job.job_id, serverEtag: normEtag(job.inputs?.plan_etag) });
+  let settled = false;                   // 同一作业只采纳一次终态（done 与断线校准可能先后到达）
+  const finish = (d) => { if (settled) return; settled = true; applyResult(d, evidence); };
   logs.length = 0; render();
   sub = api.jobEvents(job.job_id, {
     log(d) { logs.push(d.line); render(); },
     stage(d) { if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
-    done(d) { applyResult(d, evidence); },
+    done(d) { finish(d); },
     fail(d) {
+      if (settled) return; settled = true;
       rendering = false;
       toast('出图未完成：' + (d.message || '渲染进程失败'), 'bad');
-      api.getRenderResult(state.projectId).then((r) => { if (r) { state.render = r; bus.emit('rendered'); } render(); }).catch(() => render());
+      // 回读的是工程最近一次结果，不属于本作业：只凭它自带的证据（legacy 无 → 锁定），绝不挂本作业的快照
+      api.getRenderResult(state.projectId).then((r) => {
+        if (r) { state.render = r; bindEvidence(r, null); bus.emit('rendered'); }
+        render();
+      }).catch(() => render());
     },
     disconnect() {
-      api.getJob(job.job_id).then((j) => { if (j.state === 'succeeded') applyResult({ result: j.result }, evidence); }).catch(() => {});
+      api.getJob(job.job_id).then((j) => { if (j.state === 'succeeded') finish({ result: j.result, inputs: j.inputs }); }).catch(() => {});
     },
   });
 }
