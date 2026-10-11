@@ -43,6 +43,81 @@ _PIC_URI = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 _PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+_PNG_ALLOWED = {b"IHDR", b"pHYs", b"IDAT", b"IEND"}
+
+
+def png_whitelist(data: bytes) -> List[str]:
+    """The page image of a Word file must be EXACTLY what the writer produces (WP2 R2e): a
+    single-frame, 8-bit grayscale, non-interlaced PNG made of IHDR, at most one pHYs, contiguous
+    IDAT and an empty final IEND, every CRC valid. Alpha / tRNS / palettes / gamma / ICC /
+    animation / text — any other chunk — is refused: such properties can make the visible page
+    differ from the stored samples (a fully transparent picture looks blank)."""
+    import struct
+    import zlib
+    if not data.startswith(_PNG_SIG):
+        return ["不是 PNG"]
+    errors: List[str] = []
+    i, kinds = len(_PNG_SIG), []
+    while i + 12 <= len(data):
+        (length,) = struct.unpack(">I", data[i:i + 4])
+        kind = data[i + 4:i + 8]
+        body = data[i + 8:i + 8 + length]
+        crc = data[i + 8 + length:i + 12 + length]
+        if len(body) != length or len(crc) != 4:
+            return errors + ["PNG 块被截断"]
+        if struct.unpack(">I", crc)[0] != (zlib.crc32(kind + body) & 0xFFFFFFFF):
+            errors.append("PNG 块 %s 校验和不对" % kind.decode("latin-1"))
+        kinds.append((kind, body))
+        i += 12 + length
+        if kind == b"IEND":
+            break
+    if i != len(data):
+        errors.append("PNG 在 IEND 之后还有数据")
+    names = [k for k, _b in kinds]
+    unknown = sorted({k.decode("latin-1") for k in names if k not in _PNG_ALLOWED})
+    if unknown:
+        errors.append("PNG 带写出端不会产生的块 %s（透明度 / 调色板 / 色彩管理 / 动画 / 文本等）"
+                      % unknown)
+    if not names or names[0] != b"IHDR" or names[-1] != b"IEND" or kinds[-1][1]:
+        errors.append("PNG 块顺序不对（须以 IHDR 开头、以空 IEND 结尾）")
+    if names.count(b"IHDR") != 1 or names.count(b"pHYs") > 1 or names.count(b"IEND") != 1:
+        errors.append("PNG 的 IHDR / pHYs / IEND 个数不对")
+    idat = [n for n, k in enumerate(names) if k == b"IDAT"]
+    if not idat or idat != list(range(idat[0], idat[0] + len(idat))):
+        errors.append("PNG 的图像数据块缺失或不连续")
+    if b"pHYs" in names and idat and names.index(b"pHYs") > idat[0]:
+        errors.append("PNG 的 pHYs 在图像数据之后")
+    if names and names[0] == b"IHDR" and len(kinds[0][1]) == 13:
+        _w, _h, depth, ctype, comp, filt, inter = struct.unpack(">IIBBBBB", kinds[0][1])
+        if (depth, ctype, comp, filt, inter) != (8, 0, 0, 0, 0):
+            errors.append("PNG 不是 8 位灰度、无隔行（位深 %d、颜色类型 %d、隔行 %d）"
+                          % (depth, ctype, inter))
+    return errors
+
+
+def visible_gray(im):
+    """The page as a reader SEES it: any transparency composited onto white, then gray."""
+    import numpy as np
+    from PIL import Image
+    t = im.info.get("transparency")
+    if im.mode in ("L", "RGB", "I") and t is not None and not isinstance(t, bytes):
+        # tRNS on a gray / truecolour image: one sample value is fully transparent. Pillow's
+        # convert() does not apply it for these modes, so build the alpha explicitly.
+        arr = np.asarray(im)
+        hit = np.all(arr == np.asarray(t), axis=-1) if arr.ndim == 3 else (arr == t)
+        rgba = im.convert("RGBA")
+        alpha = np.where(hit, 0, 255).astype(np.uint8)
+        rgba.putalpha(Image.fromarray(alpha, "L"))
+    elif im.mode in ("LA", "RGBA", "PA", "La", "RGBa", "P") or t is not None:
+        rgba = im.convert("RGBA")
+    else:
+        return np.asarray(im.convert("L"))
+    bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    bg.alpha_composite(rgba)
+    return np.asarray(bg.convert("L"))
+
+
 def pdf_checker_available() -> bool:
     try:
         import pypdf  # noqa: F401
@@ -173,42 +248,122 @@ def _mat_mul(a, b):
             a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]]
 
 
-def _pdf_images(page) -> List[Tuple[str, List[float]]]:
-    """``(xobject name, CTM)`` for every image painted by the page's content stream (q/Q/cm)."""
+_PDF_IMAGE_KEYS = {"/Type", "/Subtype", "/Width", "/Height", "/ColorSpace", "/BitsPerComponent",
+                   "/Filter", "/DecodeParms", "/Length"}
+#: Painting operators: after the page image nothing may be painted over it.
+_PDF_PAINT = {b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"S", b"s", b"sh", b"Do", b"Tj",
+              b"TJ", b"'", b'"', b"BI", b"EI"}
+
+
+def _obj(x):
+    return x.get_object() if hasattr(x, "get_object") else x
+
+
+def _pdf_image_whitelist(xo, where: str) -> List[str]:
+    """The page image XObject must be the writer's kind (WP2 R2e): an opaque 8-bit image —
+    gray, RGB, or an indexed palette of those — with no soft mask / mask / image mask / Decode
+    remap / optional content / anything else."""
+    errors = []
+    keys = set(str(k) for k in xo.keys())
+    for k in ("/SMask", "/Mask", "/ImageMask", "/Decode", "/OC", "/SMaskInData"):
+        if k in keys:
+            errors.append("%s的图片带 %s（透明 / 遮罩 / 重映射会改变可见内容）" % (where, k))
+    other = sorted(keys - _PDF_IMAGE_KEYS - {"/SMask", "/Mask", "/ImageMask", "/Decode", "/OC",
+                                              "/SMaskInData"})
+    if other:
+        errors.append("%s的图片字典带写出端不会产生的键 %s" % (where, other))
+    if int(_obj(xo.get("/BitsPerComponent", 0))) != 8:
+        errors.append("%s的图片不是 8 位" % where)
+    cs = _obj(xo.get("/ColorSpace"))
+    ok_cs = str(cs) in ("/DeviceGray", "/DeviceRGB")
+    if not ok_cs and isinstance(cs, list) and len(cs) == 4 and str(cs[0]) == "/Indexed" \
+            and str(_obj(cs[1])) in ("/DeviceGray", "/DeviceRGB"):
+        ok_cs = True
+    if not ok_cs:
+        errors.append("%s的图片色彩空间不受控（%s）" % (where, str(cs)[:40]))
+    if str(_obj(xo.get("/Filter"))) not in ("/FlateDecode", "None"):
+        errors.append("%s的图片压缩方式不受控（%s）" % (where, xo.get("/Filter")))
+    return errors
+
+
+def _pdf_page_whitelist(page, where: str) -> List[str]:
+    """Page-level things that change what is SEEN of the image: annotations drawn over the page,
+    graphics states with transparency / soft masks / blend modes, painting AFTER the image."""
+    errors = []
+    annots = _obj(page.get("/Annots"))
+    if annots:
+        errors.append("%s带注释对象（可能盖住图片）" % where)
+    res = _obj(page.get("/Resources")) or {}
+    for name, gs in (_obj(res.get("/ExtGState")) or {}).items():
+        gs = _obj(gs)
+        bad = sorted(set(str(k) for k in gs.keys()) - {"/Type", "/CA", "/ca"})
+        if bad:
+            errors.append("%s的图形状态 %s 带 %s（软遮罩 / 混合模式等）" % (where, name, bad))
+        for k in ("/CA", "/ca"):
+            if k in gs and float(_obj(gs[k])) != 1.0:
+                errors.append("%s的图形状态 %s 透明度 %s=%s" % (where, name, k, gs[k]))
+    contents = page.get_contents()
+    seen_image = False
+    for _operands, op in (contents.operations if contents is not None else []):
+        if seen_image and op in _PDF_PAINT:
+            errors.append("%s在图片之后还有绘制操作 %s（可能盖住图片）" % (where, op.decode("latin-1")))
+            break
+        if op == b"Do":
+            seen_image = True
+    return errors
+
+
+def _pdf_images(page) -> List[Tuple[str, List[float], Optional[Tuple[float, float, float, float]]]]:
+    """``(xobject name, CTM, clip)`` for every image painted by the page's content stream
+    (q/Q/cm/re W). ``clip`` = the intersection (page points) of the clip rectangles in force."""
     from pypdf.generic import NameObject
     res = page.get("/Resources") or {}
     res = res.get_object() if hasattr(res, "get_object") else res
     xobjs = res.get("/XObject") or {}
     xobjs = xobjs.get_object() if hasattr(xobjs, "get_object") else xobjs
     ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    clip = None
     stack = []
+    pending = None
     out = []
     contents = page.get_contents()
     if contents is None:
         return out
     for operands, op in contents.operations:
         if op == b"q":
-            stack.append(list(ctm))
+            stack.append((list(ctm), clip))
         elif op == b"Q":
-            ctm = stack.pop() if stack else [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+            ctm, clip = stack.pop() if stack else ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], None)
         elif op == b"cm" and len(operands) == 6:
             ctm = _mat_mul([float(v) for v in operands], ctm)
+        elif op == b"re" and len(operands) == 4:
+            x, y, w, h = [float(v) for v in operands]
+            pts = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
+            tp = [(px * ctm[0] + py * ctm[2] + ctm[4], px * ctm[1] + py * ctm[3] + ctm[5])
+                  for px, py in pts]
+            pending = (min(p[0] for p in tp), min(p[1] for p in tp),
+                       max(p[0] for p in tp), max(p[1] for p in tp))
+        elif op in (b"W", b"W*") and pending is not None:
+            clip = pending if clip is None else (max(clip[0], pending[0]), max(clip[1], pending[1]),
+                                                  min(clip[2], pending[2]), min(clip[3], pending[3]))
         elif op == b"Do" and operands:
             name = str(operands[0])
             xo = xobjs.get(NameObject(name)) if xobjs else None
             xo = xo.get_object() if hasattr(xo, "get_object") else xo
             if xo is not None and xo.get("/Subtype") == "/Image":
-                out.append((name, list(ctm)))
+                out.append((name, list(ctm), clip, xo))
+        if op not in (b"re",):
+            if op not in (b"W", b"W*"):
+                pending = None if op in (b"n", b"f", b"S", b"B", b"b", b"s") else pending
     return out
 
 
 def _pdf_gray(page, name: str):
-    import numpy as np
     target = name.lstrip("/")
     for im in page.images:
         stem = str(im.name).rsplit(".", 1)[0].lstrip("/")
         if stem == target:
-            return np.asarray(im.image.convert("L"))
+            return visible_gray(im.image)          # any (masked) transparency over white
     return None
 
 
@@ -233,13 +388,17 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
             pages.append({"page": k, "figure": src.figure, "ok": False,
                           "errors": ["第 %d 页应恰好 1 张图片，实有 %d 张" % (k, len(imgs))]})
             continue
-        name, m = imgs[0]
+        name, m, clip, xo = imgs[0]
+        where = "第 %d 页" % k
+        extra = _pdf_image_whitelist(xo, where) + _pdf_page_whitelist(page, where)
         # unit square through the CTM → page rectangle (PDF origin bottom-left, points)
         xs = [m[4], m[0] + m[4], m[2] + m[4], m[0] + m[2] + m[4]]
         ys = [m[5], m[1] + m[5], m[3] + m[5], m[1] + m[3] + m[5]]
+        if clip is not None and (clip[0] > min(xs) + 0.5 or clip[1] > min(ys) + 0.5
+                                 or clip[2] < max(xs) - 0.5 or clip[3] < max(ys) - 0.5):
+            extra.append("%s的图片被裁切区域截掉一部分" % where)
         x0, x1 = min(xs) / PT_PER_MM, max(xs) / PT_PER_MM
         y0, y1 = min(ys) / PT_PER_MM, max(ys) / PT_PER_MM
-        extra = []
         if abs(m[1]) > 1e-6 or abs(m[2]) > 1e-6:
             extra.append("图片被旋转或错切")
         gray = _pdf_gray(page, name)
@@ -718,9 +877,15 @@ def check_docx(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dic
                 extra.append("第 %d 页图片引用缺失" % k)
             else:
                 name = target if target.startswith("word/") else "word/" + target.lstrip("/")
+                bad_png = png_whitelist(parts.get(name, b""))
+                if bad_png:
+                    extra += ["第 %d 页图片：%s" % (k, e) for e in bad_png]
                 try:
                     with Image.open(io.BytesIO(parts[name])) as im:
-                        gray = np.asarray(im.convert("L"))
+                        if getattr(im, "n_frames", 1) != 1 or im.mode != "L":
+                            extra.append("第 %d 页图片不是单帧 8 位灰度（%s，%s 帧）"
+                                         % (k, im.mode, getattr(im, "n_frames", 1)))
+                        gray = visible_gray(im)     # transparency (if any) over white
                 except Exception as exc:
                     extra.append("第 %d 页图片解不开：%s" % (k, exc))
             if w > body_w + TOL_MM or h > body_h + TOL_MM:

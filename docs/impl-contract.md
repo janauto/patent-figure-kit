@@ -2442,3 +2442,15 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   带写出端没写的东西（继承的隐藏格式一并封住）。另对 styles/document/settings 扫描隐藏类格式（vanish/webHidden/
   specVanish 非 0、白色文字、字号 0/1）给出白话原因。原有逐段结构检查与图片白名单保留（报具体原因）。
 - 导出包的 Word 因此不再依赖可选包 python-docx（`docx_available` 恒为真）。
+
+### 14.12 修复轮 5（Codex R2e）收敛：媒体与可见性
+
+- **Word 媒体封闭**：`deliverable_check.png_whitelist` 要求每张页面 PNG 与写出端同类——单帧、8 位灰度、无隔行，块只能是
+  `IHDR`、至多一个 `pHYs`（在图像数据前）、连续的 `IDAT`、空的末尾 `IEND`，CRC 全部正确、`IEND` 后无数据；`tRNS`、
+  alpha、调色板、`gAMA`/`iCCP`/`sRGB`、动画、文本等任何其他块一律拒绝。解码后再核单帧与 `L` 模式。
+- **墨迹按看得见的像素统计**：`visible_gray` 把任何透明度（alpha 通道、`tRNS`、调色板透明）合成到白底后再转灰度，图号墨迹
+  与字高检查都用它。
+- **PDF 图片与页面**：图片 XObject 字典只允许写出端的键（Type/Subtype/Width/Height/ColorSpace/BitsPerComponent/Filter/
+  DecodeParms/Length），`/SMask`、`/Mask`、`/ImageMask`、`/Decode`、`/OC`、`/SMaskInData` 按名拒绝；8 位；色彩空间只允许
+  DeviceGray / DeviceRGB 或它们的 Indexed；页面不得有注释，图形状态只能有 `/CA`、`/ca` 且为 1，图片之后不得再有任何绘制
+  操作，裁切区域必须完整包住图片。

@@ -585,3 +585,127 @@ def test_fixed_template_word_opens_in_an_independent_reader(two):
     sec = doc.sections[0]
     assert abs(sec.page_width.mm - 210) < 0.1 and abs(sec.left_margin.mm - 25) < 0.1
     assert doc.core_properties.title == "说明书附图"
+
+
+# --------------------------------------------------------------------------- R2e: media transparency
+
+
+def _rgba_transparent_png(data: bytes) -> bytes:
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as im:
+        rgba = im.convert("RGBA")
+    rgba.putalpha(0)                                  # every pixel fully transparent
+    out = io.BytesIO()
+    rgba.save(out, "PNG")
+    return out.getvalue()
+
+
+def _gray_trns_png(data: bytes) -> bytes:
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as im:
+        g = im.convert("L")
+    out = io.BytesIO()
+    g.save(out, "PNG", transparency=0)                # black is transparent (tRNS)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("mutate, expect", [(_rgba_transparent_png, ("PNG", "没有墨迹")),
+                                            (_gray_trns_png, ("tRNS",))])
+def test_word_transparent_media_is_refused(two, mutate, expect):
+    """R2e: same XML, same picture size — only the embedded PNG made transparent (RGBA alpha 0,
+    or grayscale with a black tRNS). Composited onto white the page is blank: refused."""
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    assert _check(good, rows, sp)["ok"]
+    bad = tmp / "transparent.docx"
+    _rewrite_docx(good, bad, mutate, "word/media/image1.png")
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert all(e in msgs for e in expect), msgs
+    # whatever survives is measured on the page as SEEN (composited onto white): the solid black
+    # strokes of 「图N」 are gone, only anti-aliased edges remain
+    assert rep["page_checks"][0]["caption_ink"] < _check(good, rows, sp)["page_checks"][0]["caption_ink"]
+
+
+def _pdf_mutate(src: Path, dst: Path, fn):
+    from pypdf import PdfWriter
+    w = PdfWriter(clone_from=str(src))
+    fn(w, w.pages[0])
+    with open(str(dst), "wb") as fh:
+        w.write(fh)
+
+
+def _pdf_add_smask(w, page):
+    from pypdf.generic import DecodedStreamObject, NameObject, NumberObject
+    xo = page["/Resources"]["/XObject"]
+    img = xo[list(xo.keys())[0]].get_object()
+    sm = DecodedStreamObject()
+    width, height = int(img["/Width"]), int(img["/Height"])
+    sm.set_data(bytes(width * height))                  # alpha 0 everywhere
+    sm.update({NameObject("/Type"): NameObject("/XObject"),
+               NameObject("/Subtype"): NameObject("/Image"),
+               NameObject("/Width"): NumberObject(width), NameObject("/Height"): NumberObject(height),
+               NameObject("/ColorSpace"): NameObject("/DeviceGray"),
+               NameObject("/BitsPerComponent"): NumberObject(8)})
+    img[NameObject("/SMask")] = w._add_object(sm)
+
+
+def _pdf_alpha_zero(w, page):
+    from pypdf.generic import FloatObject, NameObject
+    for _n, gs in page["/Resources"]["/ExtGState"].items():
+        gs.get_object()[NameObject("/ca")] = FloatObject(0)
+
+
+def _pdf_paint_over(w, page):
+    from pypdf.generic import DecodedStreamObject, NameObject
+    cs = DecodedStreamObject()
+    cs.set_data(page.get_contents().get_data() + b"\nq 1 g 0 0 595 842 re f Q\n")
+    page[NameObject("/Contents")] = w._add_object(cs)
+
+
+def _pdf_clip_half(w, page):
+    from pypdf.generic import DecodedStreamObject, NameObject
+    data = page.get_contents().get_data()
+    i = data.index(b" re")
+    j = data.rindex(b"\n", 0, i) + 1 if b"\n" in data[:i] else 0
+    nums = data[j:i].split()
+    nums[-1] = b"%.3f" % (float(nums[-1]) / 2)
+    cs = DecodedStreamObject()
+    cs.set_data(data[:j] + b" ".join(nums) + data[i:])
+    page[NameObject("/Contents")] = w._add_object(cs)
+
+
+@pytest.mark.parametrize("mutate, expect", [(_pdf_add_smask, "/SMask"),
+                                            (_pdf_alpha_zero, "透明度"),
+                                            (_pdf_paint_over, "盖住"),
+                                            (_pdf_clip_half, "裁切")])
+def test_pdf_image_transparency_masks_and_overpaint_are_refused(two, mutate, expect):
+    """R2e: the PDF page image must stay fully visible — a soft mask (SMask, alpha 0), a graphics
+    state with alpha 0, painting over the image after it is drawn, or a clip that cuts it, each
+    fail the full check; the original passes."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    assert _check(good, rows, sp)["ok"]
+    bad = tmp / "bad.pdf"
+    _pdf_mutate(good, bad, mutate)
+    assert bad.read_bytes() != good.read_bytes()
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"], rep
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert expect in msgs, msgs
+
+
+def test_written_media_passes_the_png_whitelist(two):
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    pages = [D.rasterize(r["dxf"], sp, r["figure"], r["number"]) for r in rows]
+    for pg in pages:
+        assert C.png_whitelist(pg.png_bytes()) == []
+    assert C.png_whitelist(_gray_trns_png(pages[0].png_bytes()))
+    assert C.png_whitelist(_rgba_transparent_png(pages[0].png_bytes()))
