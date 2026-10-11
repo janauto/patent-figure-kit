@@ -611,6 +611,33 @@ def test_first_publish_aliases_of_the_future_view_are_refused(rendered, tmp_path
         SH.normalized_digest(rendered["out_a"] / "fig1.dxf")
 
 
+def test_symlink_then_dotdot_into_the_future_view_is_refused(rendered, tmp_path):
+    """R1i: ``alias/../out/fig1.dxf`` with ``alias → real/anchor`` is ``real/out/fig1.dxf`` to the
+    OS (the ``..`` applies AFTER the symlink), although the lexical normal form says
+    ``<tmp>/out/fig1.dxf``. The guard must resolve the RAW path, so with ``-o real/out`` this is
+    refused for --json and --cache — on a succeeding run AND on a first run whose QA fails
+    (where the late check would otherwise let the report create out/fig1.dxf) — exit 2 and the
+    whole directory tree unchanged."""
+    real = tmp_path / "real"
+    (real / "anchor").mkdir(parents=True)
+    (tmp_path / "alias").symlink_to(real / "anchor")
+    trick = str(tmp_path / "alias") + "/../out"            # keep the raw '..'
+    import os as _os
+    assert _os.path.realpath(trick + "/fig1.dxf") == str((real / "out" / "fig1.dxf"))
+    assert _os.path.abspath(trick) != str(real / "out")     # the lexical form disagrees
+    thr = tmp_path / "thr.json"
+    thr.write_text(json.dumps({"text_height_mm_min": 99.0}), encoding="utf-8")
+    before = _snapshot_tree(tmp_path)
+    for extra in ([], ["--thresholds", str(thr)]):          # success / first-run QA failure
+        for flag, target in (("--json", trick + "/fig1.dxf"), ("--json", trick + "/r.json"),
+                             ("--cache", trick), ("--cache", trick + "/c")):
+            proc = render_in_subprocess(rendered["plan"], rendered["assembly"], real / "out",
+                                        [flag, target] + extra)
+            assert proc.returncode == 2, (flag, target, extra, proc.stderr[-300:])
+            assert _snapshot_tree(tmp_path) == before, (flag, target, extra)
+    assert not (real / "out").exists() and not (real / "out.versions").exists()
+
+
 def test_in_place_report_must_be_the_versions_dedicated_path(rendered, tmp_path):
     from patent_figure import versions as V
     s = V.VersionStore(tmp_path / "store")

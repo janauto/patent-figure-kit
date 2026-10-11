@@ -313,8 +313,10 @@ def protected_path_reason(path, resolve: bool = True) -> Optional[str]:
     lexically OR after resolving symlink aliases — lies in a version store's reserved area:
     a version directory (``results/…``, sealed or not), the leases (``refs/…``), the ``out``
     view, or the store metadata (``current.json`` …)."""
-    lexical = Path(os.path.abspath(str(path)))
-    real = Path(os.path.realpath(str(path)))
+    raw = os.fspath(path)
+    raw = raw if os.path.isabs(raw) else os.path.join(os.getcwd(), raw)   # keep ``..`` (R1i)
+    lexical = Path(os.path.abspath(raw))
+    real = Path(os.path.realpath(raw))          # resolve symlinks BEFORE applying ``..``
     for cand in ((lexical, real) if resolve else (lexical,)):
         for anc in [cand] + list(cand.parents):
             if anc.name in STORE_RESERVED and is_store_root(anc.parent):

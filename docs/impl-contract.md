@@ -2230,3 +2230,11 @@ produced the bogus "jsonschema missing" reading on the first pass.
   即拒绝。**不再有 `out_dir.exists()` 前提**：首次发布时 `-o` 尚不存在，经父目录别名（如
   `/tmp → /private/tmp`）或指向未来 `out` 的悬空链接给出的 `--json` / `--cache` 同样退出码 2、
   不写任何文件。提交后、写报告前用同一规则**再校验一次**（纵深防御），不通过则拒写报告。
+
+#### 13.5.7 R1i 收敛：先解析符号链接、后应用 `..`
+
+- `_path_forms` / `versions.protected_path_reason` 的 realpath **直接作用于用户给出的原始路径**
+  （相对路径只与 `os.getcwd()` 拼接、不做 normpath），因此 `..` 作用在已解析的前缀上——与操作
+  系统打开文件时一致：`alias/../out/fig1.dxf`（`alias → real/anchor`）判为 `real/out/fig1.dxf`。
+  `abspath` 只作为字面形式之一。`realpath(原始父目录)/名字` 同理用原始父目录。首次发布 QA 失败
+  （`-o` 仍不存在）时前置校验同样拒绝，目录树不变。

@@ -1021,15 +1021,31 @@ def _inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _path_forms(path: Path) -> set:
+def _raw_abs(path) -> str:
+    """Make ``path`` absolute WITHOUT normalising it: ``..`` stays where the user wrote it, so
+    a later ``realpath`` resolves it AFTER the symlinks before it — exactly as the OS does when
+    the file is opened (R1i). ``os.getcwd()`` is already a physical path."""
+    raw = os.fspath(path)
+    return raw if os.path.isabs(raw) else os.path.join(os.getcwd(), raw)
+
+
+def _path_forms(path) -> set:
     """Every spelling under which ``path`` can be reached, computed WITHOUT requiring it to
-    exist (R1h): the absolute lexical path; ``realpath`` — which resolves every symlink in the
-    longest existing prefix, follows dangling links to their (future) targets, and appends the
-    not-yet-existing remainder; and ``realpath(parent)/name`` (the location of a leaf that may
-    itself become a symlink, e.g. the out/ view)."""
-    p = Path(os.path.abspath(str(path)))
-    return {p, Path(os.path.realpath(str(p))),
-            Path(os.path.realpath(str(p.parent))) / p.name}
+    exist (R1h) and WITHOUT normalising before resolving (R1i):
+
+    * the absolute lexical path (``abspath`` — used only as the lexical form);
+    * ``realpath`` of the RAW path — resolves each symlink component left to right, applies a
+      ``..`` to the already-resolved prefix (``alias/../out`` with ``alias → real/anchor`` is
+      ``real/out``, as the OS sees it), follows dangling links to their future targets, and
+      appends the not-yet-existing remainder;
+    * ``realpath(raw parent)/name`` — where a leaf that may itself become a symlink (the out/
+      view) sits."""
+    raw = _raw_abs(path)
+    forms = {Path(os.path.abspath(raw)), Path(os.path.realpath(raw))}
+    parent, name = os.path.split(raw.rstrip(os.sep) or raw)
+    if name not in ("", os.curdir, os.pardir):
+        forms.add(Path(os.path.realpath(parent)) / name)
+    return forms
 
 
 def _hits(target: Path, root: Path) -> bool:
@@ -1054,16 +1070,18 @@ def _guard_side_paths(args, out_dir: Path) -> Optional[str]:
 
     ``--in-place`` (internal): the report may ONLY be this unsealed version's dedicated
     ``render-report.json``; the cache must not be in any store's reserved area."""
+    # Keep the user's RAW strings (pathlib keeps ``..`` but str() round-trips them; never
+    # normalise before resolving — R1i).
     targets = []
     if args.json_out:
-        targets.append(("--json", Path(args.json_out)))
+        targets.append(("--json", args.json_out))
     if args.cache:
-        targets.append(("--cache", Path(args.cache)))
+        targets.append(("--cache", args.cache))
     if args.in_place:
         dedicated = Path(os.path.realpath(str(out_dir))) / "render-report.json"
         for flag, raw in targets:
             if flag == "--json":
-                if Path(os.path.realpath(str(raw))) != dedicated:
+                if Path(os.path.realpath(_raw_abs(raw))) != dedicated:
                     return ("--in-place 模式下 --json 只能是本次未封口版本的专用报告 %s，"
                             "实得 %s" % (dedicated, raw))
             else:
