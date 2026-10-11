@@ -244,53 +244,165 @@ def write_pdf(pages: Sequence[Page], path: Path, title: str = "说明书附图")
     return path
 
 
+# --------------------------------------------------------------------------- Word (fixed package)
+#
+# WP2 R2d: the Word file is written from FIXED templates — every part of the package is ours,
+# byte for byte (no python-docx default template with its mutable styles, theme, settings…).
+# ``deliverable_check`` rebuilds the expected bytes of every non-media part from the values it
+# reads back (picture extents, title) and requires an EXACT match: a closed set by construction,
+# so an inherited/hidden/unknown property anywhere in the package cannot pass.
+
+_NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+_NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_NS_PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+EMU_PER_MM = 36000
+DOCX_TITLES = ("说明书附图", "说明书附图（递交版）", "说明书附图（交底版）")
+
+
+def _twips(mm: float) -> int:
+    return int(round(mm * 1440.0 / 25.4))
+
+
+def _esc(text: str) -> str:
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def docx_content_types() -> str:
+    return (_XML_HEAD + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="png" ContentType="image/png"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+            '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            '</Types>')
+
+
+def docx_package_rels() -> str:
+    return (_XML_HEAD + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="%s/officeDocument" Target="word/document.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '</Relationships>' % _REL)
+
+
+def docx_document_rels(n: int) -> str:
+    imgs = "".join('<Relationship Id="rIdImg%d" Type="%s/image" Target="media/image%d.png"/>'
+                   % (k, _REL, k) for k in range(1, n + 1))
+    return (_XML_HEAD + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rIdStyles" Type="%s/styles" Target="styles.xml"/>'
+            '<Relationship Id="rIdSettings" Type="%s/settings" Target="settings.xml"/>%s'
+            '</Relationships>' % (_REL, _REL, imgs))
+
+
+def docx_styles() -> str:
+    """Document defaults + Normal, nothing else. Character defaults are stated explicitly and
+    visible (no vanish / webHidden / colour / size games); paragraph defaults are single-spaced
+    with no space before/after."""
+    return (_XML_HEAD + '<w:styles xmlns:w="%s"><w:docDefaults>'
+            '<w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
+            'w:eastAsia="SimSun" w:cs="Times New Roman"/><w:vanish w:val="0"/>'
+            '<w:webHidden w:val="0"/><w:color w:val="000000"/><w:sz w:val="21"/>'
+            '<w:szCs w:val="21"/><w:lang w:val="zh-CN" w:eastAsia="zh-CN" w:bidi="ar-SA"/>'
+            '</w:rPr></w:rPrDefault>'
+            '<w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" '
+            'w:lineRule="auto"/><w:ind w:left="0" w:right="0" w:firstLine="0"/></w:pPr>'
+            '</w:pPrDefault></w:docDefaults>'
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>'
+            '<w:qFormat/></w:style></w:styles>' % _NS_W)
+
+
+def docx_settings() -> str:
+    return (_XML_HEAD + '<w:settings xmlns:w="%s"><w:defaultTabStop w:val="420"/>'
+            '<w:characterSpacingControl w:val="doNotCompress"/><w:compat>'
+            '<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" '
+            'w:val="15"/></w:compat></w:settings>' % _NS_W)
+
+
+def docx_core(title: str) -> str:
+    return (_XML_HEAD + '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>%s</dc:title>'
+            '<dc:creator>patent-figure-kit</dc:creator></cp:coreProperties>' % _esc(title))
+
+
+def docx_document(extents: Sequence[Tuple[int, int]]) -> str:
+    """One page paragraph per picture: page break before every page but the first, explicit
+    single spacing, zero indents, centred, the paragraph mark and the picture run explicitly
+    visible, one inline picture whose transform equals its extent. Section: A4 portrait with the
+    filing margins, no header/footer."""
+    m = MARGINS_MM
+    paras = []
+    for k, (cx, cy) in enumerate(extents, start=1):
+        paras.append(
+            '<w:p><w:pPr>%s<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>'
+            '<w:ind w:left="0" w:right="0" w:firstLine="0"/><w:jc w:val="center"/>'
+            '<w:rPr><w:vanish w:val="0"/><w:webHidden w:val="0"/></w:rPr></w:pPr>'
+            '<w:r><w:rPr><w:vanish w:val="0"/><w:webHidden w:val="0"/></w:rPr><w:drawing>'
+            '<wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="%d" cy="%d"/>'
+            '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+            '<wp:docPr id="%d" name="图%d" descr="图%d"/>'
+            '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+            '<a:graphic><a:graphicData uri="%s"><pic:pic><pic:nvPicPr>'
+            '<pic:cNvPr id="%d" name="image%d.png"/><pic:cNvPicPr/></pic:nvPicPr>'
+            '<pic:blipFill><a:blip r:embed="rIdImg%d"/><a:stretch><a:fillRect/></a:stretch>'
+            '</pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>'
+            '</a:graphic></wp:inline></w:drawing></w:r></w:p>'
+            % ("<w:pageBreakBefore/>" if k > 1 else "", cx, cy, k, k, k, _NS_PIC, k, k, k,
+               cx, cy))
+    sect = ('<w:sectPr><w:pgSz w:w="%d" w:h="%d"/><w:pgMar w:top="%d" w:right="%d" '
+            'w:bottom="%d" w:left="%d" w:header="0" w:footer="0" w:gutter="0"/>'
+            '<w:cols w:space="425"/><w:docGrid w:linePitch="360"/></w:sectPr>'
+            % (_twips(PAGE_MM[0]), _twips(PAGE_MM[1]), _twips(m["top"]), _twips(m["right"]),
+               _twips(m["bottom"]), _twips(m["left"])))
+    return (_XML_HEAD + '<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="%s" xmlns:a="%s" '
+            'xmlns:pic="%s"><w:body>%s%s</w:body></w:document>'
+            % (_NS_W, _NS_R, _NS_WP, _NS_A, _NS_PIC, "".join(paras), sect))
+
+
+def docx_parts(extents: Sequence[Tuple[int, int]], title: str) -> Dict[str, bytes]:
+    """Every non-media part of the package, exactly as written (and as the checker expects)."""
+    return {"[Content_Types].xml": docx_content_types().encode("utf-8"),
+            "_rels/.rels": docx_package_rels().encode("utf-8"),
+            "docProps/core.xml": docx_core(title).encode("utf-8"),
+            "word/document.xml": docx_document(extents).encode("utf-8"),
+            "word/_rels/document.xml.rels": docx_document_rels(len(extents)).encode("utf-8"),
+            "word/styles.xml": docx_styles().encode("utf-8"),
+            "word/settings.xml": docx_settings().encode("utf-8")}
+
+
 def docx_available() -> bool:
-    try:
-        import docx  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """The Word writer is stdlib-only since R2d (fixed package templates); Pillow (a matplotlib
+    dependency) encodes the page PNGs."""
+    return True
 
 
 def write_docx(pages: Sequence[Page], path: Path, title: str = "说明书附图") -> Path:
-    """Word: A4, the same margins, one centred inline picture per page (page break before every
-    page after the first), picture at its exact placed size. python-docx is optional."""
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Mm, Pt
-
-    doc = Document()
-    sec = doc.sections[0]
-    sec.page_width, sec.page_height = Mm(PAGE_MM[0]), Mm(PAGE_MM[1])
-    sec.top_margin, sec.left_margin = Mm(MARGINS_MM["top"]), Mm(MARGINS_MM["left"])
-    sec.bottom_margin, sec.right_margin = Mm(MARGINS_MM["bottom"]), Mm(MARGINS_MM["right"])
-    for i, page in enumerate(pages):
-        para = doc.paragraphs[0] if (i == 0 and doc.paragraphs) else doc.add_paragraph()
-        pf = para.paragraph_format
-        # Every layout-relevant property is set EXPLICITLY (direct formatting beats the template's
-        # docDefaults, which carry 1.15 line spacing + 10 pt after): centred, no indent, 0 before /
-        # after, single line spacing — the exact structure deliverable_check accepts.
-        pf.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        pf.space_before = Pt(0)
-        pf.space_after = Pt(0)
-        pf.line_spacing = 1.0
-        pf.left_indent = Mm(0)
-        pf.right_indent = Mm(0)
-        pf.first_line_indent = Mm(0)
-        if i > 0:
-            pf.page_break_before = True
-        run = para.add_run()
-        shape = run.add_picture(io.BytesIO(page.png_bytes()),
-                                width=Mm(page.placement["w"]), height=Mm(page.placement["h"]))
-        try:                                     # alt text: 图 N (screen readers / search)
-            shape._inline.docPr.set("descr", "图%d" % page.number)
-        except Exception:
-            pass
-    doc.core_properties.title = title
+    """Word：A4、规范页边、每页一张居中嵌入式图片（第 2 页起段前分页），图片按版面尺寸精确放置。
+    整个包由固定模板写出（见上），不依赖 python-docx 的默认模板。"""
+    import zipfile
+    if title not in DOCX_TITLES:
+        raise DeliverableError("未知的 Word 标题 %r" % title)
+    extents = [(int(round(pg.placement["w"] * EMU_PER_MM)),
+                int(round(pg.placement["h"] * EMU_PER_MM))) for pg in pages]
+    parts = docx_parts(extents, title)
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
     try:
-        doc.save(str(tmp))
+        # A .docx is a zip CONTAINER of one document (not an export archive): the export
+        # archive itself is still written only by patent_figure.export.zip_dir.
+        with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in ("[Content_Types].xml", "_rels/.rels", "docProps/core.xml",
+                         "word/document.xml", "word/_rels/document.xml.rels",
+                         "word/styles.xml", "word/settings.xml"):
+                zf.writestr(name, parts[name])
+            for k, pg in enumerate(pages, start=1):
+                zf.writestr("word/media/image%d.png" % k, pg.png_bytes())
         tmp.replace(path)
     finally:
         if tmp.exists():

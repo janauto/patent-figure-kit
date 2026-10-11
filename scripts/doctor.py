@@ -374,7 +374,8 @@ def check_plan_studio() -> dict:
     if missing == ["openpyxl"]:
         detail = "缺 openpyxl —— Plan Studio 的「导入 BOM」只能读 .csv，读不了 .xlsx"
     elif missing == ["docx"]:
-        detail = "缺 python-docx —— 导出时不会生成「说明书附图」Word 文件，其余文件照常生成"
+        detail = ("缺 python-docx —— 只影响旧的浏览器界面辅助功能；导出包的「说明书附图」Word "
+                  "已改为内置固定模板写出（WP2），不受影响")
     return _check("plan-studio-deps", STATUS_MISSING, detail, fix, required=False)
 
 

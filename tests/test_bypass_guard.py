@@ -47,8 +47,19 @@ def test_zip_archives_only_via_the_export_service():
     # version store (export_path = "legacy-zip(baseline repo)"); it never reads a real project.
     # WP2: deliverable_check.py opens the WRITTEN Word file (a zip container) READ-ONLY to verify
     # it page by page — it never creates an archive (pinned by the test below).
+    # R2d: deliverable.py writes the .docx CONTAINER of one document (fixed templates) — not an
+    # export archive; pinned by test_docx_writer_only_writes_its_own_temp_container below.
     assert _users("zipfile.ZipFile") <= {"patent_figure/export.py", "bench.py",
-                                         "patent_figure/deliverable_check.py"}
+                                         "patent_figure/deliverable_check.py",
+                                         "patent_figure/deliverable.py"}
+
+
+def test_docx_writer_only_writes_its_own_temp_container():
+    src = (_SCRIPTS / "patent_figure" / "deliverable.py").read_text(encoding="utf-8")
+    calls = [line.strip() for line in src.splitlines() if "zipfile.ZipFile(" in line]
+    assert calls == ['with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as zf:'], calls
+    body = src[src.index("def write_docx("):]
+    assert "zipfile.ZipFile(str(tmp)" in body and 'tmp = path.with_name(path.name + ".tmp")' in body
 
 
 def test_deliverable_check_only_reads_zip_containers():

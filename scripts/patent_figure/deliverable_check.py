@@ -454,6 +454,57 @@ def _picture_whitelist(inl, where: str) -> List[str]:
     return errors
 
 
+def _rpr_controlled(rpr) -> bool:
+    """The only run / paragraph-mark formatting the writer emits: explicitly visible."""
+    kids = [(_local(c), dict(c.attrib)) for c in rpr]
+    return kids == [("vanish", {_q(_W, "val"): "0"}), ("webHidden", {_q(_W, "val"): "0"})] \
+        and not rpr.attrib
+
+
+_HIDING = ("vanish", "webHidden", "specVanish")
+
+
+def _hidden_formatting(root, part: str) -> List[str]:
+    """Display-hiding formatting anywhere in a part, named in plain words (the exact package
+    comparison rejects it anyway; this says WHY)."""
+    out = []
+    for el in root.iter():
+        name = _local(el)
+        val = str(_wattr(el, "val", "1")).lower()
+        if name in _HIDING and val not in ("0", "false", "off"):
+            out.append("%s 里有隐藏格式 <%s>（内容不会显示）" % (part, name))
+        elif name == "color" and val in ("ffffff", "white"):
+            out.append("%s 里有白色文字格式（color=%s）" % (part, _wattr(el, "val")))
+        elif name in ("sz", "szCs") and val in ("0", "1"):
+            out.append("%s 里有近乎为零的字号（%s=%s）" % (part, name, _wattr(el, "val")))
+    return out
+
+
+def _package_conforms(parts: Dict[str, bytes], extents: List[Tuple[int, int]],
+                      title: str) -> List[str]:
+    """CLOSED-SET check of the whole package (WP2 R2d): exactly the writer's parts — no more, no
+    fewer — and every non-media part byte-identical to the writer's fixed template rebuilt from
+    the values read back (picture extents, title). Styles (docDefaults rPr/pPr, Normal), settings,
+    content types, relationships and the document body cannot carry anything the writer did not
+    write — inherited hidden formatting included."""
+    errors: List[str] = []
+    if title not in _D.DOCX_TITLES:
+        errors.append("Word 标题 %r 不是写出端的取值" % title)
+        return errors
+    expected = _D.docx_parts(extents, title)
+    want = set(expected) | {"word/media/image%d.png" % k for k in range(1, len(extents) + 1)}
+    extra, missing = sorted(set(parts) - want), sorted(want - set(parts))
+    if extra:
+        errors.append("Word 包里有写出端不会产生的部件 %s" % extra[:6])
+    if missing:
+        errors.append("Word 包缺部件 %s" % missing[:6])
+    for name, data in expected.items():
+        if name in parts and parts[name] != data:
+            errors.append("Word 包部件 %s 与写出端固定模板不一致（被修改过：样式、设置、关系或正文结构）"
+                          % name)
+    return errors
+
+
 def _attrs_only(el, allowed: set, where: str, errors: List[str]) -> None:
     """Every attribute of ``el`` (namespace-stripped) must be in ``allowed``."""
     for name, value in el.attrib.items():
@@ -588,10 +639,14 @@ def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[st
             continue
         run = drawings[0]
         for el in run:
-            if _local(el) == "rPr" and len(list(el)):
-                errors.append("%s图片所在文字段带字符格式（可能升降或缩放）" % where)
+            if _local(el) == "rPr" and not _rpr_controlled(el):
+                errors.append("%s图片所在文字段的字符格式不是写出端的受控格式（可能隐藏、升降或缩放）"
+                              % where)
             elif _local(el) not in ("rPr", "drawing"):
                 errors.append("%s图片所在文字段有额外内容 <%s>" % (where, _local(el)))
+        mark = props.get("rPr")
+        if mark is not None and not _rpr_controlled(mark):
+            errors.append("%s段落标记的字符格式不是写出端的受控格式" % where)
         for r in p.findall(_q(_W, "r")):
             if r is not run and any(_local(c) != "rPr" for c in r):
                 errors.append("%s有额外的文字段" % where)
@@ -618,11 +673,7 @@ def check_docx(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dic
     path = Path(path)
     try:
         with zipfile.ZipFile(str(path)) as zf:          # read-only; everything read up front
-            names = set(zf.namelist())
-            parts = {n: zf.read(n) for n in names
-                     if n in ("word/document.xml", "word/_rels/document.xml.rels",
-                              "word/settings.xml", "word/styles.xml")
-                     or n.startswith("word/media/")}
+            parts = {n: zf.read(n) for n in zf.namelist() if not n.endswith("/")}
         root = ET.fromstring(parts["word/document.xml"])
         rels = ET.fromstring(parts["word/_rels/document.xml.rels"])
         settings = ET.fromstring(parts["word/settings.xml"]) if "word/settings.xml" in parts \
@@ -634,6 +685,23 @@ def check_docx(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dic
         return rep
     rel_target = {r.get("Id"): r.get("Target") for r in rels.iter(_q(_PKG_REL, "Relationship"))}
     errors, geo, pictures = _docx_structure(root, settings, styles, sp)
+    for name, el in (("word/styles.xml", styles), ("word/document.xml", root),
+                     ("word/settings.xml", settings)):
+        if el is not None:
+            errors += _hidden_formatting(el, name)
+    extents = []
+    for _i, _p, inl in pictures:
+        ext = inl.find(_q(_WP, "extent"))
+        try:
+            extents.append((int(ext.get("cx")), int(ext.get("cy"))))
+        except (TypeError, ValueError, AttributeError):
+            extents.append((-1, -1))
+    try:
+        core = ET.fromstring(parts.get("docProps/core.xml", b"<x/>"))
+        title = "".join(t.text or "" for t in core.iter("{http://purl.org/dc/elements/1.1/}title"))
+    except ET.ParseError:
+        title = ""
+    errors += _package_conforms(parts, extents, title)
     pages = []
     if geo:
         (pw, ph), margins, (body_w, body_h) = geo["page_mm"], geo["margins"], geo["body_mm"]

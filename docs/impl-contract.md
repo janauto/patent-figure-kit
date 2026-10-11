@@ -2278,7 +2278,7 @@ N10/N10b 金样）**没有任何改动**：版式、dpi、候选、白话层都�
 共用，只依赖源图与所选预设）；缩放比 = min(1, 图区宽/窗宽, 图区高/窗高)——**从不放大**；栅格用
 ezdxf matplotlib 后端（面向对象 API，不碰 pyplot 全局状态），灰度 8 位，像素尺寸 = 版面尺寸 × dpi，
 轴精确钉在 wpx × hpx 像素上。PDF 用 `PdfPages`，`imshow(interpolation='none')` 使图片按原生分辨率
-嵌入；Word 用 python-docx：同页边、每页一个居中嵌入式图片、第 2 页起 `pageBreakBefore`、图片按版面
+嵌入；Word 由**内置固定模板**写出（修复轮 4 起，不再用 python-docx，见 §14.11）：同页边、每页一个居中嵌入式图片、第 2 页起 `pageBreakBefore`、图片按版面
 尺寸精确放置。页序 = 图号序（「图N」由标注步骤写进规范版本，N = plan.figures 顺序）。
 
 **逐页检查**（对**写出的文件本身**，`deliverable_check.check_document`）：
@@ -2429,3 +2429,16 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   `stretch/fillRect`)、`spPr`(`xfrm` 无旋转翻转、`off`=0、`ext`；`prstGeom rect`)）。**任何未列出的属性或子元素即拒绝**；
   `wp:docPr` 或 `pic:cNvPr` 的 `hidden`（1/true）另按名报「图片被设为隐藏」。页段落、段落属性（spacing/ind/jc/
   pageBreakBefore）、文字段、节属性（pgSz/pgMar/cols/docGrid）也只接受写出端产生的属性。
+
+### 14.11 修复轮 4（Codex R2d）收敛：Word 包整体封闭
+
+- **写出端固定模板**：`deliverable.write_docx` 不再用 python-docx，整个包由 `deliverable.docx_parts` 的固定模板
+  写出——`[Content_Types].xml`、`_rels/.rels`、`docProps/core.xml`（标题只取 `DOCX_TITLES` 三种）、`word/document.xml`、
+  `word/_rels/document.xml.rels`、`word/styles.xml`（只有 docDefaults + Normal；rPrDefault 显式 `vanish=0`、`webHidden=0`、
+  黑色、五号字；pPrDefault 单倍行距零间距零缩进）、`word/settings.xml`（最小集）与 `word/media/image{k}.png`。每页段落的
+  段落标记与图片所在文字段都显式写出受控 rPr（`vanish=0`、`webHidden=0`）。
+- **核验端封闭集**：`deliverable_check._package_conforms` 用读回的图片尺寸与标题重建全部非媒体部件，要求**部件集合相同、
+  逐字节相同**——样式（docDefaults 的 rPr 与 pPr、Normal 及任何新增样式）、设置、内容类型、关系、正文结构都不可能
+  带写出端没写的东西（继承的隐藏格式一并封住）。另对 styles/document/settings 扫描隐藏类格式（vanish/webHidden/
+  specVanish 非 0、白色文字、字号 0/1）给出白话原因。原有逐段结构检查与图片白名单保留（报具体原因）。
+- 导出包的 Word 因此不再依赖可选包 python-docx（`docx_available` 恒为真）。

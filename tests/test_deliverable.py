@@ -333,7 +333,8 @@ _NORMAL = '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name 
      "字符/行单位"),
     ("word/styles.xml", lambda x: x.replace(_NORMAL, _NORMAL + '<w:pPr><w:framePr w:w="2000"/></w:pPr>', 1),
      "framePr"),
-    ("word/styles.xml", lambda x: x.replace('<w:spacing w:after="200"', '<w:spacing w:beforeLines="500" w:after="200"', 1),
+    ("word/styles.xml", lambda x: x.replace('<w:pPrDefault><w:pPr><w:spacing w:before="0"',
+                                            '<w:pPrDefault><w:pPr><w:spacing w:beforeLines="500" w:before="0"', 1),
      "字符/行单位"),
     ("word/media/image1.png", _squash_png, "宽高比"),
 ])
@@ -368,7 +369,7 @@ def test_word_hidden_picture_is_refused(two, where, value):
     sp = D.spec("standard", 300)
     good = tmp / "good.docx"
     _build(rows, sp, good, "docx")
-    tag = '<wp:docPr id="1"' if where == "docPr" else '<pic:cNvPr id="0"'
+    tag = '<wp:docPr id="1"' if where == "docPr" else '<pic:cNvPr id="1"'
     bad = tmp / "hidden.docx"
     _rewrite_docx(good, bad, lambda x: x.replace(tag, tag + ' hidden="%s"' % value, 1))
     rep = _check(bad, rows, sp)
@@ -379,10 +380,9 @@ def test_word_hidden_picture_is_refused(two, where, value):
 @pytest.mark.parametrize("inject", [
     lambda x: x.replace('<wp:docPr id="1"', '<wp:docPr id="1" title="x"', 1),           # attribute
     lambda x: x.replace("<pic:cNvPicPr/>", '<pic:cNvPicPr preferRelativeResize="0"/>', 1),
-    lambda x: x.replace('<a:prstGeom prst="rect"/>',
-                        '<a:prstGeom prst="rect"/><a:ln w="9525"/>', 1),             # element
+    lambda x: x.replace('</a:prstGeom>', '</a:prstGeom><a:ln w="9525"/>', 1),     # element
     lambda x: x.replace('<wp:extent ', '<wp:extent foo="1" ', 1),
-    lambda x: x.replace("<w:r><w:drawing>", '<w:r w:rsidR="00A1"><w:drawing>', 1),
+    lambda x: x.replace("<w:r><w:rPr>", '<w:r w:rsidR="00A1"><w:rPr>', 1),
     lambda x: x.replace('<w:jc w:val="center"/>', '<w:jc w:val="center" w:extra="1"/>', 1),
 ])
 def test_word_unknown_attribute_or_element_is_refused(two, inject):
@@ -400,6 +400,76 @@ def test_word_unknown_attribute_or_element_is_refused(two, inject):
     rep = _check(bad, rows, sp)
     assert not rep["ok"]
     assert any("未知" in e for e in rep["errors"]), rep["errors"]
+
+
+_RPR_DEFAULT = "<w:rPrDefault><w:rPr>"
+
+
+def _add_part(name: str, data: bytes):
+    def inject(src: Path, dst: Path):
+        with zipfile.ZipFile(str(src)) as zin, zipfile.ZipFile(str(dst), "w") as zout:
+            for item in zin.infolist():
+                zout.writestr(item, zin.read(item.filename))
+            zout.writestr(name, data)
+    return inject
+
+
+@pytest.mark.parametrize("part, inject, expect", [
+    # inherited hidden character formatting (R2d): docDefaults rPr / Normal style rPr
+    ("word/styles.xml", lambda x: x.replace(_RPR_DEFAULT, _RPR_DEFAULT + "<w:vanish/>", 1), "隐藏格式"),
+    ("word/styles.xml", lambda x: x.replace("<w:qFormat/></w:style>",
+                                            "<w:qFormat/><w:rPr><w:vanish/></w:rPr></w:style>", 1),
+     "隐藏格式"),
+    ("word/styles.xml", lambda x: x.replace('<w:webHidden w:val="0"/>', "<w:webHidden/>", 1),
+     "隐藏格式"),
+    ("word/styles.xml", lambda x: x.replace('<w:sz w:val="21"/>', '<w:sz w:val="0"/>', 1), "字号"),
+    ("word/styles.xml", lambda x: x.replace('<w:color w:val="000000"/>', '<w:color w:val="FFFFFF"/>', 1),
+     "白色"),
+    ("word/styles.xml", lambda x: x.replace("</w:styles>", '<w:style w:type="character" w:styleId="X">'
+                                            '<w:name w:val="X"/><w:rPr><w:specVanish/></w:rPr></w:style></w:styles>', 1),
+     "固定模板"),
+    # settings / package plumbing
+    ("word/settings.xml", lambda x: x.replace("<w:defaultTabStop", "<w:mirrorMargins/><w:defaultTabStop", 1),
+     "固定模板"),
+    ("word/settings.xml", lambda x: x.replace("<w:defaultTabStop", "<w:doNotDisplayPageBoundaries/><w:defaultTabStop", 1),
+     "固定模板"),
+    ("[Content_Types].xml", lambda x: x.replace("</Types>", '<Default Extension="jpeg" ContentType="image/jpeg"/></Types>', 1),
+     "固定模板"),
+    ("word/_rels/document.xml.rels", lambda x: x.replace("</Relationships>",
+     '<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>', 1),
+     "固定模板"),
+    # the run's own explicit visibility switched off
+    ("word/document.xml", lambda x: x.replace('<w:r><w:rPr><w:vanish w:val="0"/>', "<w:r><w:rPr><w:vanish/>", 1),
+     "隐藏格式"),
+])
+def test_word_package_is_a_closed_set(two, part, inject, expect):
+    """R2d: the whole package must equal the writer's fixed templates — inherited hidden
+    formatting (docDefaults / Normal rPr vanish, webHidden, size 0, white text), extra styles,
+    settings, content types or relationships all fail; the original export passes."""
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    assert _check(good, rows, sp)["ok"]                    # the original export passes
+    bad = tmp / "bad.docx"
+    _rewrite_docx(good, bad, inject, part)
+    with zipfile.ZipFile(str(good)) as a, zipfile.ZipFile(str(bad)) as b:
+        assert a.read(part) != b.read(part), "注入没有生效"
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"], rep
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert expect in msgs, msgs
+
+
+def test_word_package_with_an_extra_part_fails(two):
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    bad = tmp / "extra.docx"
+    _add_part("word/header1.xml", b"<w:hdr/>")(good, bad)
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"] and any("不会产生的部件" in e for e in rep["errors"])
 
 
 def test_written_word_sets_every_layout_property_explicitly(two):
@@ -498,3 +568,20 @@ def test_a_checker_that_raises_quarantines_the_written_document(tmp_path, monkey
     assert not any(n.startswith("说明书附图_") for n in names), names
     assert "_未通过核验/说明书附图_递交版.pdf" in names
     assert out["manifest"]["fig1/递交版/dxf"] == "ok"
+
+
+def test_fixed_template_word_opens_in_an_independent_reader(two):
+    """The hand-built package is a valid WordprocessingML document for a third-party reader
+    (python-docx, when installed): two paragraphs, two inline pictures at the written size."""
+    docx = pytest.importorskip("docx")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    pages = _build(rows, sp, tmp / "w.docx", "docx")
+    doc = docx.Document(str(tmp / "w.docx"))
+    assert len(doc.paragraphs) == 2 and len(doc.inline_shapes) == 2
+    for shape, page in zip(doc.inline_shapes, pages):
+        assert abs(shape.width.mm - page.placement["w"]) < 0.01
+        assert abs(shape.height.mm - page.placement["h"]) < 0.01
+    sec = doc.sections[0]
+    assert abs(sec.page_width.mm - 210) < 0.1 and abs(sec.left_margin.mm - 25) < 0.1
+    assert doc.core_properties.title == "说明书附图"
