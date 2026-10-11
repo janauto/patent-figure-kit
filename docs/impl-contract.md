@@ -2095,3 +2095,28 @@ produced the bogus "jsonschema missing" reading on the first pass.
 - **回收**：`VersionStore.reclaim()` 保护 current、运行中作业与被引用版本，默认保留最近 N 个
   成功版本，回收其余失败/过期版本；新建渲染作业前检查剩余磁盘空间，不足则 507 拒绝。
 - **幂等键**按 `(project_id, kind, key)` 联合索引；同键不同输入（plan ETag 变化）返回 409。
+
+#### 13.5.2 R1d 收敛：单一发布服务 + 单一版本读取
+
+四个入口不再各写一套发布/读取代码；全部收敛到两处：
+
+- **`patent_figure/publish.py`（单一渲染服务）**：`prepare(ws, rid)`（计划锁内冻结输入 + 分配
+  工程级单调 revision）与 `run_and_publish(ws, rid, rev, ...)`（版本目录内生成整套 → 写
+  `result.json` → `seal`（fsync + 记录大小）→ `verify` → **仅当 ok 且修订更新**才
+  `commit_pointer`（`on_committed` 在锁内不可逆）→ 视图刷新独立、可重试、失败不改结论）。
+  REST 异步、REST `?wait=1`、浏览器 `/api/render`、独立 Plan Studio `_local_render`、
+  MCP `render_project`、直接 CLI 全部经它。
+- **`VersionStore.snapshot()`（单一版本读取）**：一次读 `current.json` 得到 `(rid, vdir, result)`，
+  读者整次操作只用该目录——文件服务、`/api/preview`、浏览器/REST/MCP 导出、MCP 图片、同步渲染
+  返回值都走它，不再分别 `current_dir()` + `current_result()` 而踩指针切换。
+- **提交/视图分离**：`commit_pointer` 只写指针 + fsync 父目录；`refresh_view` 另行刷新 `out/`
+  视图，失败写 `view-dirty.json` 并在下次读取/启动时重试，绝不回滚提交。
+- **恢复对账**：启动按 `verify()`（而非 complete 标记）+ 封口 `result.ok` 恢复真实终态：current
+  且完整 → succeeded；非 current 的 ok=false 封口版本其作业中断 → failed 并重建 error/result/终态
+  事件。导出入口同样 `verify()`，损坏即 409。
+- **版本引用**：导出等长读取 `ref(rid)` 登记、结束 `unref`；`reclaim()` 在 `state_lock` 内把被
+  引用版本纳入保护集，不会删正在被导出的源版本。
+- **worker 取消**：归属判定与 kill 同在 `abort_lock` 内完成，关闭「A 取消误杀接管同一子进程的
+  B」交接窗口；回退子进程超时 kill+回收。
+- **直接 CLI**：独立 sibling 目录生成整套（图 + QA + 标记表）→ 单次 rename 对切换 out；失败/中断
+  保留上一版本完整；`--only` 先并入上一版本其余图再整套切换。

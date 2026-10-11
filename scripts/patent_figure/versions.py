@@ -35,6 +35,7 @@ from patent_figure import project_io as _pio
 
 _state_locks: Dict[str, threading.RLock] = {}
 _rev_locks: Dict[str, threading.Lock] = {}
+_refs: Dict[str, Dict[str, int]] = {}        # ws_root -> {rid: refcount}, guarded by state_lock
 _guard = threading.Lock()
 
 #: Default retention: keep this many most-recent successful (non-current) versions; older
@@ -200,21 +201,92 @@ class VersionStore:
         rid = self.current_id()
         return self.read_result(rid) if rid and self.is_complete(rid) else None
 
-    def publish(self, rid: str, revision: Optional[int] = None) -> bool:
-        """Commit: atomically point ``current.json`` at a complete, verified version — but only
-        if ``revision`` is newer than what is current (monotonic, R1c #3). Returns True if it
-        became current, False if refused as stale (the version stays as history). Caller holds
-        ``state_lock``."""
+    def snapshot(self):
+        """Resolve the current version in ONE read and return ``(rid, vdir, result)`` — every
+        reader/exporter uses this so figures, qa, numerals, descriptions and images all come
+        from the same version, never racing the pointer (R1d #2). Returns (None, None, None)
+        when there is no published version. Repairs the ``out/`` view lazily if it is dirty."""
+        rid = self.current_id()
+        if not rid or not self.is_complete(rid):
+            return None, None, None
+        self.ensure_view()
+        return rid, self.version_dir(rid), self.read_result(rid)
+
+    # -- out/ view + dirty marker (R1d #3/#4) --------------------------------
+    @property
+    def _view_dirty_file(self) -> Path:
+        return self.root / "view-dirty.json"
+
+    def mark_view_dirty(self, rid: str) -> None:
+        try:
+            _pio.atomic_write_json(self._view_dirty_file, {"render_job_id": str(rid)})
+        except OSError:
+            pass
+
+    def refresh_view(self) -> bool:
+        """Refresh the ``out/`` view to the current version. On failure, persist a dirty marker
+        and return False (the commit stands; the view is retried later). Returns True on success."""
+        rid = self.current_id()
+        if not rid:
+            return False
+        try:
+            self.sync_out(rid)
+            try:
+                self._view_dirty_file.unlink()
+            except OSError:
+                pass
+            return True
+        except OSError:
+            self.mark_view_dirty(rid)
+            return False
+
+    def ensure_view(self) -> None:
+        """Cheap: if a prior view refresh failed (dirty marker present), retry it now."""
+        if self._view_dirty_file.is_file():
+            self.refresh_view()
+
+    # -- version references (R1d #6) -----------------------------------------
+    def ref(self, rid: str) -> None:
+        """Pin a version against reclamation for the duration of a long read (export)."""
+        with state_lock(self.root):
+            _refs.setdefault(str(self.root.resolve()), {})
+            _refs[str(self.root.resolve())][str(rid)] = \
+                _refs[str(self.root.resolve())].get(str(rid), 0) + 1
+
+    def unref(self, rid: str) -> None:
+        with state_lock(self.root):
+            d = _refs.get(str(self.root.resolve()), {})
+            if d.get(str(rid), 0) <= 1:
+                d.pop(str(rid), None)
+            else:
+                d[str(rid)] -= 1
+
+    def referenced(self) -> set:
+        with state_lock(self.root):
+            return set(_refs.get(str(self.root.resolve()), {}).keys())
+
+    def commit_pointer(self, rid: str, revision: Optional[int] = None) -> bool:
+        """Commit ONLY the pointer (R1d #3): verify integrity, enforce monotonic revision, write
+        ``current.json`` atomically + fsync its parent dir. Does NOT touch the ``out/`` view —
+        that is refreshed separately so a view-refresh failure can never un-commit. Returns True
+        if this version became current, False if refused as stale. Caller holds ``state_lock``."""
         if revision is None:
             revision = self.revision_of(rid)
         if not self.verify(rid):
             raise ValueError("拒绝发布未通过完整性校验的版本 %s" % rid)
         if revision <= self.current_revision() and self.current_id() is not None:
             return False                                 # stale: keep as history, don't overwrite
-        _pio.atomic_write_json(self.current_file, {"render_job_id": str(rid), "revision": int(revision)})
+        _pio.atomic_write_json(self.current_file,
+                               {"render_job_id": str(rid), "revision": int(revision)})
         _fsync_path(self.root)                           # fsync the pointer's parent dir (R1c #6)
-        self.sync_out(rid)
         return True
+
+    def publish(self, rid: str, revision: Optional[int] = None) -> bool:
+        """Back-compat convenience: commit the pointer, then (best-effort) refresh the view."""
+        became = self.commit_pointer(rid, revision)
+        if became:
+            self.refresh_view()
+        return became
 
     # -- the out/ view -------------------------------------------------------
     def sync_out(self, rid: str) -> None:
@@ -275,12 +347,8 @@ class VersionStore:
                 if (vd.is_dir() and not self.is_complete(vd.name)
                         and not self.is_cancelled(vd.name)):
                     incomplete.append(vd.name)
-        rid = self.current_id()
-        if rid and self.is_complete(rid):
-            try:
-                self.sync_out(rid)
-            except OSError:
-                pass        # view refresh is retried on the next call; commit stays intact
+        if self.current_id() and self.is_complete(self.current_id()):
+            self.refresh_view()     # retries a dirty/interrupted swap; never un-commits
         return incomplete
 
     # -- reclamation (R1c #11) ----------------------------------------------
@@ -288,20 +356,24 @@ class VersionStore:
         """Delete reclaimable version directories: all stale failed/cancelled ones, and
         successful ones beyond the most-recent ``keep_success`` — never the current version or
         any id in ``protected`` (running jobs, export references). Returns removed ids."""
-        protected = set(protected or set())
-        cur = self.current_id()
-        if cur:
-            protected.add(cur)
-        if not self.results.is_dir():
-            return []
-        dirs = [d for d in self.results.iterdir() if d.is_dir()]
-        dirs.sort(key=lambda d: d.stat().st_mtime)
-        successes = [d.name for d in dirs if self.is_complete(d.name)]
-        keep = set(successes[-keep_success:]) | protected
-        removed = []
-        for d in dirs:
-            if d.name in keep:
-                continue
-            shutil.rmtree(d, ignore_errors=True)
-            removed.append(d.name)
-        return removed
+        # Run the whole decision under the state lock so a concurrent ref() (export pinning a
+        # version) and the reclaim set are consistent (R1d #6).
+        with state_lock(self.root):
+            protected = set(protected or set())
+            protected |= self.referenced()               # versions pinned by active reads
+            cur = self.current_id()
+            if cur:
+                protected.add(cur)
+            if not self.results.is_dir():
+                return []
+            dirs = [d for d in self.results.iterdir() if d.is_dir()]
+            dirs.sort(key=lambda d: d.stat().st_mtime)
+            successes = [d.name for d in dirs if self.is_complete(d.name)]
+            keep = set(successes[-keep_success:]) | protected
+            removed = []
+            for d in dirs:
+                if d.name in keep:
+                    continue
+                shutil.rmtree(d, ignore_errors=True)
+                removed.append(d.name)
+            return removed

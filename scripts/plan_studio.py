@@ -545,13 +545,11 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
                                     if fnmatch.fnmatchcase(n, selector))
 
     def _local_render() -> dict:
-        """Version-store render (standalone plan_studio, no workbench job layer). Mirrors the
-        workbench isolated job: freeze → render into an immutable version dir → seal → publish
-        via current.json under the state lock. Never deletes or writes ws.out directly."""
-        from patent_figure import versions as _VS
-        from patent_figure import project_io as _pio
+        """Standalone Plan Studio render — routed through the SAME publish service as every
+        other entry (R1d #1): prepare (freeze + revision) → run_and_publish (seal + verify +
+        commit pointer + view). No hand-rolled freeze/publish, no direct ws.out writes."""
+        from patent_figure import publish as _PUB
         result: dict = {"figures": [], "ok": False, "log": "", "numerals": None}
-        vs = _VS.VersionStore(ws.root)
         rid = "local-" + time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
         try:
             check = validate_now()
@@ -559,17 +557,13 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
                 result["log"] = "计划未通过校验，未渲染。"
                 result["validate"] = check
                 return result
-            with _pio.plan_lock(ws.plan):
-                vd = vs.begin(rid)
-                shutil.copy2(ws.plan, vd / "inputs" / "plan.json")
-                shutil.copy2(ws.assembly, vd / "inputs" / "assembly.json")
-            ok, result, manifest = studio_ext.render_version(
-                vd, vd / "inputs" / "plan.json", vd / "inputs" / "assembly.json",
-                ws.cache, run_cli, dxf_to_svg)
-            manifest["render_job_id"] = rid
-            vs.write_manifest(rid, manifest)
-            with _VS.state_lock(ws.root):
-                vs.publish(rid)
+            snap = _PUB.prepare(ws, rid)
+            out = _PUB.run_and_publish(ws, rid, int(snap["revision"]), run_cli, dxf_to_svg,
+                                       inputs=snap)
+            result = out["result"]
+            if not out["became_current"] and out["ok"]:
+                result.setdefault("log", "")
+                result["log"] += "\n（本次渲染已完成但非最新修订，未切换为当前版本）"
             part_names = [p["name"] for p in load_json(ws.assembly).get("parts", [])]
             if result.get("numerals"):
                 resolve_numeral_parts(result["numerals"], part_names)
@@ -638,10 +632,9 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
     def preview(name: str):
         if not re.fullmatch(r"[A-Za-z0-9_\-]+\.(svg|png|dxf)", name):
             raise HTTPException(400, "非法文件名")
-        # R1c #1: resolve the current version directory via current.json and serve from it,
-        # so the read is pinned to one version; a lazy PNG is generated inside that dir.
+        # R1d #2: resolve the current version in ONE read and serve from that directory.
         from patent_figure import versions as _VS
-        vdir = _VS.VersionStore(ws.root).current_dir()
+        _rid, vdir, _res = _VS.VersionStore(ws.root).snapshot()
         if vdir is None:
             raise HTTPException(404, "还没有已发布的渲染版本")
         path = vdir / name

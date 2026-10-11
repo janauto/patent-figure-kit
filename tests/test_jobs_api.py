@@ -546,6 +546,103 @@ def test_idempotency_different_plan_conflicts(client, fresh_project):
     assert r2.status_code == 409
 
 
+def test_export_rejects_corrupted_version(client, fresh_project):
+    """R1d #5: export must call verify() — a truncated DXF in the sealed version is rejected
+    (409), not packaged."""
+    import workbench as W
+    from patent_figure import versions as VS
+    pid = fresh_project
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    rid = rr.json()["job_id"]                      # the render job id == version id
+    _poll(client, rid)
+    ws_root = client.app.reg.need(pid).root / "studio"
+    vdir = VS.VersionStore(ws_root).version_dir(rid)
+    dxf = next(p for p in vdir.glob("*.dxf") if not p.stem.endswith(("_annotated", "_filing")))
+    dxf.write_text("", encoding="utf-8")          # truncate a sealed artefact
+    r = client.post("/v1/projects/%s/export" % pid, headers=H,
+                    json={"formats": ["dxf"], "render_job_id": rid})
+    assert r.status_code == 409
+
+
+def test_export_reflects_current_version_consistently(client, fresh_project):
+    """R1d #2: export figures/manifest come from one resolved version (the current one)."""
+    pid = fresh_project
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    _poll(client, rr.json()["job_id"])
+    ex = client.post("/v1/projects/%s/export" % pid, headers=H, json={"formats": ["dxf"]})
+    j = _poll(client, ex.json()["export_id"])
+    assert j["state"] == "succeeded"
+    figs = {f["id"] for f in client.get(
+        "/v1/projects/%s/figures" % pid, headers=H).json()["figures"]}
+    manifest_figs = {k.split("/")[0] for k in j["result"]["manifest"]}
+    assert manifest_figs == figs                   # export set == current figures
+
+
+def test_mcp_render_project_binds_this_job(client, fresh_project):
+    """R1d #9: MCP render_project returns THIS render's result, not shared render_state."""
+    pid = fresh_project
+    r = client.post("/mcp", headers=H, json={
+        "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        "params": {"name": "render_project", "arguments": {"project_id": pid}}})
+    sc = r.json()["result"]["structuredContent"]
+    assert sc["ok"] is True and sc["figures"]
+
+
+def test_recovery_marks_sealed_okfalse_job_failed(client, fresh_project):
+    """R1d #4: a sealed ok=false version whose render job died before raising must recover as
+    FAILED (rebuilt from result.json) — not silently succeeded. 'complete' != success."""
+    import json as _json
+    import workbench as W
+    from starlette.testclient import TestClient
+    from patent_figure import versions as VS
+    pid = fresh_project
+    reg = client.app.reg
+    ws_root = reg.need(pid).root / "studio"
+    vs = VS.VersionStore(ws_root)
+    rid = "okfalse-job"
+    vd = vs.begin(rid)
+    (vd / "fig1.dxf").write_text("x", encoding="utf-8")
+    body = {"figures": [{"id": "fig1", "pass": False}], "ok": False}
+    vs.write_result(rid, body)
+    vs.seal(rid, body, 999)                       # sealed + complete, but ok=false and NOT current
+    # persist a 'running' render job for rid (as if the process died before the failure raise)
+    jobs_dir = reg.data / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    (jobs_dir / (rid + ".json")).write_text(_json.dumps({
+        "id": rid, "kind": "render", "project_id": pid, "state": "running",
+        "events": [{"id": 1, "type": "stage", "stage": "running", "progress": 0.0,
+                    "data": None, "ts": 0}], "next_event": 2}), encoding="utf-8")
+    # rebuild the app (restart) → reconciliation runs
+    c2 = TestClient(W.Dispatcher(W.build_workbench(reg, "t0k", 8790), reg),
+                    base_url="http://127.0.0.1:8790")
+    j = c2.get("/v1/jobs/%s" % rid, headers=H).json()
+    assert j["state"] == "failed", j
+    assert (j.get("result") or {}).get("ok") is False
+    assert j["error"]["code"] == "E_RENDER_NOT_OK"
+
+
+def test_standalone_plan_studio_local_render_uses_publish_service(client, fresh_project):
+    """R1d #1: standalone Plan Studio (no injected render_service) renders through the SAME
+    publish service — a version is committed via current.json, not written to out directly."""
+    import plan_studio as PS
+    from starlette.testclient import TestClient
+    from patent_figure import versions as VS
+    pid = fresh_project
+    ws = client.app.reg.need(pid).workspace()
+    app = PS.build_app(ws, "t0k", render_service=None)   # standalone: forces _local_render
+    c = TestClient(app, base_url="http://127.0.0.1:8425")
+    assert c.post("/api/render", headers={"x-studio-token": "t0k"}).status_code == 200
+    for _ in range(600):
+        st = c.get("/api/render/status", headers={"x-studio-token": "t0k"}).json()
+        if not st["running"] and st.get("result"):
+            break
+        time.sleep(0.5)
+    assert st["result"]["ok"] is True
+    # it went through the version store: current.json names a complete version
+    vs = VS.VersionStore(ws.root)
+    assert vs.current_id() and vs.is_complete(vs.current_id())
+
+
 def test_mcp_has_new_job_tools():
     import workbench_mcp as M
     names = {t["name"] for t in M.TOOLS}

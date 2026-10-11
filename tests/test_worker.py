@@ -142,6 +142,27 @@ def test_snapshot_inputs_hashes(prepared):
     assert W.snapshot_inputs(prepared["plan"]) == snap
 
 
+def test_cancel_a_does_not_kill_b_after_handoff():
+    """R1d #7: once job B has taken over the worker child (current_token == B), a late cancel of
+    job A must NOT kill B's process. Ownership check + kill happen together under abort_lock."""
+    class _StubProc:
+        def __init__(self): self.killed = False
+        def kill(self): self.killed = True
+
+    w = W.Worker.__new__(W.Worker)              # bypass spawn; exercise the lock logic directly
+    import threading
+    w._abort_lock = threading.Lock()
+    w._cancelled = set()
+    w._fallback = {}
+    child_b = _StubProc()
+    w._proc = child_b
+    w._current_token = "B"                       # B is the one now running on the shared child
+    killed = w.abort_if_running("A")             # cancel of the already-finished A
+    assert killed is False and child_b.killed is False, "cancel of A must not kill B"
+    # cancelling the actual current token does kill it
+    assert w.abort_if_running("B") is True and child_b.killed is True
+
+
 def test_fallback_subprocess_timeout_is_killed_and_reaped(prepared):
     """R1c #10: a token-tagged subprocess fallback that times out is killed and reaped (not
     left running), and returns a clear timeout result."""

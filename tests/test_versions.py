@@ -72,17 +72,26 @@ def test_next_revision_is_monotonic(tmp_path):
     assert [s.next_revision() for _ in range(3)] == [1, 2, 3]
 
 
-def test_second_step_crash_leaves_pointer_valid_and_recovers(tmp_path, monkeypatch):
+def test_view_refresh_failure_does_not_uncommit_and_recovers(tmp_path, monkeypatch):
+    """R1d #3: the pointer commit and the out/ view refresh are separate — a view failure
+    (e.g. ENOSPC during the swap) must NOT un-commit; it records a dirty marker and is retried
+    on the next read / at startup recovery."""
     s = V.VersionStore(tmp_path)
     _seal(s, "r1", 1)
-    monkeypatch.setattr(s, "sync_out", lambda rid: (_ for _ in ()).throw(OSError("boom")))
-    with pytest.raises(OSError):
-        with V.state_lock(tmp_path):
-            s.publish("r1", 1)
+    monkeypatch.setattr(s, "sync_out", lambda rid: (_ for _ in ()).throw(OSError("ENOSPC")))
+    with V.state_lock(tmp_path):
+        became = s.commit_pointer("r1", 1)     # pointer commit — does NOT touch the view
+    assert became is True
+    assert s.refresh_view() is False           # view swap fails → dirty, but no exception
+    # the commit stands: current still names r1, and the dirty marker is recorded
     assert s.current_id() == "r1" and s.current_dir() == s.version_dir("r1")
+    assert s._view_dirty_file.is_file()
+    # a fresh store (restart) retries the view and repairs out
+    monkeypatch.undo()
     s2 = V.VersionStore(tmp_path)
     assert s2.recover() == []
     assert (s2.out / "fig1.dxf").read_text(encoding="utf-8") == "dxf-r1"
+    assert not s2._view_dirty_file.exists()
 
 
 def test_sync_out_handles_legacy_real_directory(tmp_path):
@@ -129,6 +138,22 @@ def test_current_dir_none_when_pointer_incomplete(tmp_path):
     from patent_figure import project_io as pio
     pio.atomic_write_json(s.current_file, {"render_job_id": "r1", "revision": 1})
     assert s.current_dir() is None
+
+
+def test_reclaim_protects_referenced_version(tmp_path):
+    """R1d #6: a version pinned by an active read (export) survives reclamation even though it
+    is neither current nor within keep_success."""
+    s = V.VersionStore(tmp_path)
+    for i in range(1, 8):
+        _seal(s, "r%d" % i, i)
+        with V.state_lock(tmp_path):
+            s.publish("r%d" % i, i)            # current advances to r7
+    s.ref("r1")                                 # an export pins the oldest version
+    removed = s.reclaim(keep_success=2)
+    kept = {d.name for d in s.results.iterdir()}
+    assert "r1" in kept and "r1" not in removed, "referenced version must survive reclaim"
+    s.unref("r1")
+    assert "r1" in s.reclaim(keep_success=2)     # once released, it is reclaimable
 
 
 def test_reclaim_keeps_current_and_recent(tmp_path):

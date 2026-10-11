@@ -53,6 +53,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from patent_figure import jobs as JOBS  # noqa: E402
 from patent_figure import project_io as PIO  # noqa: E402
+from patent_figure import publish as PUB  # noqa: E402
 from patent_figure import versions as VS  # noqa: E402
 from patent_figure import worker as WK  # noqa: E402
 
@@ -345,19 +346,20 @@ class Tools:
 
     def render_project(self, args: dict) -> dict:
         pid = args.get("project_id", "")
-        studio = self.reg.studio(pid)
-        res = studio.render_and_wait()
+        # R1d #9: bind to THIS render job and wait on it — never read the shared
+        # render_and_wait result (which can return a prior run on timeout).
+        if getattr(self, "render_sync", None) is not None:
+            return self._figures(pid, self.render_sync(pid, True), brief=True)
+        res = self.reg.studio(pid).render_and_wait()
         return self._figures(pid, res, brief=True)
 
     def get_project_figures(self, args: dict):
         pid = args.get("project_id", "")
         studio = self.reg.studio(pid)
-        # Resolve the current version once and read its sealed result — every reader goes
-        # through current.json, never the mutable render_state (R1c #1).
-        vs = VS.VersionStore(studio.ws.root)
-        vdir = vs.current_dir()
-        res = vs.current_result() or {}
-        data = self._figures(pid, res, brief=False)
+        # Resolve the current version in ONE read (R1d #2): figures AND images come from the
+        # same version, never racing the pointer.
+        _rid, vdir, res = VS.VersionStore(studio.ws.root).snapshot()
+        data = self._figures(pid, res or {}, brief=False)
         if args.get("include_images") and vdir is not None:
             imgs = []
             for f in data["figures"]:
@@ -698,10 +700,9 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                 raise HTTPException(400, "非法路径")
             path = reg.need(pid).root / "studio" / "model.glb"
         elif area == "out":
-            # R1c #1: resolve the current version directory via current.json and serve from it,
-            # so a file read is pinned to one consistent version (not the mutable out view). A
+            # R1d #2: resolve the current version in ONE read and serve from that directory; a
             # lazily-generated PNG's input DXF and output both live in that version dir.
-            vdir = VS.VersionStore(reg.need(pid).root / "studio").current_dir()
+            _rid, vdir, _res = VS.VersionStore(reg.need(pid).root / "studio").snapshot()
             if vdir is None:
                 raise HTTPException(404, "工程还没有已发布的渲染版本")
             path = vdir / name
@@ -776,24 +777,41 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     # 可取消、可查询、可 SSE 订阅。作业状态持久化到 data/jobs/，进程重启后未完成作业标 interrupted。
     jobs = JOBS.JobStore(reg.data / "jobs")
     app.state.jobs = jobs
-    # Startup recovery + transactional reconciliation (R1c #5): re-point each project's out/ view
-    # from current.json (repairs an interrupted swap, independently of the commit), and reconcile
-    # job state with the committed version — a job that is current + whose version is complete
-    # DID commit, so a recovery that marked it 'interrupted' is corrected to succeeded.
+    # Startup recovery + transactional reconciliation (R1d #4/#5): re-point each project's out/
+    # view from current.json (repairs an interrupted swap, independently of the commit), then
+    # reconcile each render job's real terminal state against the sealed version — using
+    # verify() (integrity, not just the complete flag) and the sealed result.ok (not 'complete
+    # == success'). The current version only ever names an ok=true version (ok-gated commit).
     for _proj in reg.all():
         try:
             vs = VS.VersionStore(_proj.root / "studio")
             vs.recover()
             cur = vs.current_id()
-            if cur and vs.is_complete(cur):
+            # a) the current version's job must be succeeded + committed (it did commit)
+            if cur and vs.verify(cur):
                 cjob = jobs.get(cur)
-                if cjob is not None and cjob.state in (JOBS.INTERRUPTED, JOBS.RUNNING,
-                                                       JOBS.QUEUED, JOBS.CANCELLED):
+                if cjob is not None and cjob.state != JOBS.SUCCEEDED:
                     cjob.mark_committed()
-                    if cjob.result is None:
-                        cjob.result = vs.read_result(cur)
+                    cjob.result = cjob.result or vs.read_result(cur)
                     cjob._set_state(JOBS.SUCCEEDED)
                     cjob._persist()
+            # b) a sealed-but-not-current render job (ok=false, or stale) that died pre-raise
+            # must recover as FAILED with a rebuilt error/result — never silently succeeded.
+            for rj in jobs.list(_proj.id):
+                if rj.kind != "render" or rj.state not in (JOBS.INTERRUPTED, JOBS.RUNNING,
+                                                           JOBS.QUEUED):
+                    continue
+                if rj.id == cur:
+                    continue
+                res = vs.read_result(rj.id) if vs.is_complete(rj.id) else None
+                if res is not None and not res.get("ok"):
+                    rj.result = res
+                    rj.error = {"code": "E_RENDER_NOT_OK",
+                                "message": "出图未全部过闸（进程中断后按封口结果恢复）",
+                                "hint": "按每张图的 QA 提示改计划后重渲"}
+                    rj._set_state(JOBS.FAILED)
+                    rj.emit(JOBS.EV_ERROR, rj.error, stage=JOBS.FAILED)
+                    rj._persist()
         except Exception:
             pass
     _proj_locks: Dict[str, threading.Lock] = {}
@@ -825,21 +843,6 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                                    snapshot_cb=ws.snapshot_plan)
         except _pio.PlanConflict as exc:
             raise HTTPException(409, "plan 已被他人修改（ETag 不匹配，当前 %s）" % exc.current)
-
-    def _freeze_inputs(ws, inputs_dir: Path) -> dict:
-        """Copy the job's semantic inputs into its private ``inputs/`` and compute the authoritative
-        job hashes **from the frozen copies** (R1b #3), so the recorded hash and the bytes the
-        job renders are the same snapshot. STEP stays referenced by sha (the project model file
-        is immutable). Must be called inside the plan lock."""
-        inputs_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("plan.json", "assembly.json", "glossary.json", "structure.json"):
-            src = ws.root / name
-            if src.is_file():
-                shutil.copy2(src, inputs_dir / name)
-        frozen_plan = inputs_dir / "plan.json"
-        snap = WK.snapshot_inputs(frozen_plan)          # hashes of the FROZEN files
-        snap["plan_etag"] = PIO.plan_etag(frozen_plan)
-        return snap
 
     def _render_job(pid: str, idem: Optional[str]):
         """The single isolated render job (R1b publish model).
@@ -874,21 +877,13 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if not created:
             return job
         rid = job.id
-        # Freeze + hash + a project-level monotonic revision + persist, inside the plan lock,
-        # before starting (R1c #3). The revision decides commit precedence.
-        with PIO.plan_lock(ws.plan):
-            vstore.begin(rid)
-            snap = _freeze_inputs(ws, vstore.inputs_dir(rid))
-            snap["revision"] = vstore.next_revision()
+        # Freeze + revision via the single service (R1d). Synchronous, under the plan lock.
+        snap = PUB.prepare(ws, rid)
         job.inputs.update(snap)
         job._persist()
 
         def fn(j):
-            j.raise_if_cancelled()                      # before executing
-            vd = vstore.version_dir(rid)
             revision = int(job.inputs.get("revision", 0))
-            plan_p, asm_p = vd / "inputs" / "plan.json", vd / "inputs" / "assembly.json"
-            j.emit(JOBS.EV_STAGE, "渲染中", stage="render", progress=0.2)
             worker = WK.get_shared_worker()
 
             def _cli(argv, timeout=1800):               # route through the worker, tagged for cancel
@@ -896,41 +891,26 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                     return worker.run(argv, timeout=timeout, token=rid)
                 return PS.run_cli(argv, timeout=timeout)
 
-            ok, result, manifest = EXT.render_version(vd, plan_p, asm_p, ws.cache, _cli,
-                                                       PS.dxf_to_svg)
-            j.emit(JOBS.EV_LOG, (result.get("log") or "")[-900:], progress=0.8)
-            j.raise_if_cancelled()                      # before sealing/commit
-            manifest["render_job_id"] = rid
-            manifest["inputs"] = dict(job.inputs)
-            result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            result["render_job_id"] = rid
-            result["ok"] = bool(ok)
-            vstore.write_result(rid, result)            # reader-facing view, sealed with the set
-            vstore.seal(rid, manifest, revision)        # fsync artefacts → manifest (R1c #6)
-            # Commit point: monotonic current.json swap, under the state lock shared with cancel.
-            # committed is recorded IN the lock and is irreversible (R1c #2).
-            became_current = False
-            with VS.state_lock(ws.root):
-                if j.cancel_requested and not j.committed:
-                    vstore.mark_cancelled(rid)
-                    raise JOBS.JobCancelled()
-                became_current = vstore.publish(rid, revision)   # False if a newer rev is current
-                if became_current:
-                    j.mark_committed()                   # irreversible — cancel can't undo it now
-                    try:
-                        (ws.root / "last_render.json").write_text(
-                            json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
-                    except OSError:
-                        pass
-            data = tools._figures(pid, result, brief=True)
-            data["ok"] = bool(ok)
+            def _emit(kind, progress, data=None):
+                if kind == "stage":
+                    j.emit(JOBS.EV_STAGE, "渲染中", stage="render", progress=progress)
+                else:
+                    j.emit(JOBS.EV_LOG, data or "", progress=progress)
+
+            out = PUB.run_and_publish(
+                ws, rid, revision, _cli, PS.dxf_to_svg, inputs=job.inputs,
+                cancel_check=j.raise_if_cancelled,
+                is_cancelled=lambda: j.cancel_requested and not j.committed,
+                emit=_emit, on_committed=j.mark_committed)
+            data = tools._figures(pid, out["result"], brief=True)
+            data["ok"] = bool(out["ok"])
             data["render_job_id"] = rid
             data["revision"] = revision
-            data["became_current"] = became_current
+            data["became_current"] = out["became_current"]
             data["plan_etag"] = job.inputs.get("plan_etag", "")
-            data["manifest"] = manifest
-            if not ok:
-                failed = [f["id"] for f in result["figures"] if not f.get("pass")]
+            data["manifest"] = out["manifest"]
+            if not out["ok"]:
+                failed = [f["id"] for f in out["result"]["figures"] if not f.get("pass")]
                 err = RuntimeError("出图未全部过闸/有图缺失：%s" % (failed or "（无合格图）"))
                 err.code = "E_RENDER_NOT_OK"            # type: ignore
                 err.hint = "按每张图的 QA 提示改计划后重渲"  # type: ignore
@@ -1159,8 +1139,9 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if render_job.state != JOBS.SUCCEEDED:
             raise HTTPException(409, "render_job 未成功（state=%s），不能导出" % render_job.state)
         vdir = _render_version_dir(render_job)
-        if not VS.VersionStore(reg.need(pid).workspace().root).is_complete(render_job.id):
-            raise HTTPException(409, "render_job 的产物版本不完整")
+        # verify() — not just is_complete — so a truncated/missing artefact is rejected (R1d #5).
+        if not VS.VersionStore(reg.need(pid).workspace().root).verify(render_job.id):
+            raise HTTPException(409, "render_job 的产物版本不完整或已损坏（未通过完整性校验）")
         return vdir
 
     def _build_export(version_dir: Path, dest: Path, variant: str, formats, dpi: int):
@@ -1254,26 +1235,31 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if render_job is None:
             render_job = _latest_render_job(pid)
         version_dir = _validate_render_job(render_job, pid)
+        vstore = VS.VersionStore(reg.need(pid).workspace().root)
+        vstore.ref(render_job.id)                        # pin the source version vs reclaim (R1d #6)
         job, _ = jobs.create("export", pid, inputs={
             "formats": formats, "variant": variant or "both", "dpi": dpi,
             "render_job_id": render_job.id})
 
         def fn(j):
-            j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
-            dest = (jobs.root / j.id / "bundle")
-            dest.mkdir(parents=True, exist_ok=True)
-            manifest, notes, dwg_log = _build_export(version_dir, dest, variant or "both",
-                                                     formats, dpi)
-            import zipfile
-            archive = (jobs.root / j.id / "bundle.zip")
-            with zipfile.ZipFile(str(archive), "w", zipfile.ZIP_DEFLATED) as zf:
-                for f in sorted(dest.rglob("*")):
-                    if f.is_file():
-                        zf.write(str(f), f.relative_to(dest).as_posix())
-            return {"export_id": j.id, "render_job_id": render_job.id,
-                    "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
-                    "manifest": manifest, "notes": notes, "dwg_log": dwg_log,
-                    "download_url": base + "/v1/exports/%s/download" % j.id}
+            try:
+                j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
+                dest = (jobs.root / j.id / "bundle")
+                dest.mkdir(parents=True, exist_ok=True)
+                manifest, notes, dwg_log = _build_export(version_dir, dest, variant or "both",
+                                                         formats, dpi)
+                import zipfile
+                archive = (jobs.root / j.id / "bundle.zip")
+                with zipfile.ZipFile(str(archive), "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in sorted(dest.rglob("*")):
+                        if f.is_file():
+                            zf.write(str(f), f.relative_to(dest).as_posix())
+                return {"export_id": j.id, "render_job_id": render_job.id,
+                        "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
+                        "manifest": manifest, "notes": notes, "dwg_log": dwg_log,
+                        "download_url": base + "/v1/exports/%s/download" % j.id}
+            finally:
+                vstore.unref(render_job.id)               # release the pin when the read is done
 
         jobs.start(job, fn)
         return job
@@ -1303,6 +1289,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     tools.start_render = _render_job
     tools.start_export = _start_export
     tools.cancel_service = _cancel_render
+    tools.render_sync = _render_service
 
     @app.post("/v1/projects/{pid}/export", status_code=202, tags=["导出"],
               summary="导出附图包（异步 202 → export_id，绑定一次成功渲染）")

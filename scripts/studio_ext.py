@@ -302,11 +302,15 @@ def apply_terms(ws, rows: List[dict], overwrite: bool = False) -> dict:
 def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: bool,
                   png_dpi: int = EXPORT_PNG_DPI) -> dict:
     files, notes = [], []
-    figs = sorted(result.get("figures", []), key=lambda f: f.get("number", 999))
-    # R1c #1: the browser export reads the pinned current version directory via current.json,
-    # not the mutable out view, so the whole package comes from one consistent version.
+    # R1d #2: one snapshot — figures, numerals, descriptions AND the source directory all come
+    # from the SAME version. The caller's `result` (render_state-derived) is only a legacy
+    # fallback when no version has been published.
     from patent_figure import versions as _VS
-    src_dir = _VS.VersionStore(ws.root).current_dir() or ws.out
+    _rid, src_dir, snap_result = _VS.VersionStore(ws.root).snapshot()
+    if src_dir is None:
+        src_dir = ws.out
+        snap_result = result
+    figs = sorted((snap_result or {}).get("figures", []), key=lambda f: f.get("number", 999))
     # WP1-5: raster PNGs are generated here, at export, by dpi — the interactive path only
     # ever made SVGs. Render each annotated/filing DXF to PNG in-process (matplotlib is
     # imported lazily inside render_preview); a failure is cosmetic and must not block export.

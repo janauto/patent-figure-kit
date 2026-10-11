@@ -874,23 +874,6 @@ def _print_qa_failures(figure_id: str, report: dict) -> None:
             _fail("      修复：%s" % hint)
 
 
-def _clear_published(out_dir: Path) -> None:
-    """Remove a previous run's published artefacts from ``out_dir`` so this run's set fully
-    replaces them (R1c #7). Keeps a frozen ``inputs/`` snapshot and the scratch dir."""
-    if not out_dir.is_dir():
-        return
-    for p in sorted(out_dir.iterdir()):
-        if p.name in ("inputs", WORK_SUBDIR):
-            continue
-        try:
-            if p.is_dir() and not p.is_symlink():
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                p.unlink()
-        except OSError:
-            pass
-
-
 def _publish_figure(figure_id: str, work_dir: Path, dest_dir: Path,
                     info: Dict[str, Any]) -> Path:
     """Move one figure's artefacts from the scratch dir to its final home atomically.
@@ -1014,17 +997,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return EXIT_USAGE
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Whole-set publish (§S0-04 / R1c #7): the output is exactly THIS run's set. Clear any
-    # previously-published artefacts first (keeping a frozen ``inputs/`` and the scratch dir),
-    # so a re-render can never leave a stale figure beside a new reference-numerals table. The
-    # version-store path renders into a fresh version dir, so this is a no-op there; current.json
-    # provides that path's atomicity. reference-numerals is published WITH the figures (below).
-    _clear_published(out_dir)
-    work_dir = out_dir / WORK_SUBDIR
-    diag_dir = out_dir / DIAG_SUBDIR
+    # Whole-set atomic publish (§S0-04 / R1c #7 / R1d #8): render the complete set into an
+    # INDEPENDENT sibling work dir, then swap it into out_dir with a single rename pair at the
+    # end. An interrupt before the swap leaves the previous output fully intact; after the first
+    # rename, out_dir is complete-old or complete-new, never half. The version-store path renders
+    # into a fresh version dir (its atomicity is current.json); this swap is the direct-CLI
+    # guarantee. ``--only`` merges with the previous set (copied in first) so the other figures
+    # survive the swap. reference-numerals is produced in the work dir and swapped WITH the figures.
+    token = "%d.%s" % (os.getpid(), os.urandom(6).hex())
+    work_dir = out_dir.parent / (out_dir.name + ".render-work-" + token)
+    diag_dir = work_dir / DIAG_SUBDIR
     if work_dir.exists():
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
+    if args.only is not None and out_dir.is_dir():
+        # Merge: carry the previous version's other figures into the new set (R1d #8).
+        for p in sorted(out_dir.iterdir()):
+            if p.name in ("inputs", DIAG_SUBDIR) or p.name.startswith(args.only + "."):
+                continue
+            if p.is_file():
+                shutil.copy2(p, work_dir / p.name)
 
     numeral_figures = _numeral_figures(plan_doc, assembly, num)
     numerals_doc, numeral_warnings = write_numerals(
@@ -1088,8 +1080,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               % (figure_id, Path(info["dxf"]).name, info["text_height_mm"], info["scale"],
                  info["axis_angle"], info["instances"], info["labels"], status))
 
-        dest = _publish_figure(figure_id, work_dir, out_dir if gate_pass else diag_dir, info)
-        info["published_to"] = str(dest)
+        # Passing figures already sit in the work-dir root; only quarantine the failures into
+        # work/diag. The whole work dir is swapped into out_dir atomically at the end.
+        if gate_pass:
+            info["published_to"] = str(work_dir)
+        else:
+            dest = _publish_figure(figure_id, work_dir, diag_dir, info)
+            info["published_to"] = str(dest)
         rendered.append(info)
 
         if not gate_pass:
@@ -1102,17 +1099,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 _fail("figure %s 的 QA 闸门未通过（已降级到 %s/）：" % (figure_id, DIAG_SUBDIR))
                 _print_qa_failures(figure_id, report)
 
-    # Publish reference-numerals.json WITH the figures (R1c #7): move it from the scratch dir
-    # to the output directory as part of this run's set, so the numeral table always matches
-    # the figures that were just published (never a stale table beside new figures).
-    staged_numerals = work_dir / NUMERALS_FILENAME
-    if staged_numerals.is_file():
-        os.replace(str(staged_numerals), str(out_dir / NUMERALS_FILENAME))
-
-    # The scratch dir has served its purpose; everything in it was either published to the
-    # output directory or quarantined in diag/.
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
+    # Atomic whole-set swap (R1d #8): preserve a frozen inputs/ by carrying it into the work dir,
+    # then swap out_dir ↔ work_dir with a single rename pair. Before the swap the previous output
+    # is untouched; between the two renames out_dir is either the complete old or complete new
+    # set. A trailing `.render-old-*` is removed best-effort.
+    if (out_dir / "inputs").is_dir() and not (work_dir / "inputs").exists():
+        shutil.copytree(str(out_dir / "inputs"), str(work_dir / "inputs"))
+    trash = out_dir.parent / (out_dir.name + ".render-old-" + token)
+    try:
+        if out_dir.exists():
+            os.replace(str(out_dir), str(trash))
+        os.replace(str(work_dir), str(out_dir))
+    finally:
+        shutil.rmtree(trash, ignore_errors=True)
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     if args.json_out:
         payload = {

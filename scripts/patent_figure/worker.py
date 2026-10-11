@@ -141,23 +141,24 @@ class Worker:
         self.rebuilds = 0
 
     def abort_if_running(self, token: str) -> bool:
-        """Cancel the job identified by ``token`` across all three stages (R1b #9): mark it
-        cancelled (so a job still waiting on ``_lock`` aborts the moment it enters ``run``),
-        kill the worker child if it is currently running that token, and terminate a
-        subprocess-fallback for that token. Safe to call from another thread. Returns True if a
-        process was actually killed."""
+        """Cancel the job identified by ``token`` across all stages (R1b #9 / R1d #7): mark it
+        cancelled (so a job still waiting on ``_lock`` aborts when it enters ``run``), and —
+        **inside ``abort_lock``** — kill the worker child only if ``current_token`` is still this
+        token, and kill its subprocess-fallback. Doing the ownership check AND the kill under the
+        one lock closes the handoff window: if job B has already taken over the child
+        (``current_token == B``), this cancel of A cannot kill B's process. Returns True if a
+        process was killed."""
+        killed = False
         with self._abort_lock:
             self._cancelled.add(token)
-            proc = self._proc if self._current_token == token else None
-            fb = self._fallback.get(token)
-        killed = False
-        for p in (proc, fb):
-            if p is not None:
-                try:
-                    p.kill()
-                    killed = True
-                except Exception:
-                    pass
+            for p in (self._proc if self._current_token == token else None,
+                      self._fallback.get(token)):
+                if p is not None:
+                    try:
+                        p.kill()
+                        killed = True
+                    except Exception:
+                        pass
         return killed
 
     def _is_cancelled(self, token: Optional[str]) -> bool:
