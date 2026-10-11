@@ -2090,8 +2090,8 @@ produced the bogus "jsonschema missing" reading on the first pass.
   不撤销提交。作业若持久化为 committed 但状态 running，恢复为 succeeded。
 - **耐久性顺序**：封口先 fsync 全部产物与版本目录，再写并 fsync `manifest.json`（记录每文件
   大小），最后替换 current 并 fsync 其父目录；`verify()` 按大小校验，恢复与导出据此判完整。
-- **直接 CLI** `render_patent_figure.py` 整套发布：输出目录在本次运行开始时清掉上一轮已发布
-  产物（保留 `inputs/`），reference-numerals 与图一同发布，失败重渲不留「旧图 + 新标记表」。
+- **直接 CLI** `render_patent_figure.py` 整套发布（**已被 §13.5.3 取代**：现为版本指针发布，
+  `-o` 是视图）：reference-numerals 与图同属一个版本，失败重渲不留「旧图 + 新标记表」。
 - **回收**：`VersionStore.reclaim()` 保护 current、运行中作业与被引用版本，默认保留最近 N 个
   成功版本，回收其余失败/过期版本；新建渲染作业前检查剩余磁盘空间，不足则 507 拒绝。
 - **幂等键**按 `(project_id, kind, key)` 联合索引；同键不同输入（plan ETag 变化）返回 409。
@@ -2118,5 +2118,52 @@ produced the bogus "jsonschema missing" reading on the first pass.
   引用版本纳入保护集，不会删正在被导出的源版本。
 - **worker 取消**：归属判定与 kill 同在 `abort_lock` 内完成，关闭「A 取消误杀接管同一子进程的
   B」交接窗口；回退子进程超时 kill+回收。
-- **直接 CLI**：独立 sibling 目录生成整套（图 + QA + 标记表）→ 单次 rename 对切换 out；失败/中断
-  保留上一版本完整；`--only` 先并入上一版本其余图再整套切换。
+- **直接 CLI**：~~独立 sibling 目录 → rename 对切换 out~~（R1e #1 证明第二次 rename 失败会连同
+  新旧两套一起删除，**已废弃**）。现行模型见 §13.5.3：CLI 同样经 `publish.commit_version`。
+
+#### 13.5.3 R1e 收敛：CLI 入服务、标注入闸、单一导出、对账隔离、无结果缓存
+
+- **直接 CLI 走同一发布服务**：`render_patent_figure.py -o OUT`（缺省模式）把整套渲进
+  `OUT.versions/results/<id>/`，经 `publish.commit_version` 提交（单次原子写
+  `OUT.versions/current.json`，仅整套 ok 且可发布才切换）；`OUT` 本身是当前版本的**视图**
+  （POSIX 相对符号链接 / Windows 拷贝），`OUT/fig1.dxf` 路径不变（N9/N10/N15 原样读取）。
+  版本库根不能是 `OUT` 本身——那样视图会变成 `OUT/out/`，所有已发布路径都要改；故取同级
+  `OUT.versions/`。`ok=false` 不切换：`OUT` 保持上一完整版本（首次即失败则不建立视图），
+  失败件与诊断留在本次版本的 `diag/`（`--json` 报告给出 `version`/`published`/
+  `current_version`/`diag_dir`）。没有 rename 对、没有 finally 删除。视图若是目录（Windows
+  拷贝/遗留目录）需「先移开再装入」，第二步失败时把旧视图**改回原位**并标 dirty，绝不删除；
+  遗留的普通目录首次被**移到** `OUT.pre-versions-<stamp>/`（不删），含本次输入（plan/assembly/
+  STEP）或为当前目录的 `-o` 直接用法错误拒绝。`--in-place` 为内部模式（工作台版本目录内渲染）。
+- **标注纳入提交闸门**：`studio_ext.render_version` 在 `annotate_all` 之后按**预期产物清单**
+  逐项核对——冻结 plan 的每张图 × {原始, 交底版, 递交版} × {DXF, SVG, 报告（原始为
+  `.qa.json`，两个标注版为标注报告 `.json`）} + `reference-numerals.json`；任一缺失/为空或标注
+  报错 → `ok=false`，封口留档但不提交。清单写入 manifest 的 `required_artefacts`；`verify()`
+  对声明 ok 的版本按此清单校验（存在、已登记、非空、大小一致），而不只是校验封口时碰巧存在
+  的文件。`VersionStore.is_publishable(rid)` = verify ∧ manifest.ok ∧ result.ok，是「可成为
+  current / 可导出」的唯一判据；`commit_pointer` 自身拒绝不可发布版本。
+- **单一导出服务 `patent_figure/export.py`**：浏览器 `/api/export`、REST `/v1/.../export`、MCP
+  `get_export`（及 MCP `include_images` 长读）共用 `acquire(ws_root, rid=None) -> Pin`：在
+  `state_lock`（与 `reclaim` 同一把）内**一次**完成解析 + `is_publishable` + 登记引用；失败抛
+  `ExportRefused`（→409），无 `ws.out`/缓存结果回退。`Pin.release()` 幂等，作业创建失败、启动
+  失败、导出体结束/失败各路径都释放。`build_bundle(pin, dest, ...)` 只读 `pin.vdir`、只写
+  `dest`（栅格在包内生成，不写版本目录），清单逐「图/版本/格式」ok/skip/fail，源缺失/为空即
+  fail。`zip_dir` 临时文件 + `os.replace`。
+- **启动对账 `publish.reconcile_startup`**：① `reconcile_current`——current 不可发布（verify 失败
+  或封口 ok=false，如旧版本留下的指针）→ 回退到最近的可发布版本，无则清空指针**并移除 out 视图**；
+  ② `recover` 修视图；③ 被隔离版本的作业 `reconcile_failed`（failed、清 committed、重建
+  error、追加 error 终态事件）；④ current（必须可发布）的作业 `reconcile_succeeded`（succeeded、
+  committed、清 error、末个终态事件为 done）；⑤ 其余未完成且封口 ok=false 的作业 → failed。
+  幂等。`JobStore` 恢复的终态作业现在绑定存储，对账变更会持久化。
+- **无结果缓存，读者全从快照派生**：删除 `last_render.json` 与 `render_state`。浏览器
+  `/api/state.render`、`/api/render/status.result`、导出、工作台工程摘要/轮播/showcase、MCP
+  figures 一律 `snapshot()`（每次读 current.json，无缓存可失效——REST/MCP 发布后下一次读取即
+  可见）；**当前作业状态单独返回**：`/api/state.render_job`、`/api/render/status.job`（工作台
+  注入 `job_status`，取该工程最新渲染作业，涵盖 REST/MCP 作业；独立运行时为本子应用作业）。
+  预览/文件地址**携带版本 ID**：`/api/preview/<name>?v=<rid>`、`/files/<pid>/out/<name>?v=<rid>`
+  只服务该已封口版本（id 经白名单正则，非法/未封口 404）；不带 `v` 时取 current。结果里的
+  URL 在封口时即绑定版本。
+- **视图刷新串行化**：`refresh_view` 在独立的视图锁内读 current → 换视图 → 复读 current，变化则
+  重试（亦覆盖不共享进程内锁的另一进程的提交）；current 为空则移除视图。
+- **回收**：`reclaim(keep_success=0)` 不再因 `[-0:]` 切片保留全部；CLI 回收保护未封口目录
+  （可能是另一进程正在渲染）。
+

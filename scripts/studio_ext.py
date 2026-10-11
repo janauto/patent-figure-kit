@@ -15,7 +15,6 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
 
 RENDER_CLI = Path(__file__).resolve().parent / "render_patent_figure.py"
@@ -31,6 +30,30 @@ VARIANT_LABEL = {"annotated": "交底版（图号 + 件号名称表）", "filing
 #: PNG preview resolution at export (WP1-5): the interactive path previews via SVG only, so
 #: raster PNGs are produced just once, here, at export time. 300 dpi matches the F1 default.
 EXPORT_PNG_DPI = 300
+
+#: The deliverable set every figure of an ok version must carry (R1e #2): the raw figure and
+#: its two annotated variants, each as DXF + SVG + its report (QA for raw, annotation report
+#: for the variants). Plus the plan-level numerals table. This is the list ``seal`` records in
+#: the manifest and ``VersionStore.verify`` checks; a version missing any of it is not ok.
+ARTEFACT_SUFFIXES = (".dxf", ".svg", ".qa.json",
+                     "_annotated.dxf", "_annotated.svg", "_annotated.json",
+                     "_filing.dxf", "_filing.svg", "_filing.json")
+NUMERALS_NAME = "reference-numerals.json"
+
+
+def expected_artefacts(figure_ids) -> List[str]:
+    """The declared artefact list for a version whose plan expects ``figure_ids``."""
+    out = [NUMERALS_NAME]
+    for fid in figure_ids:
+        out += [str(fid) + suf for suf in ARTEFACT_SUFFIXES]
+    return sorted(set(out))
+
+
+def preview_url(name: str, rid: Optional[str] = None) -> str:
+    """A preview URL bound to one version (R1e #5): ``/api/preview/<name>?v=<rid>`` serves
+    that version's file, so a page showing version X's result also shows X's pictures — never
+    whatever the pointer names at fetch time."""
+    return "/api/preview/%s" % name + (("?v=%s" % rid) if rid else "")
 
 
 def _load(path: Path, default=None):
@@ -59,9 +82,14 @@ def render_version(vd: Path, plan_path: Path, assembly_path: Path, cache: Path,
     counts as delivered only if the report marks it ``gate_pass``; ``ok`` requires the process to
     exit 0, the report to pass, and **every** figure the frozen plan expects to be delivered
     (R1b #1 — a partial failure can no longer read as success)."""
+    rid = vd.name                                   # the version id (== render job id)
     report_path = vd / "render-report.json"
+    # --in-place: the renderer writes straight into the version dir; the version store (our
+    # caller) owns atomicity + the pointer. Without it the CLI would itself open a version store
+    # and recurse into its own publish path (R1e #1).
     proc = run_cli([str(RENDER_CLI), str(plan_path), "--assembly", str(assembly_path),
-                    "-o", str(vd), "--cache", str(cache), "--json", str(report_path)])
+                    "-o", str(vd), "--cache", str(cache), "--json", str(report_path),
+                    "--in-place"])
     log = ((proc.stdout or "")[-6000:] + "\n" + (proc.stderr or "")[-2000:]).strip()
     report = _load(report_path, {}) or {}
     plan = _load(plan_path, {}) or {}
@@ -85,15 +113,42 @@ def render_version(vd: Path, plan_path: Path, assembly_path: Path, cache: Path,
         qa_file = vd / (fid + ".qa.json")
         qa = _load(qa_file) if qa_file.is_file() else None
         result["figures"].append({"id": fid, "pass": bool(qa and qa.get("pass")),
-                                  "qa": qa, "svg": "/api/preview/%s.svg" % fid})
+                                  "qa": qa, "svg": preview_url(fid + ".svg", rid)})
     present = {f["id"] for f in result["figures"]}
     for fid in expected:                            # make expected-but-missing visible as failed
         if fid not in present:
             result["figures"].append({"id": fid, "pass": False, "qa": None, "svg": None,
                                       "missing": True})
     if any(f["pass"] for f in result["figures"]):
-        annotate_all(SimpleNamespace(plan=plan_path, out=vd, root=vd), run_cli, svg_of, result)
+        annotate_all(vd, plan_path, run_cli, svg_of, result)
+
+    # R1e #2: the commit gate includes ANNOTATION. The expected artefact list — every figure
+    # the frozen plan expects × raw/disclosure/filing × DXF/SVG/report, plus the numerals table
+    # — is checked item by item AFTER annotate_all; any annotation error or any missing/empty
+    # artefact makes the whole version ok=false (it is sealed for inspection but never
+    # committed). The list is recorded in the manifest so verify() checks the declared set.
+    required = expected_artefacts(expected)
+    missing = []
+    for rel in required:
+        p = vd / rel
+        try:
+            if not p.is_file() or p.stat().st_size == 0:
+                missing.append(rel)
+        except OSError:
+            missing.append(rel)
+    ann_errors = {f["id"]: f["annotation_errors"] for f in result["figures"]
+                  if f.get("annotation_errors")}
+    if ok and (missing or ann_errors):
+        ok = False
+        result["log"] = (result.get("log") or "") + "\n" + (
+            "标注/产物不完整，本次不发布：缺 %s%s" % (
+                "、".join(missing[:12]) or "无",
+                ("；标注失败 %s" % sorted(ann_errors)) if ann_errors else ""))
+    result["missing_artefacts"] = missing
+    result["ok"] = ok
     manifest = {"ok": ok, "expected": expected, "delivered": delivered,
+                "required_artefacts": required,
+                "missing_artefacts": missing,
                 "figures": [{"id": f["id"], "pass": bool(f["pass"]),
                              "variants": sorted((f.get("variants") or {}).keys())}
                             for f in result["figures"]]}
@@ -113,20 +168,41 @@ def ensure_preview_png(png_path: Path, dpi: int = EXPORT_PNG_DPI) -> bool:
     dxf = png_path.with_suffix(".dxf")
     if not dxf.is_file():
         return False
+    # Render to a unique temp beside it, then os.replace: a concurrent reader never sees a
+    # half-written PNG, and two concurrent requests cannot interleave writes into one file.
+    import os as _os
+    tmp = png_path.with_name("%s.%d.%s.tmp.png" % (png_path.stem, _os.getpid(),
+                                                   _os.urandom(4).hex()))
     try:
         from patent_figure import sheet as _sheet
-        _sheet.render_preview(dxf, png_path, dpi=dpi)
+        _sheet.render_preview(dxf, tmp, dpi=dpi)
+        _os.replace(str(tmp), str(png_path))
         return png_path.is_file()
     except Exception:
         return False
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
-def annotate_all(ws, run_cli: Callable, svg_of: Callable, result: dict) -> None:
-    """给 result["figures"] 里每张已渲染的图补上两个规范版本与附图说明。"""
-    plan = _load(ws.plan, {}) or {}
+def annotate_all(vd: Path, plan_path: Path, run_cli: Callable, svg_of: Callable,
+                 result: dict) -> None:
+    """给 result["figures"] 里每张已渲染的图补上两个规范版本与附图说明。
+
+    Reads and writes only inside the version directory ``vd`` (never a shared ``out/``); the
+    preview URLs it records are bound to that version (``?v=<rid>``, R1e #5)."""
+    vd = Path(vd)
+    rid = vd.name
+    plan = _load(Path(plan_path), {}) or {}
     order = [f.get("id") for f in plan.get("figures", [])]
-    numerals = ws.out / "reference-numerals.json"
+    numerals = vd / "reference-numerals.json"
     if not numerals.is_file():
+        for fig in result.get("figures", []):
+            if fig.get("pass"):
+                fig.setdefault("annotation_errors", []).append("缺 reference-numerals.json")
         return
     descriptions = []
     for fig in result.get("figures", []):
@@ -138,14 +214,14 @@ def annotate_all(ws, run_cli: Callable, svg_of: Callable, result: dict) -> None:
             continue
         number = order.index(fid) + 1
         fig["number"] = number
-        fig["variants"] = {"raw": "/api/preview/%s.svg" % fid}
-        src = ws.out / (fid + ".dxf")
+        fig["variants"] = {"raw": preview_url(fid + ".svg", rid)}
+        src = vd / (fid + ".dxf")
         for variant in VARIANTS:
-            dst = ws.out / ("%s_%s.dxf" % (fid, variant))
-            rep_path = ws.out / ("%s_%s.json" % (fid, variant))
+            dst = vd / ("%s_%s.dxf" % (fid, variant))
+            rep_path = vd / ("%s_%s.json" % (fid, variant))
             # WP1-5: no --preview here. The interactive preview of the annotated / filing
             # variants goes through the same hand-written interactive SVG (svg_of) as the raw
-            # figure; the raster PNG is produced only at export (export_bundle), by dpi. This
+            # figure; the raster PNG is produced only at export (patent_figure.export), by dpi. This
             # removes one matplotlib launch per variant per render from the "出图" click.
             args = [str(ANNOTATE_CLI), str(src), "--numerals", str(numerals),
                     "--figure-number", str(number), "-o", str(dst),
@@ -154,17 +230,17 @@ def annotate_all(ws, run_cli: Callable, svg_of: Callable, result: dict) -> None:
                 args.append("--no-table")
             proc = run_cli(args, timeout=300)
             if proc.returncode == 0 and dst.is_file():
-                (ws.out / (dst.stem + ".svg")).write_text(svg_of(dst), encoding="utf-8")
-                fig["variants"][variant] = "/api/preview/%s.svg" % dst.stem
+                (vd / (dst.stem + ".svg")).write_text(svg_of(dst), encoding="utf-8")
+                fig["variants"][variant] = preview_url(dst.stem + ".svg", rid)
                 rep = _load(rep_path, {}) or {}
                 if variant == "annotated":
                     fig["annotation"] = {
                         "table": rep.get("table"), "warnings": rep.get("warnings", []),
                         "figure_description": rep.get("figure_description", ""),
-                        "svg": "/api/preview/%s.svg" % dst.stem,
+                        "svg": preview_url(dst.stem + ".svg", rid),
                         # PNG is now rendered lazily on first request (served from the sibling
                         # DXF), so this URL is valid without an eager matplotlib launch.
-                        "png": "/api/preview/%s.png" % dst.stem,
+                        "png": preview_url(dst.stem + ".png", rid),
                     }
                     if rep.get("figure_description"):
                         descriptions.append(rep["figure_description"])
@@ -299,117 +375,12 @@ def apply_terms(ws, rows: List[dict], overwrite: bool = False) -> dict:
 # 导出：说明书附图 Word + 附图说明                                                #
 # --------------------------------------------------------------------------- #
 
-def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: bool,
-                  png_dpi: int = EXPORT_PNG_DPI) -> dict:
-    files, notes = [], []
-    # R1d #2: one snapshot — figures, numerals, descriptions AND the source directory all come
-    # from the SAME version. The caller's `result` (render_state-derived) is only a legacy
-    # fallback when no version has been published.
-    from patent_figure import versions as _VS
-    _rid, src_dir, snap_result = _VS.VersionStore(ws.root).snapshot()
-    if src_dir is None:
-        src_dir = ws.out
-        snap_result = result
-    figs = sorted((snap_result or {}).get("figures", []), key=lambda f: f.get("number", 999))
-    # WP1-5: raster PNGs are generated here, at export, by dpi — the interactive path only
-    # ever made SVGs. Render each annotated/filing DXF to PNG in-process (matplotlib is
-    # imported lazily inside render_preview); a failure is cosmetic and must not block export.
-    try:
-        from patent_figure import sheet as _sheet
-        for fig in figs:
-            for suffix in ("_annotated", "_filing"):
-                dxf = src_dir / (fig["id"] + suffix + ".dxf")
-                png = src_dir / (fig["id"] + suffix + ".png")
-                if dxf.is_file() and not png.is_file():
-                    try:
-                        _sheet.render_preview(dxf, png, dpi=png_dpi)
-                    except Exception as exc:
-                        notes.append("PNG 未生成 %s：%s" % (png.name, exc))
-    except Exception as exc:  # pragma: no cover - import guard
-        notes.append("预览渲染不可用：%s" % exc)
-    for fig in figs:
-        for suffix in ("", "_annotated", "_filing"):
-            for ext in (".dxf", ".png", ".svg"):
-                src = src_dir / (fig["id"] + suffix + ext)
-                if src.is_file():
-                    sub = {"": "原始出图", "_annotated": "交底版_带件号表",
-                           "_filing": "递交版_仅图号"}[suffix]
-                    (dest / sub).mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dest / sub / src.name)
-                    files.append("%s/%s" % (sub, src.name))
-    flows = [f for f in list_flowcharts(ws) if f.get("result", {}) and f["result"].get("ok")]
-    for f in flows:
-        for ext in (".dxf", ".png", ".svg"):
-            src = flow_out(ws) / (f["id"] + ext)
-            if src.is_file():
-                (dest / "流程图").mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest / "流程图" / src.name)
-                files.append("流程图/" + src.name)
-    numerals = src_dir / "reference-numerals.json"
-    lines = []
-    if numerals.is_file():
-        shutil.copy2(numerals, dest / numerals.name)
-        files.append(numerals.name)
-        lines.append(_load(numerals, {}).get("description_zh", ""))
-    desc = [f.get("annotation", {}).get("figure_description", "") for f in figs]
-    desc += [f["result"].get("figure_description", "") for f in flows]
-    desc = [d for d in desc if d]
-    if desc:
-        desc[-1] = desc[-1].rstrip("；") + "。"
-    text = "【附图说明】\n" + "\n".join(desc) + "\n\n" + "\n".join(lines) + "\n"
-    (dest / "附图说明.txt").write_text(text, encoding="utf-8")
-    files.append("附图说明.txt")
-    # 说明书附图.docx：每图一页（交底版 PNG + 流程图 PNG），A4 版心等比缩放
-    pngs = [src_dir / (f["id"] + "_annotated.png") for f in figs]
-    pngs += [flow_out(ws) / (f["id"] + ".png") for f in flows]
-    pngs = [p for p in pngs if p.is_file()]
-    if pngs:
-        try:
-            _docx(pngs, dest / "说明书附图_交底版.docx")
-            files.append("说明书附图_交底版.docx")
-        except Exception as exc:  # python-docx 不在时只少一个文件
-            notes.append("Word 未生成：%s" % exc)
-    dwg_log = []
-    if want_dwg:
-        for sub in ("交底版_带件号表", "递交版_仅图号"):
-            for dxf in sorted((dest / sub).glob("*.dxf")):
-                dwg = dxf.with_suffix(".dwg")
-                proc = run_cli([str(SCRIPTS / "autocad_core_dxf_to_dwg.py"), str(dxf), str(dwg)],
-                               timeout=600)
-                if proc.returncode != 0:
-                    proc = run_cli([str(SCRIPTS / "libredwg_dxf_to_dwg.py"), str(dxf),
-                                    "-o", str(dxf.parent)], timeout=600)
-                    dwg_log.append("%s/%s: AutoCAD 失败，改用 LibreDWG（exit=%d）"
-                                   % (sub, dxf.stem, proc.returncode))
-                else:
-                    dwg_log.append("%s/%s: AutoCAD 转换成功" % (sub, dxf.stem))
-                if dwg.is_file():
-                    files.append("%s/%s" % (sub, dwg.name))
-    return {"files": sorted(set(files)), "dwg_log": dwg_log, "notes": notes,
-            "figure_descriptions": desc}
-
-
+# Exports go through the single export service ``patent_figure.export`` (R1e #3): browser,
+# REST and MCP all pin + verify one version there and read only that directory. The Word helper
+# lives there too; this alias keeps the old import path working.
 def _docx(pngs: List[Path], path: Path) -> None:
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Cm
-    from PIL import Image
-    doc = Document()
-    sec = doc.sections[0]
-    sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
-    sec.top_margin, sec.left_margin = Cm(2.5), Cm(2.5)
-    sec.bottom_margin, sec.right_margin = Cm(1.5), Cm(1.5)
-    max_w, max_h = 17.0, 25.0
-    for i, png in enumerate(pngs):
-        with Image.open(png) as im:
-            w, h = im.size
-        width = min(max_w, max_h * w / h)
-        para = doc.paragraphs[0] if i == 0 and doc.paragraphs else doc.add_paragraph()
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        para.add_run().add_picture(str(png), width=Cm(width))
-        if i < len(pngs) - 1:
-            doc.add_page_break()
-    doc.save(str(path))
+    from patent_figure import export as _EX
+    _EX.write_docx(pngs, path)
 
 
 # --------------------------------------------------------------------------- #

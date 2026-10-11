@@ -92,24 +92,32 @@ be `[]` — then the grouping is yours to choose.
 python3 scripts/validate_figure_plan.py plan.json --assembly assembly.json --json issues.json
 ```
 
-**A4 — render.** The QA gate runs inside, and publishing is **atomic after the gate**: each
-figure is rendered into a scratch dir and only *published* to the output directory once it
-passes QA with no dropped HLR edges. A figure that fails is moved to `out/diag/` instead, so
-the output directory never contains a sheet that did not clear the gate (the "过闸才落盘"
-guarantee, impl-contract §8).
+**A4 — render.** The QA gate runs inside, and publishing is **atomic and all-or-nothing**:
+the whole set is rendered into a fresh immutable version directory
+`out.versions/results/<id>/`, and only when **every** figure passes QA with no dropped HLR
+edges is the version committed (one atomic write of `out.versions/current.json`). `out/` is the
+**view** of the current version — a symlink on macOS/Linux, a copy on Windows — so it always
+holds one complete, gate-passed set; a sheet that did not clear the gate never appears there
+(the "过闸才落盘" guarantee, impl-contract §8 / §13.5.3).
 
 ```bash
 python3 scripts/render_patent_figure.py plan.json --assembly assembly.json -o out/ \
         --cache .cache/ --preview
 ```
 
-Writes, **for every figure that passed**, `out/<figure id>.dxf`, `out/<figure id>.png`
-(with `--preview`), `out/<figure id>.layout.json`, `out/<figure id>.qa.json`, and always
-`out/reference-numerals.json` (the global numeral table plus the ready-to-paste
-「附图标记说明：1—底座；2—…」 sentence — a plan-level product, published regardless). A figure
-that fails QA or whose HLR dropped an edge lands under `out/diag/` with the same artefacts for
-inspection. Exits `1` if any figure failed, printing the failing checks with their hints.
-`--only fig2` re-renders a single figure while iterating.
+On success `out/` holds, for every figure, `<figure id>.dxf`, `<figure id>.png` (with
+`--preview`), `<figure id>.layout.json`, `<figure id>.qa.json`, plus `reference-numerals.json`
+(the global numeral table plus the ready-to-paste 「附图标记说明：1—底座；2—…」 sentence).
+If **any** figure fails QA or drops an HLR edge, the run exits `1`, prints the failing checks
+with their hints, and **nothing is published**: `out/` keeps the previous complete version (or
+does not exist yet), and the failed figures sit under
+`out.versions/results/<id>/diag/` for inspection — the path is printed, and `--json report.json`
+records it as `diag_dir` (with `version`, `published`, `current_version`). `--only fig2`
+re-renders a single figure while iterating (the other figures of the current version are carried
+into the new set). `-o` must be a dedicated output directory: a pre-existing ordinary folder is
+moved aside to `out.pre-versions-<stamp>/` (never deleted), and a folder that holds the plan,
+assembly or STEP is refused. `--in-place` (internal, used by the workbench) renders straight into
+`-o` without a version store.
 
 `--thresholds overrides.json` tightens or loosens the QA gate (a JSON object of
 `qa.DEFAULT_THRESHOLDS` keys → values); omit it for the contract-frozen thresholds. Use it for

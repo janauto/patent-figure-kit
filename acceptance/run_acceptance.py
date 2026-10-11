@@ -515,47 +515,64 @@ def n15(ctx):
 
 @node("N16", "过闸后原子发布 · 失败件不得进输出目录")
 def n16(ctx):
-    """故意制造一张过不了闸的图，断言它不会出现在输出目录，而是被隔离进 diag/。
+    """故意制造过不了闸的图，断言它不会出现在输出目录，而是被隔离进本次版本的 diag/。
 
-    证明的是交付链的一条硬不变量（Codex R0 S0-04）：渲染先写进暂存目录，只有过了 QA 闸门
-    的图才原子发布到输出目录；未过闸的图进 diag/ 供排查。用 --thresholds 把字高下限抬到
-    99 mm，强制每张图在 text_height_mm_min 这一项上判 FAIL——这是一个合法的审查口径旋钮，
+    证明的是交付链的一条硬不变量（Codex R0 S0-04），按 R1e #1 的版本指针发布模型：渲染整套
+    写进 ``<out>.versions/results/<id>/``，只有**整套全部过闸**才原子切换 ``current.json``，
+    ``-o`` 目录只是当前版本的视图。未全部过闸 → 不切换：输出目录保持上一次成功的完整版本
+    （首次即失败则不建立视图），未过闸的图与诊断留在本次版本目录的 diag/。用 --thresholds
+    把字高下限抬到 99 mm，强制每张图在 text_height_mm_min 上判 FAIL——合法的审查口径旋钮，
     给本节点一个确定性的失败杠杆，不依赖事后篡改 DXF。
     """
     out = ctx["tmp"] / "out_n16"
     thr = ctx["tmp"] / "thresholds_fail.json"
     thr.write_text(json.dumps({"text_height_mm_min": 99.0}), encoding="utf-8")
+    rep = ctx["tmp"] / "n16_report.json"
     proc = run([SCRIPTS / "render_patent_figure.py", ctx["plan"],
                 "--assembly", ctx["assembly"], "-o", out,
-                "--thresholds", thr, "--cache", ctx["tmp"] / "cache_n16"])
+                "--thresholds", thr, "--cache", ctx["tmp"] / "cache_n16", "--json", rep])
     assert proc.returncode == 1, \
         "强制 QA 失败后退出码应为 1，实得 %d：\n%s" % (proc.returncode, (proc.stdout + proc.stderr)[-500:])
-    published = sorted(p.name for p in out.glob("*.dxf"))
+    published = sorted(p.name for p in out.glob("*.dxf")) if out.exists() else []
     assert not published, "输出目录竟出现了未过闸的图：%s（S0-04 不变量被破坏）" % published
-    diag = out / "diag"
-    assert diag.is_dir(), "失败件应被隔离进 diag/，但该目录不存在"
+    report = json.loads(rep.read_text(encoding="utf-8"))
+    assert report.get("published") is False and report.get("current_version") is None, \
+        "首次即失败不得建立当前版本：%s" % {k: report.get(k) for k in ("published", "current_version")}
+    diag = Path(report.get("diag_dir") or "")
+    assert diag.is_dir(), "失败件应被隔离进本次版本的 diag/，但该目录不存在：%s" % diag
     quarantined = sorted(p.name for p in diag.glob("*.dxf"))
     assert quarantined, "diag/ 里应留有失败件的 DXF 供排查，实际为空"
-    # reference-numerals.json 是计划级产物，与单图过闸无关，照常发布。
-    assert (out / "reference-numerals.json").is_file(), "计划级的附图标记说明应照常发布"
-    # 暂存目录必须已清理。
-    assert not (out / "_work").exists(), "暂存目录 _work 未清理"
+    # 计划级的附图标记说明随本次版本保留（供排查），但不发布到输出目录。
+    assert (diag.parent / "reference-numerals.json").is_file(), "失败版本应保留标记说明供排查"
+    assert not (out / "reference-numerals.json").exists(), "失败的一套不得发布标记说明"
+    # 不再有任何暂存/改名残留（R1e #1：没有 rename 对）。
+    leftovers = sorted(p.name for p in out.parent.glob(out.name + ".render-*"))
+    assert not leftovers, "暂存目录未清理：%s" % leftovers
 
-    # R1c #7：先成功、再（改 thresholds）失败重渲进同一目录——不得残留旧图配新标记表。
+    # R1c #7 / R1e #1：先成功、再（改 thresholds）失败重渲进同一目录——输出目录必须仍是上一次
+    # 成功的**完整**版本（图与标记说明同属一个版本，不可能「旧图 + 新标记表」），失败件在新版本 diag/。
     out2 = ctx["tmp"] / "out_n16b"
     ok1 = run([SCRIPTS / "render_patent_figure.py", ctx["plan"], "--assembly", ctx["assembly"],
                "-o", out2, "--cache", ctx["tmp"] / "cache_n16b"])
     assert ok1.returncode == 0, "首次渲染应成功"
-    good = sorted(p.name for p in out2.glob("*.dxf"))
+    good = {p.name: p.read_bytes() for p in out2.glob("*.dxf")}
+    good_numerals = (out2 / "reference-numerals.json").read_bytes()
     assert good, "首次渲染应有图"
+    rep2 = ctx["tmp"] / "n16b_report.json"
     bad = run([SCRIPTS / "render_patent_figure.py", ctx["plan"], "--assembly", ctx["assembly"],
-               "-o", out2, "--thresholds", thr, "--cache", ctx["tmp"] / "cache_n16b"])
+               "-o", out2, "--thresholds", thr, "--cache", ctx["tmp"] / "cache_n16b",
+               "--json", rep2])
     assert bad.returncode == 1, "二次（强制失败）重渲退出码应为 1"
-    stale = sorted(p.name for p in out2.glob("*.dxf"))
-    assert not stale, "二次失败重渲后输出目录竟残留旧图：%s（R1c #7 图文混配）" % stale
-    assert (out2 / "diag").is_dir() and list((out2 / "diag").glob("*.dxf")), "失败件应在 diag/"
-    return ("失败件 %d 张全部进 diag/，输出目录 0 张未过闸图；成功→改口径→失败重渲无残留旧图"
-            % len(quarantined))
+    after = {p.name: p.read_bytes() for p in out2.glob("*.dxf")}
+    assert after == good, "失败重渲改动了输出目录：%s → %s" % (sorted(good), sorted(after))
+    assert (out2 / "reference-numerals.json").read_bytes() == good_numerals, \
+        "失败重渲后标记说明与图不属同一版本（R1c #7 图文混配）"
+    r2 = json.loads(rep2.read_text(encoding="utf-8"))
+    assert r2.get("published") is False and r2.get("current_version") != r2.get("version")
+    d2 = Path(r2.get("diag_dir") or "")
+    assert d2.is_dir() and list(d2.glob("*.dxf")), "失败件应在本次版本的 diag/"
+    return ("失败件 %d 张全部进本次版本 diag/，输出目录 0 张未过闸图；成功→改口径→失败重渲："
+            "输出目录保持上一完整版本（%d 张图 + 同版本标记说明）" % (len(quarantined), len(good)))
 
 
 NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n10b, n11, n12, n13, n14, n15, n16]

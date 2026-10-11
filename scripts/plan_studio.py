@@ -389,21 +389,27 @@ async def _run_sync(fn):
 
 
 def build_app(ws: Workspace, token: str, home_url: str | None = None,
-              render_service=None) -> FastAPI:
+              render_service=None, job_status=None) -> FastAPI:
     """``render_service`` (optional): a late-bound ``Callable[[bool], Optional[dict]]`` the
     workbench injects so this sub-app's /api/render submits the *same* isolated job as REST/MCP
     (R1b #5). It returns the render result, or None to fall back to the local version-store
     render (standalone plan_studio). Either way, nothing ever deletes or writes ``ws.out``
-    directly: both paths go through the immutable version store + atomic current pointer."""
+    directly: both paths go through the immutable version store + atomic current pointer.
+
+    ``job_status`` (optional): a late-bound ``Callable[[], Optional[dict]]`` the workbench
+    injects to report this project's latest render job from its job store — so a job submitted
+    via REST/MCP is visible here too (R1e #5)."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     render_lock = threading.Lock()
     structure_lock = threading.Lock()
     structure_job: dict = {"running": False, "started": None, "error": None, "finished": None}
-    render_state: dict = {"running": False, "result": None, "started": None}
-    try:
-        render_state["result"] = json.loads((ws.root / "last_render.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        pass
+    # R1e #5: there is no render result cache. What is PUBLISHED is read from the version store
+    # (VersionStore.snapshot) on every request — /api/state, /api/render/status, export, the
+    # workbench summary/carousel/showcase — so a REST/MCP publish is visible on the next read
+    # with nothing to invalidate. ``job_state`` is only the status of THIS sub-app's render job
+    # (running / started / its id / its own outcome) and is reported separately as ``job``.
+    job_state: dict = {"running": False, "started": None, "id": None, "state": None,
+                       "ok": None, "error": None, "result": None}
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -440,6 +446,47 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
     def load_json(path: Path):
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def published():
+        """``(rid, result)`` of the currently PUBLISHED version, from ONE snapshot read — the
+        single source of truth (R1e #5). The result's preview URLs are bound to ``rid``
+        (``?v=<rid>``), so the page shows that version's pictures with that version's marks.
+        ``(None, None)`` when nothing is published yet."""
+        from patent_figure import versions as _VS
+        rid, _vd, res = _VS.VersionStore(ws.root).snapshot()
+        if not res:
+            return None, None
+        res = dict(res)
+        res["version"] = rid
+        if res.get("numerals"):
+            try:
+                names = [p["name"] for p in load_json(ws.assembly).get("parts", [])]
+                res["numerals"] = json.loads(json.dumps(res["numerals"]))
+                resolve_numeral_parts(res["numerals"], names)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        return rid, res
+
+    def job_view() -> dict:
+        """The current render JOB's status (separate from what is published, R1e #5): the
+        project's latest job from the workbench job store when injected (covers REST/MCP jobs),
+        else this sub-app's own job."""
+        ext = None
+        if job_status is not None:
+            try:
+                ext = job_status()
+            except Exception:
+                ext = None
+        if ext:
+            res = ext.get("result") or {}
+            return {"id": ext.get("id"), "state": ext.get("state"),
+                    "running": ext.get("state") in ("queued", "running"),
+                    "ok": bool(res.get("ok")) if ext.get("state") == "succeeded" else False,
+                    "error": ext.get("error"), "committed": ext.get("committed"),
+                    "result": res or None}
+        return {"id": job_state["id"], "state": job_state["state"],
+                "running": job_state["running"], "ok": job_state["ok"],
+                "error": job_state["error"], "result": job_state["result"]}
+
     def validate_now() -> dict:
         proc = run_cli([str(SCRIPTS / "validate_figure_plan.py"), str(ws.plan),
                        "--assembly", str(ws.assembly),
@@ -455,14 +502,18 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
 
     @app.get("/api/state")
     def state():
+        pub = published()
+        job = job_view()
         return {
             "step": str(ws.step),
             "workdir": str(ws.root),
             "assembly": load_json(ws.assembly),
             "plan": load_json(ws.plan),
             "validate": validate_now(),
-            "render": render_state["result"],
-            "rendering": render_state["running"],
+            "render": pub[1],
+            "version": pub[0],
+            "render_job": job,
+            "rendering": bool(job_state["running"] or job.get("running")),
             "home_url": home_url,
             "flowcharts": studio_ext.list_flowcharts(ws),
             "llm": _llm_status(),
@@ -551,6 +602,7 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
         from patent_figure import publish as _PUB
         result: dict = {"figures": [], "ok": False, "log": "", "numerals": None}
         rid = "local-" + time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
+        job_state["id"] = rid
         try:
             check = validate_now()
             if not check["ok"]:
@@ -573,9 +625,9 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
         return result
 
     def render_job() -> None:
+        result = None
         try:
             # Unified entry: prefer the injected workbench job (R1b #5); else render locally.
-            result = None
             if render_service is not None:
                 try:
                     result = render_service(True)
@@ -585,58 +637,73 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
                 result = _local_render()
         finally:
             result = result or {"figures": [], "ok": False}
-            result["finished"] = time.strftime("%H:%M:%S")
-            result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            try:   # 落盘：重启后首页轮播与外部 API 仍能取到最近一次结果
-                (ws.root / "last_render.json").write_text(
-                    json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
-            except OSError:
-                pass
-            render_state["result"] = result
-            render_state["running"] = False
+            result.setdefault("finished", time.strftime("%H:%M:%S"))
+            result.setdefault("finished_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+            # R1e #5: THIS job's own outcome (incl. failures with their QA diagnostics). It is
+            # job status, not the published version — /api/state, export, summary etc. read
+            # the version store; this is reported separately as ``job``.
+            job_state.update(
+                running=False, id=result.get("render_job_id") or job_state.get("id"),
+                state=result.get("state") or ("succeeded" if result.get("ok") else "failed"),
+                ok=bool(result.get("ok")),
+                error=None if result.get("ok") else (result.get("log") or "")[-600:],
+                result=result)
             render_lock.release()
 
     def start_render() -> bool:
         if not render_lock.acquire(blocking=False):
             return False
-        render_state.update(running=True, started=time.strftime("%H:%M:%S"))
+        job_state.update(running=True, started=time.strftime("%H:%M:%S"), id=None,
+                         state="running", ok=None, error=None, result=None)
         threading.Thread(target=render_job, daemon=True).start()
         return True
 
     def render_and_wait(timeout: float = 1800.0) -> dict:
-        """给工作台 API / MCP 用：同步跑完一次渲染（含规范标注）并返回结果。"""
+        """给工作台 API / MCP 用：同步跑完一次渲染（含规范标注）并返回**这一次**作业的结果。"""
         if not start_render():
             deadline = time.time() + timeout
-            while render_state["running"] and time.time() < deadline:
+            while job_state["running"] and time.time() < deadline:
                 time.sleep(1.0)
             if not start_render():
                 raise RuntimeError("已有一次渲染在进行")
         deadline = time.time() + timeout
         time.sleep(0.2)
-        while render_state["running"] and time.time() < deadline:
+        while job_state["running"] and time.time() < deadline:
             time.sleep(1.0)
-        return render_state["result"] or {}
+        return job_state["result"] or {}
 
     @app.post("/api/render")
     def render():
         if not start_render():
             raise HTTPException(409, "已有一次渲染在进行——几何缓存不支持并发写入")
-        return {"started": render_state["started"]}
+        return {"started": job_state["started"]}
 
     @app.get("/api/render/status")
     def render_status():
-        return {"running": render_state["running"], "result": render_state["result"],
-                "started": render_state["started"]}
+        # R1e #5: ``result`` is the PUBLISHED version (snapshot, preview URLs bound to it via
+        # ?v=); the render job's own status/outcome — including a failure's QA diagnostics — is
+        # reported separately as ``job``.
+        rid, res = published()
+        job = job_view()
+        return {"running": bool(job_state["running"] or job.get("running")),
+                "started": job_state["started"], "result": res, "version": rid, "job": job}
 
     @app.get("/api/preview/{name}")
-    def preview(name: str):
+    def preview(name: str, v: str = ""):
         if not re.fullmatch(r"[A-Za-z0-9_\-]+\.(svg|png|dxf)", name):
             raise HTTPException(400, "非法文件名")
-        # R1d #2: resolve the current version in ONE read and serve from that directory.
+        # R1e #5: ``?v=<rid>`` serves THAT sealed version (the URLs in every result carry it);
+        # without it, the current version from ONE snapshot read (R1d #2).
         from patent_figure import versions as _VS
-        _rid, vdir, _res = _VS.VersionStore(ws.root).snapshot()
-        if vdir is None:
-            raise HTTPException(404, "还没有已发布的渲染版本")
+        store = _VS.VersionStore(ws.root)
+        if v:
+            vdir = store.sealed_dir(v)
+            if vdir is None:
+                raise HTTPException(404, "没有这个已封口的渲染版本")
+        else:
+            _rid, vdir, _res = store.snapshot()
+            if vdir is None:
+                raise HTTPException(404, "还没有已发布的渲染版本")
         path = vdir / name
         if not path.is_file():
             if not (path.suffix == ".png" and studio_ext.ensure_preview_png(path)):
@@ -652,23 +719,31 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
     # ---- export ------------------------------------------------------------
 
     def export_now(want_dwg: bool) -> dict:
-        result = render_state["result"]
-        if not (result and result.get("ok") and result["figures"]
-                and all(f["pass"] for f in result["figures"])):
-            raise HTTPException(409, "存在未通过 QA 的图，不能导出——按提示改计划后重渲")
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        dest = ws.root / ("export-%s" % stamp)
-        dest.mkdir(parents=True)
-        bundle = studio_ext.export_bundle(ws, result, dest, run_cli, want_dwg)
-        # 不用 shutil.make_archive：它会 os.getcwd()，服务进程的 cwd 不可读时直接抛错
-        import zipfile
-        archive = dest.with_suffix(".zip")
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(dest.rglob("*")):
-                if f.is_file():
-                    zf.write(f, f.relative_to(dest).as_posix())
-        bundle.update(dir=str(dest), zip=archive.name)
-        return bundle
+        """Browser export through the SINGLE export service (R1e #3), the same one REST/MCP
+        use: ``acquire`` verifies + pins the current published version in one state-lock
+        critical section (a zero-byte / truncated / missing required artefact → 409), the
+        bundle reads only that pinned directory, and the pin is released on every exit path.
+        There is no ws.out / cached-result fallback."""
+        from patent_figure import export as _EX
+        try:
+            pin = _EX.acquire(ws.root)
+        except _EX.ExportRefused as exc:
+            raise HTTPException(409, "没有可导出的已发布版本（%s）——请先成功出图" % exc)
+        with pin:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            dest = ws.root / ("export-%s" % stamp)
+            dest.mkdir(parents=True)
+            flows = [(f["id"], studio_ext.flow_out(ws), f.get("result") or {})
+                     for f in studio_ext.list_flowcharts(ws)
+                     if (f.get("result") or {}).get("ok")]
+            bundle = _EX.build_bundle(
+                pin, dest, variants=("raw", "annotated", "filing"),
+                formats=["dxf", "svg", "png", "docx"] + (["dwg"] if want_dwg else []),
+                raw_formats=("dxf", "svg"), dpi=studio_ext.EXPORT_PNG_DPI, run_cli=run_cli,
+                flows=flows, description_txt=True)
+            archive = _EX.zip_dir(dest, dest.with_suffix(".zip"))
+            bundle.update(dir=str(dest), zip=archive.name)
+            return bundle
 
     @app.post("/api/export")
     async def export(request: Request):
@@ -857,7 +932,7 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
                 "validate": validate_now()}
 
     app.state.studio = SimpleNamespace(
-        ws=ws, render_and_wait=render_and_wait, render_state=render_state,
+        ws=ws, render_and_wait=render_and_wait, job_state=job_state, published=published,
         validate_now=validate_now, export_now=export_now, start_render=start_render,
         start_structure=start_structure, structure_job=structure_job)
 

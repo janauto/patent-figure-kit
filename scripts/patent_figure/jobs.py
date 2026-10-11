@@ -146,6 +146,52 @@ class Job:
     def is_terminal(self) -> bool:
         return self.state in TERMINAL
 
+    def _last_terminal_event(self) -> Optional[Dict[str, Any]]:
+        for ev in reversed(self.events):
+            if ev.get("type") in (EV_DONE, EV_ERROR):
+                return ev
+        return None
+
+    def reconcile_succeeded(self, result: Optional[Dict[str, Any]]) -> bool:
+        """Startup reconciliation (R1e #4): this job's version IS the committed current one, so
+        the job succeeded. Make state, ``committed``, ``error``, ``result`` and the terminal
+        event agree — clear a stale ``E_INTERRUPTED`` error and append a ``done`` terminal event
+        if the last terminal event says otherwise. Idempotent; returns True if it changed."""
+        last = self._last_terminal_event()
+        consistent = (self.state == SUCCEEDED and self.committed and self.error is None
+                      and self.result is not None and last is not None
+                      and last.get("type") == EV_DONE)
+        if consistent:
+            return False
+        self._committed.set()
+        self.error = None
+        if self.result is None:
+            self.result = dict(result or {})
+        self._set_state(SUCCEEDED)
+        if last is None or last.get("type") != EV_DONE:
+            self.emit(EV_DONE, self.result, stage=SUCCEEDED, progress=1.0)
+        else:
+            self._persist()
+        return True
+
+    def reconcile_failed(self, error: Dict[str, str], result: Optional[Dict[str, Any]]) -> bool:
+        """Startup reconciliation (R1e #4): this job's version is NOT a valid published version
+        (fails verify, or sealed ``ok=false``) — it is failed, whatever was persisted. The job
+        is no longer the committed current (``committed`` cleared: the pointer was rolled back
+        or cleared), ``error``/``result`` are rebuilt, and an ``error`` terminal event is
+        appended so state and the last terminal event agree. Idempotent."""
+        last = self._last_terminal_event()
+        if (self.state == FAILED and not self.committed and self.error
+                and last is not None and last.get("type") == EV_ERROR):
+            return False
+        self._committed.clear()
+        self.error = dict(error)
+        if result is not None:
+            self.result = result
+        self._set_state(FAILED)
+        self.emit(EV_ERROR, self.error, stage=FAILED)
+        return True
+
     def to_dict(self) -> Dict[str, Any]:
         with self._cond:
             return {
@@ -279,6 +325,10 @@ class JobStore:
                 job._persist()           # write the interrupted event back durably
                 continue
             job.state = state
+            # Bind the recovered job to this store so a later transition (startup
+            # reconciliation, R1e #4) is persisted — without it ``_persist`` was a silent no-op
+            # for every job recovered in a terminal state.
+            job._store = self
             self._jobs[job.id] = job
             if job.idempotency_key:
                 self._by_key[(job.project_id, job.kind, job.idempotency_key)] = job.id

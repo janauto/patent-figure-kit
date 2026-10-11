@@ -25,6 +25,7 @@ import math
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -39,6 +40,8 @@ from patent_figure import occ_backend as _occ  # noqa: E402
 from patent_figure import plan as _plan  # noqa: E402
 from patent_figure import qa as _qa  # noqa: E402
 from patent_figure import sheet as _sheet  # noqa: E402
+from patent_figure import publish as _publish  # noqa: E402
+from patent_figure import versions as _versions  # noqa: E402
 
 # =============================================================================== constants
 # §7 rule 7: every output-affecting constant is named here once. The layout / label
@@ -853,6 +856,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--thresholds", default=None,
                    help="QA 阈值覆盖（JSON 文件，覆盖 qa.DEFAULT_THRESHOLDS 的对应项）。"
                         "用于更严/更松的审查口径；缺省用契约冻结的阈值。")
+    p.add_argument("--in-place", dest="in_place", action="store_true",
+                   help="直接渲染进 -o 目录，不走版本指针发布、不建立视图（供上层发布服务的内部"
+                        "调用：工作台把图渲进它自己的版本目录，由其版本库负责原子性与提交）。"
+                        "缺省走版本指针发布：整套渲进 <out>.versions/results/<id>/，完整成功才"
+                        "切换指针，-o 是当前版本的视图（R1e #1）。")
     return p
 
 
@@ -903,6 +911,110 @@ def _publish_figure(figure_id: str, work_dir: Path, dest_dir: Path,
         if val:
             info[field] = str(dest_dir / Path(val).name)
     return dest_dir
+
+
+def _render_set(render_dir: Path, *, figures, plan_doc, assembly, selected, num, all_parts,
+                cache, deflection: float, preview: bool, thresholds, merge_source, only):
+    """Render the whole figure set into ``render_dir``.
+
+    Passing figures land in ``render_dir`` root; a figure that fails the QA/HLR gate is
+    quarantined into ``render_dir/diag`` and never sits beside the good ones (§S0-04). The
+    plan-level ``reference-numerals.json`` is always written (it is not gated per figure).
+    ``merge_source`` (a previous version dir, or the same ``-o`` dir for ``--in-place --only``)
+    carries the other figures of a ``--only`` render into ``render_dir``. Returns
+    ``(ok, rendered, errors, numerals_doc, numeral_warnings)``.
+    """
+    render_dir.mkdir(parents=True, exist_ok=True)
+    diag_dir = render_dir / DIAG_SUBDIR
+    if only is not None and merge_source and Path(merge_source).is_dir():
+        for p in sorted(Path(merge_source).iterdir()):
+            if p.name in ("inputs", DIAG_SUBDIR) or p.name.startswith(only + "."):
+                continue
+            if p.name in _versions.META_FILES or p.name == NUMERALS_FILENAME:
+                continue                     # store metadata / plan-level table: never carried
+            if p.is_file():
+                shutil.copy2(p, render_dir / p.name)
+
+    numeral_figures = _numeral_figures(plan_doc, assembly, num)
+    numerals_doc, numeral_warnings = write_numerals(
+        render_dir / NUMERALS_FILENAME, num, numeral_figures)
+    for warning in numeral_warnings:
+        _fail("警告：%s" % warning)
+
+    sources: Dict[str, CurveSource] = {}
+    rendered: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+    ok = True
+    for figure in figures:
+        figure_id = str(figure.get("id"))
+        layout_cfg = _plan.figure_layout(plan_doc, figure)
+        members = _plan.figure_members(figure, selected)
+        member_names = set(members)
+        parts = [p for p in all_parts if p.name in member_names]
+        try:
+            info = render_figure(figure, layout_cfg, parts, assembly, num, render_dir,
+                                 sources, deflection, cache, preview)
+        except _labels.LabelError as exc:
+            ok = False
+            errors.append({"figure": figure_id, "code": "E_LABELS_UNPLACEABLE",
+                           "message": str(exc),
+                           "hint": "见 assembly.json:split_suggestions —— 拆图，"
+                                   "或对标准件设 label:\"none\"。"})
+            _fail("figure %s 渲染失败 [E_LABELS_UNPLACEABLE]：%s" % (figure_id, exc))
+            continue
+        except _layout.LayoutError as exc:
+            ok = False
+            errors.append({"figure": figure_id, "code": "E_LAYOUT_UNSOLVABLE",
+                           "message": str(exc), "hint": ""})
+            _fail("figure %s 渲染失败 [E_LAYOUT_UNSOLVABLE]：%s" % (figure_id, exc))
+            continue
+        except (RenderError, _occ.OccBackendError, _sheet.SheetError) as exc:
+            ok = False
+            code = getattr(exc, "code", "E_RENDER")
+            errors.append({"figure": figure_id, "code": code, "message": str(exc), "hint": ""})
+            _fail("figure %s 渲染失败 [%s]：%s" % (figure_id, code, exc))
+            continue
+
+        report = _qa.check_figure(Path(info["dxf"]), kind=info["kind"], thresholds=thresholds)
+        info["qa"] = report
+        info.setdefault("id", figure_id)
+        # The HLR drop count (§5.5 / §8) is a gate the QA checks cannot see: a silhouette
+        # line OCCT refused to discretise is simply absent, so the drawing can pass every
+        # layout check and still be missing an edge. A figure that lost any edge is
+        # downgraded here and quarantined, never published.
+        dropped_edges, dropped_compounds = info.get("hlr_dropped", [0, 0])
+        drop_fail = (int(dropped_edges) + int(dropped_compounds)) > 0
+        qa_pass = bool(report.get("pass"))
+        gate_pass = qa_pass and not drop_fail
+        info["gate_pass"] = gate_pass
+
+        # Write the QA report next to its DXF so it travels with the figure.
+        qa_path = render_dir / (figure_id + QA_SUFFIX)
+        qa_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+
+        status = "通过" if gate_pass else "未通过"
+        print("figure %s：%s，字高 %.1f mm，比例 %.4f，图面角 %s，%d 件 / %d 标记，QA %s"
+              % (figure_id, Path(info["dxf"]).name, info["text_height_mm"], info["scale"],
+                 info["axis_angle"], info["instances"], info["labels"], status))
+
+        if gate_pass:
+            info["published_to"] = str(render_dir)
+        else:
+            dest = _publish_figure(figure_id, render_dir, diag_dir, info)
+            info["published_to"] = str(dest)
+        rendered.append(info)
+
+        if not gate_pass:
+            ok = False
+            if drop_fail:
+                _fail("figure %s 的 HLR 丢失了 %d 条边 / %d 个外廓组——该图缺线，已降级到 %s/。"
+                      "修复：换 layout.view，或在 plan 的 source.exclude 里排除产生丢边的零件。"
+                      % (figure_id, int(dropped_edges), int(dropped_compounds), DIAG_SUBDIR))
+            if not qa_pass:
+                _fail("figure %s 的 QA 闸门未通过（已降级到 %s/）：" % (figure_id, DIAG_SUBDIR))
+                _print_qa_failures(figure_id, report)
+    return ok, rendered, errors, numerals_doc, numeral_warnings
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -960,6 +1072,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               % (step, step_sha[:12], expected[:12]))
         return EXIT_FAIL
 
+    if not args.in_place:
+        # R1e #1: -o becomes the VIEW of the current version (a symlink / copy). A directory
+        # that holds this run's own inputs (the plan, assembly or STEP), or the working
+        # directory itself, cannot be turned into a view — refuse up front instead of moving
+        # the user's folder aside after a long render.
+        here = Path(os.path.abspath(str(out_dir)))
+        own_view = _publish._is_own_view(_publish.cli_store(here))
+        if here.is_dir() and not here.is_symlink() and not own_view:
+            inputs = [Path(os.path.abspath(str(x))) for x in (plan_path, assembly_path, step)]
+            if here == Path(os.getcwd()) or any(here in x.parents for x in inputs):
+                _fail("用法错误：-o %s 是当前目录或含本次的输入文件（plan/assembly/STEP）。"
+                      "-o 会成为「当前版本」的视图，请换一个专用输出目录（如 -o out/）。"
+                      % out_dir)
+                return EXIT_USAGE
+        out_dir = here
+
     figures = [f for f in plan_doc.get("figures", []) if isinstance(f, dict)]
     if args.only is not None:
         ids = [str(f.get("id")) for f in figures]
@@ -996,124 +1124,84 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _fail("用法错误：--thresholds 必须是一个 JSON 对象（阈值名→数值）")
             return EXIT_USAGE
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Whole-set atomic publish (§S0-04 / R1c #7 / R1d #8): render the complete set into an
-    # INDEPENDENT sibling work dir, then swap it into out_dir with a single rename pair at the
-    # end. An interrupt before the swap leaves the previous output fully intact; after the first
-    # rename, out_dir is complete-old or complete-new, never half. The version-store path renders
-    # into a fresh version dir (its atomicity is current.json); this swap is the direct-CLI
-    # guarantee. ``--only`` merges with the previous set (copied in first) so the other figures
-    # survive the swap. reference-numerals is produced in the work dir and swapped WITH the figures.
-    token = "%d.%s" % (os.getpid(), os.urandom(6).hex())
-    work_dir = out_dir.parent / (out_dir.name + ".render-work-" + token)
-    diag_dir = work_dir / DIAG_SUBDIR
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    if args.only is not None and out_dir.is_dir():
-        # Merge: carry the previous version's other figures into the new set (R1d #8).
-        for p in sorted(out_dir.iterdir()):
-            if p.name in ("inputs", DIAG_SUBDIR) or p.name.startswith(args.only + "."):
-                continue
-            if p.is_file():
-                shutil.copy2(p, work_dir / p.name)
-
-    numeral_figures = _numeral_figures(plan_doc, assembly, num)
-    numerals_doc, numeral_warnings = write_numerals(
-        work_dir / NUMERALS_FILENAME, num, numeral_figures)
-    for warning in numeral_warnings:
-        _fail("警告：%s" % warning)
-
-    sources: Dict[str, CurveSource] = {}
-    rendered: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
-    ok = True
-    for figure in figures:
-        figure_id = str(figure.get("id"))
-        layout_cfg = _plan.figure_layout(plan_doc, figure)
-        members = _plan.figure_members(figure, selected)
-        member_names = set(members)
-        parts = [p for p in all_parts if p.name in member_names]
+    # Render the whole set into render_dir. In --in-place mode that IS the -o dir (the inner
+    # render used by the workbench publish service; its version store owns atomicity). Otherwise
+    # (R1e #1) the direct CLI publishes through the SAME service as every other entry: the set
+    # is rendered into a fresh immutable version dir of ``<out>.versions/`` and committed by
+    # ``publish.commit_version`` — ONE atomic current.json write, only for a fully-ok set — and
+    # ``-o`` becomes the view of the current version (POSIX symlink / Windows copy). There is
+    # no rename pair and no delete of the previous output: a failed set never moves the pointer
+    # (the previous complete version stays in -o) and keeps its diag/ in its own version dir.
+    merge_source = None
+    vs = rid = revision = adopted = None
+    if args.in_place:
+        render_dir = out_dir
+        render_dir.mkdir(parents=True, exist_ok=True)
+        if args.only is not None and out_dir.is_dir():
+            merge_source = out_dir
+    else:
+        vs = _publish.cli_store(out_dir)
+        rid = "cli-%s-%d-%s" % (time.strftime("%Y%m%d-%H%M%S"), os.getpid(),
+                                os.urandom(3).hex())
+        revision = vs.next_revision()
+        render_dir = vs.begin(rid)               # fresh immutable version dir
         try:
-            info = render_figure(figure, layout_cfg, parts, assembly, num, work_dir,
-                                 sources, float(args.deflection), cache, bool(args.preview))
-        except _labels.LabelError as exc:
+            (render_dir / "inputs").rmdir()      # the CLI freezes no inputs; keep the view clean
+        except OSError:
+            pass
+        if args.only is not None:
+            merge_source = vs.current_dir()      # carry the current version's other figures
+
+    ok, rendered, errors, numerals_doc, numeral_warnings = _render_set(
+        render_dir, figures=figures, plan_doc=plan_doc, assembly=assembly, selected=selected,
+        num=num, all_parts=all_parts, cache=cache, deflection=float(args.deflection),
+        preview=bool(args.preview), thresholds=thresholds, merge_source=merge_source,
+        only=args.only)
+
+    published_dir = render_dir
+    became = False
+    if vs is not None:
+        # The declared deliverable set (R1e #2): the numerals table + every figure of this set
+        # (the plan's figures, or for --only the rendered one plus the carried-over ones) as
+        # DXF + QA report. verify() checks the version against this list.
+        set_ids = sorted({str(f.get("id")) for f in figures}
+                         | {p.name[:-len(QA_SUFFIX)] for p in render_dir.glob("*" + QA_SUFFIX)})
+        required = [NUMERALS_FILENAME]
+        for fid in set_ids:
+            required += [fid + ".dxf", fid + QA_SUFFIX]
+        missing = [r for r in required
+                   if not (render_dir / r).is_file() or (render_dir / r).stat().st_size == 0]
+        if ok and missing:
             ok = False
-            errors.append({"figure": figure_id, "code": "E_LABELS_UNPLACEABLE",
-                           "message": str(exc),
-                           "hint": "见 assembly.json:split_suggestions —— 拆图，"
-                                   "或对标准件设 label:\"none\"。"})
-            _fail("figure %s 渲染失败 [E_LABELS_UNPLACEABLE]：%s" % (figure_id, exc))
-            continue
-        except _layout.LayoutError as exc:
-            ok = False
-            errors.append({"figure": figure_id, "code": "E_LAYOUT_UNSOLVABLE",
-                           "message": str(exc), "hint": ""})
-            _fail("figure %s 渲染失败 [E_LAYOUT_UNSOLVABLE]：%s" % (figure_id, exc))
-            continue
-        except (RenderError, _occ.OccBackendError, _sheet.SheetError) as exc:
-            ok = False
-            code = getattr(exc, "code", "E_RENDER")
-            errors.append({"figure": figure_id, "code": code, "message": str(exc), "hint": ""})
-            _fail("figure %s 渲染失败 [%s]：%s" % (figure_id, code, exc))
-            continue
-
-        report = _qa.check_figure(Path(info["dxf"]), kind=info["kind"], thresholds=thresholds)
-        info["qa"] = report
-        # The HLR drop count (§5.5 / §8) is a gate the QA checks cannot see: a silhouette
-        # line OCCT refused to discretise is simply absent, so the drawing can pass every
-        # layout check and still be missing an edge. A figure that lost any edge is
-        # downgraded here and quarantined, never published.
-        dropped_edges, dropped_compounds = info.get("hlr_dropped", [0, 0])
-        drop_fail = (int(dropped_edges) + int(dropped_compounds)) > 0
-        qa_pass = bool(report.get("pass"))
-        gate_pass = qa_pass and not drop_fail
-        info["gate_pass"] = gate_pass
-
-        # Write the QA report next to its DXF in the work dir so it travels with the figure.
-        qa_path = work_dir / (figure_id + QA_SUFFIX)
-        qa_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-                           encoding="utf-8")
-
-        status = "通过" if gate_pass else "未通过"
-        print("figure %s：%s，字高 %.1f mm，比例 %.4f，图面角 %s，%d 件 / %d 标记，QA %s"
-              % (figure_id, Path(info["dxf"]).name, info["text_height_mm"], info["scale"],
-                 info["axis_angle"], info["instances"], info["labels"], status))
-
-        # Passing figures already sit in the work-dir root; only quarantine the failures into
-        # work/diag. The whole work dir is swapped into out_dir atomically at the end.
-        if gate_pass:
-            info["published_to"] = str(work_dir)
-        else:
-            dest = _publish_figure(figure_id, work_dir, diag_dir, info)
-            info["published_to"] = str(dest)
-        rendered.append(info)
-
-        if not gate_pass:
-            ok = False
-            if drop_fail:
-                _fail("figure %s 的 HLR 丢失了 %d 条边 / %d 个外廓组——该图缺线，已降级到 %s/。"
-                      "修复：换 layout.view，或在 plan 的 source.exclude 里排除产生丢边的零件。"
-                      % (figure_id, int(dropped_edges), int(dropped_compounds), DIAG_SUBDIR))
-            if not qa_pass:
-                _fail("figure %s 的 QA 闸门未通过（已降级到 %s/）：" % (figure_id, DIAG_SUBDIR))
-                _print_qa_failures(figure_id, report)
-
-    # Atomic whole-set swap (R1d #8): preserve a frozen inputs/ by carrying it into the work dir,
-    # then swap out_dir ↔ work_dir with a single rename pair. Before the swap the previous output
-    # is untouched; between the two renames out_dir is either the complete old or complete new
-    # set. A trailing `.render-old-*` is removed best-effort.
-    if (out_dir / "inputs").is_dir() and not (work_dir / "inputs").exists():
-        shutil.copytree(str(out_dir / "inputs"), str(work_dir / "inputs"))
-    trash = out_dir.parent / (out_dir.name + ".render-old-" + token)
-    try:
-        if out_dir.exists():
-            os.replace(str(out_dir), str(trash))
-        os.replace(str(work_dir), str(out_dir))
-    finally:
-        shutil.rmtree(trash, ignore_errors=True)
-        if work_dir.exists():
-            shutil.rmtree(work_dir, ignore_errors=True)
+            _fail("整套产物不完整，不发布：缺 %s" % "、".join(missing[:12]))
+        manifest = {"kind": "cli", "expected": [str(f.get("id")) for f in figures],
+                    "figures": [{"id": str(i.get("id")), "pass": bool(i.get("gate_pass"))}
+                                for i in rendered],
+                    "required_artefacts": sorted(set(required)), "missing_artefacts": missing}
+        result = {"figures": rendered, "numerals": numerals_doc, "errors": errors,
+                  "warnings": numeral_warnings,
+                  "finished_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        if ok:
+            # Make room for the view without deleting anything that is not ours (a pre-R1e
+            # output dir or a user folder is moved aside, never removed).
+            adopted = _publish.adopt_legacy_out(vs)
+        became = _publish.commit_version(vs, rid, revision, result, manifest, ok=ok)
+        if became and vs.view_is_dirty():
+            _fail("警告：已提交新版本，但输出视图 %s 未能刷新（下次运行会重试）；"
+                  "成品在 %s" % (out_dir, render_dir))
+        published_dir = out_dir if became else render_dir
+        if became:
+            # Paths in the report point at the stable view, not the version dir.
+            for info in rendered:
+                if info.get("gate_pass"):
+                    for field in ("dxf", "png", "engineering_dxf", "sidecar"):
+                        if info.get(field):
+                            info[field] = str(out_dir / Path(info[field]).name)
+                    info["published_to"] = str(out_dir)
+        try:                                     # keep only a few recent versions
+            vs.reclaim(protected={rid}, protect_unsealed=True)
+        except OSError:
+            pass
 
     if args.json_out:
         payload = {
@@ -1124,6 +1212,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "step_sha256": step_sha,
             "out": str(out_dir),
             "pass": ok,
+            # R1e #1: pointer-mode publish facts (absent with --in-place).
+            "version": rid,
+            "version_dir": str(render_dir) if vs is not None else None,
+            "published": bool(became) if vs is not None else None,
+            "current_version": vs.current_id() if vs is not None else None,
+            "diag_dir": str(render_dir / DIAG_SUBDIR)
+                        if (render_dir / DIAG_SUBDIR).is_dir() else None,
             "figures": rendered,
             "errors": errors,
             "numerals": numerals_doc,
@@ -1133,9 +1228,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         Path(args.json_out).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    if adopted is not None:
+        print("提示：%s 原是一个普通目录，已原样移到 %s（未删除任何文件）；"
+              "现在它是当前版本的视图。" % (out_dir, adopted))
+    if vs is not None and ok and not became:
+        print("提示：本次整套已通过并封口于 %s，但期间已有更新的修订被提交（并发运行），"
+              "未切换当前版本。" % render_dir)
+    if vs is not None and not ok:
+        cur = vs.current_dir()
+        print("本次未全部通过，未发布：%s %s；未过闸的图与诊断在 %s"
+              % (out_dir, "保持上一次成功的版本" if cur else "尚无已发布版本",
+                 render_dir / DIAG_SUBDIR if (render_dir / DIAG_SUBDIR).is_dir()
+                 else render_dir))
     print("共 %d 张图，%s；附图标记说明已写入 %s"
           % (len(rendered), "全部通过" if ok else "有未通过项",
-             out_dir / NUMERALS_FILENAME))
+             published_dir / NUMERALS_FILENAME))
     return EXIT_OK if ok else EXIT_FAIL
 
 

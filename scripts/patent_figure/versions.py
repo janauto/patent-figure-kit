@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import uuid
@@ -35,8 +36,22 @@ from patent_figure import project_io as _pio
 
 _state_locks: Dict[str, threading.RLock] = {}
 _rev_locks: Dict[str, threading.Lock] = {}
+_view_locks: Dict[str, threading.Lock] = {}  # serialises out/ view swaps per workspace (R1e #6)
 _refs: Dict[str, Dict[str, int]] = {}        # ws_root -> {rid: refcount}, guarded by state_lock
 _guard = threading.Lock()
+
+#: A version id as it may appear in a URL (``?v=<rid>``): no separators, no traversal.
+RID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
+
+#: Store metadata that lives in a version dir but is not a deliverable — never carried over by
+#: a ``--only`` merge and never part of an export.
+META_FILES = ("manifest.json", "result.json", "cancelled.json", "render-report.json")
+
+
+def _view_lock(ws_root) -> threading.Lock:
+    key = str(Path(ws_root).resolve())
+    with _guard:
+        return _view_locks.setdefault(key, threading.Lock())
 
 #: Default retention: keep this many most-recent successful (non-current) versions; older
 #: successful versions and all stale failed/cancelled versions are reclaimable (R1c #11).
@@ -71,12 +86,14 @@ def _fsync_path(path: Path) -> None:
 
 
 class VersionStore:
-    def __init__(self, ws_root) -> None:
+    def __init__(self, ws_root, out_view=None) -> None:
         self.root = Path(ws_root)
         self.results = self.root / "results"
         self.current_file = self.root / "current.json"
         self.revision_file = self.root / "revision.json"
-        self.out = self.root / "out"
+        # The out/ view defaults to root/"out" (workbench), but the direct CLI points it at the
+        # user's -o directory so published figures stay at ``<out>/fig1.dxf`` (R1e #1).
+        self.out = Path(out_view) if out_view is not None else self.root / "out"
 
     # -- revisions (R1c #3) --------------------------------------------------
     def next_revision(self) -> int:
@@ -155,16 +172,55 @@ class VersionStore:
         return bool(m and m.get("complete"))
 
     def verify(self, rid: str) -> bool:
-        """Complete AND every recorded file present at its recorded size (R1c #6)."""
+        """Integrity of a sealed version (R1c #6 / R1e #2):
+
+        * complete, and every file the seal recorded is present at its recorded size;
+        * if the version claims ``ok``, every artefact on its declared ``required_artefacts``
+          list (the expected deliverable set — figures × raw/disclosure/filing × DXF/SVG/report
+          + the numerals table) is present, recorded by the seal, and non-empty. Verification is
+          by the declared list, not by whatever files the seal happened to find.
+
+        A failed (``ok=false``) version is never deliverable; for it verify only answers "is
+        what was sealed still intact" (its diag/ is kept for inspection)."""
         m = self.read_manifest(rid)
         if not (m and m.get("complete")):
             return False
         vd = self.version_dir(rid)
-        for rel, size in (m.get("files") or {}).items():
+        files = m.get("files") or {}
+        for rel, size in files.items():
             p = vd / rel
-            if not p.is_file() or p.stat().st_size != size:
+            try:
+                if not p.is_file() or p.stat().st_size != size:
+                    return False
+            except OSError:
                 return False
+        if m.get("ok"):
+            for rel in (m.get("required_artefacts") or []):
+                p = vd / rel
+                try:
+                    if rel not in files or not p.is_file() or p.stat().st_size == 0:
+                        return False
+                except OSError:
+                    return False
         return True
+
+    def is_publishable(self, rid: str) -> bool:
+        """The one gate for "may be current / may be exported" (R1e #2/#3/#4): integrity-verified
+        AND the seal says ``ok`` AND the sealed reader result says ``ok``."""
+        if not rid or not self.verify(rid):
+            return False
+        m = self.read_manifest(rid) or {}
+        res = self.read_result(rid)
+        return bool(m.get("ok")) and res is not None and bool(res.get("ok"))
+
+    def sealed_dir(self, rid: str) -> Optional[Path]:
+        """The directory of a sealed (complete) version named by an untrusted id (a ``?v=`` URL
+        parameter), or None. Rejects ids that are not plain names — no path traversal."""
+        if not rid or not RID_RE.match(str(rid)):
+            return None
+        if not self.is_complete(rid):
+            return None
+        return self.version_dir(rid)
 
     def revision_of(self, rid: str) -> int:
         return int((self.read_manifest(rid) or {}).get("revision", 0))
@@ -224,34 +280,52 @@ class VersionStore:
             pass
 
     def refresh_view(self) -> bool:
-        """Refresh the ``out/`` view to the current version. On failure, persist a dirty marker
-        and return False (the commit stands; the view is retried later). Returns True on success."""
-        rid = self.current_id()
-        if not rid:
+        """Refresh the ``out/`` view to the current version. Serialised by a dedicated view
+        lock and re-reading ``current.json`` INSIDE it, then re-checking current after the swap:
+        if the pointer advanced while we were swapping (a newer commit raced us — another
+        thread, or another process that does not share the in-process lock), loop and install
+        the newer one, so the view can never settle on a stale revision (R1e #6). A swap failure
+        persists a dirty marker and returns False; the commit always stands. With no current
+        version the view is removed (a cleared pointer must not leave out/ naming a quarantined
+        version, R1e #4)."""
+        with _view_lock(self.root):
+            for _ in range(16):
+                rid = self.current_id()
+                try:
+                    if not rid:
+                        self.clear_view()
+                    else:
+                        self.sync_out(rid)
+                except OSError:
+                    self.mark_view_dirty(rid or "")
+                    return False
+                if self.current_id() == rid:            # pointer unchanged → view is up to date
+                    try:
+                        self._view_dirty_file.unlink()
+                    except OSError:
+                        pass
+                    return bool(rid)
+                # else: a newer revision committed during our swap — loop and install it
+            self.mark_view_dirty(self.current_id() or "")
             return False
-        try:
-            self.sync_out(rid)
-            try:
-                self._view_dirty_file.unlink()
-            except OSError:
-                pass
-            return True
-        except OSError:
-            self.mark_view_dirty(rid)
-            return False
+
+    def view_is_dirty(self) -> bool:
+        return self._view_dirty_file.is_file()
 
     def ensure_view(self) -> None:
         """Cheap: if a prior view refresh failed (dirty marker present), retry it now."""
         if self._view_dirty_file.is_file():
             self.refresh_view()
 
-    # -- version references (R1d #6) -----------------------------------------
+    # -- version references (R1d #6 / R1e #3,#7) -----------------------------
+    def _ref_locked(self, rid: str) -> None:
+        d = _refs.setdefault(str(self.root.resolve()), {})
+        d[str(rid)] = d.get(str(rid), 0) + 1
+
     def ref(self, rid: str) -> None:
         """Pin a version against reclamation for the duration of a long read (export)."""
         with state_lock(self.root):
-            _refs.setdefault(str(self.root.resolve()), {})
-            _refs[str(self.root.resolve())][str(rid)] = \
-                _refs[str(self.root.resolve())].get(str(rid), 0) + 1
+            self._ref_locked(rid)
 
     def unref(self, rid: str) -> None:
         with state_lock(self.root):
@@ -265,6 +339,26 @@ class VersionStore:
         with state_lock(self.root):
             return set(_refs.get(str(self.root.resolve()), {}).keys())
 
+    def acquire_verified_version(self, rid=None):
+        """Atomically (R1e #3/#7) resolve + verify + pin a version under the state lock — the
+        same lock ``reclaim`` decides under — so nothing can delete it between the check and the
+        pin. ``rid=None`` resolves the current version. The version must be publishable
+        (integrity-verified against its declared artefact list, sealed ``ok`` and result
+        ``ok``): a missing / truncated / zero-byte required artefact is refused. Returns
+        ``(rid, version_dir)``; raises ``ValueError`` otherwise. Callers ``release(rid)`` on
+        every exit path (see ``patent_figure.export.Pin``)."""
+        with state_lock(self.root):
+            if rid is None:
+                rid = self.current_id()
+            if not rid or not self.is_publishable(rid):
+                raise ValueError("没有可导出的版本（缺失、未完成、未通过完整性校验或未全部过闸）：%r"
+                                 % rid)
+            self._ref_locked(rid)
+            return rid, self.version_dir(rid)
+
+    def release(self, rid: str) -> None:
+        self.unref(rid)
+
     def commit_pointer(self, rid: str, revision: Optional[int] = None) -> bool:
         """Commit ONLY the pointer (R1d #3): verify integrity, enforce monotonic revision, write
         ``current.json`` atomically + fsync its parent dir. Does NOT touch the ``out/`` view —
@@ -272,8 +366,9 @@ class VersionStore:
         if this version became current, False if refused as stale. Caller holds ``state_lock``."""
         if revision is None:
             revision = self.revision_of(rid)
-        if not self.verify(rid):
-            raise ValueError("拒绝发布未通过完整性校验的版本 %s" % rid)
+        # ok=false never switches (R1e #1/#2): the store itself refuses, not just the callers.
+        if not self.is_publishable(rid):
+            raise ValueError("拒绝发布未通过完整性校验或未全部过闸（ok=false）的版本 %s" % rid)
         if revision <= self.current_revision() and self.current_id() is not None:
             return False                                 # stale: keep as history, don't overwrite
         _pio.atomic_write_json(self.current_file,
@@ -299,42 +394,78 @@ class VersionStore:
             self._copy_swap(target)
 
     def _unique(self, stem: str) -> Path:
-        return self.root / ("%s.%d.%s" % (stem, os.getpid(), uuid.uuid4().hex[:8]))
+        # Stage swap temporaries in the directory that CONTAINS the view, not the store root:
+        # os.replace onto the view is then a same-directory atomic rename, and a relative symlink
+        # target stays valid after the move. The view may live OUTSIDE the store root (R1e #1 —
+        # direct-CLI sets out=the user's -o dir while the store sits in a sibling). For the
+        # default view (root/out) this is still the root, so nothing changes there.
+        self.out.parent.mkdir(parents=True, exist_ok=True)
+        return self.out.parent / ("%s.%d.%s" % (stem, os.getpid(), uuid.uuid4().hex[:8]))
+
+    def _install_view(self, staged: Path) -> None:
+        """Install a staged view (a symlink or a copied directory) at ``out``.
+
+        * ``out`` absent, a symlink, or a file → ONE ``os.replace`` (atomic on POSIX).
+        * ``out`` a real directory (Windows copy view / legacy dir) → a directory cannot be
+          atomically replaced, so it is moved aside first. If installing the new view then
+          fails (the "second rename"), the old view is renamed BACK — nothing is deleted until
+          the new view is in place, and on failure the previous view is restored intact and the
+          staged temp removed (R1e #1). The aside copy is removed only after success.
+        """
+        if self.out.is_symlink() or (self.out.exists() and not self.out.is_dir()) \
+                or not self.out.exists():
+            os.replace(str(staged), str(self.out))
+            return
+        aside = self._unique("out.old")
+        os.replace(str(self.out), str(aside))
+        try:
+            os.replace(str(staged), str(self.out))
+        except OSError:
+            try:
+                os.replace(str(aside), str(self.out))      # roll the old view back
+            except OSError:
+                pass
+            raise
+        shutil.rmtree(aside, ignore_errors=True)
+
+    @staticmethod
+    def _discard(path: Path) -> None:
+        try:
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
     def _symlink_swap(self, target: Path) -> None:
-        rel = os.path.relpath(str(target), str(self.root))
+        rel = os.path.relpath(str(target), str(self.out.parent))
         tmp = self._unique("out.lnk")
         os.symlink(rel, str(tmp))
         try:
-            if self.out.is_symlink() or (self.out.exists() and not self.out.is_dir()):
-                os.replace(str(tmp), str(self.out))
-            elif self.out.is_dir():
-                trash = self._unique("out.old")
-                os.replace(str(self.out), str(trash))
-                os.replace(str(tmp), str(self.out))
-                shutil.rmtree(trash, ignore_errors=True)
-            else:
-                os.replace(str(tmp), str(self.out))
+            self._install_view(tmp)
         except OSError:
-            if tmp.is_symlink() or tmp.exists():
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+            self._discard(tmp)
             raise
 
     def _copy_swap(self, target: Path) -> None:
         staging = self._unique("out.new")
-        shutil.copytree(str(target), str(staging))
+        try:
+            shutil.copytree(str(target), str(staging))
+            self._install_view(staging)
+        except OSError:
+            self._discard(staging)
+            raise
+
+    def clear_view(self) -> None:
+        """Remove the ``out/`` view (no current version). A symlink is unlinked; a copy view is
+        moved aside and then deleted (it is only a copy — the versions are untouched)."""
         if self.out.is_symlink() or (self.out.exists() and not self.out.is_dir()):
-            os.replace(str(staging), str(self.out))
+            self.out.unlink()
         elif self.out.is_dir():
-            trash = self._unique("out.old")
-            os.replace(str(self.out), str(trash))
-            os.replace(str(staging), str(self.out))
-            shutil.rmtree(trash, ignore_errors=True)
-        else:
-            os.replace(str(staging), str(self.out))
+            aside = self._unique("out.old")
+            os.replace(str(self.out), str(aside))
+            shutil.rmtree(aside, ignore_errors=True)
 
     # -- recovery (R1c #5) ---------------------------------------------------
     def recover(self) -> List[str]:
@@ -347,15 +478,66 @@ class VersionStore:
                 if (vd.is_dir() and not self.is_complete(vd.name)
                         and not self.is_cancelled(vd.name)):
                     incomplete.append(vd.name)
-        if self.current_id() and self.is_complete(self.current_id()):
+        if (self.current_id() and self.is_complete(self.current_id())) \
+                or self._view_dirty_file.is_file():
             self.refresh_view()     # retries a dirty/interrupted swap; never un-commits
         return incomplete
 
+    def _latest_ok_version(self, exclude: Optional[str] = None):
+        """The most-recent (highest revision) publishable version (verified + sealed ok +
+        result ok). Returns ``(rid, revision)`` or ``None``."""
+        best = None
+        if not self.results.is_dir():
+            return None
+        for d in self.results.iterdir():
+            if not d.is_dir() or d.name == exclude or self.is_cancelled(d.name):
+                continue
+            if self.is_publishable(d.name):
+                rev = self.revision_of(d.name)
+                if best is None or rev > best[1]:
+                    best = (d.name, rev)
+        return best
+
+    def reconcile_current(self) -> Optional[str]:
+        """R1e #4: a committed ``current`` is only trustworthy if it is integrity-verified AND
+        its sealed ``result.ok`` is true. Commits are ok-gated, so this normally holds; but a
+        legacy pointer, a crash, or a tampered store could leave ``current`` naming a version
+        that fails verify or whose result is not ok. In that case roll the pointer back to the
+        most-recent verified-ok version, or clear it if none exists, and mark the view dirty so
+        it is rebuilt off the healthy version. Returns the id of the isolated bad current (for
+        the caller to reconcile that job to FAILED), or ``None`` when current was already sound.
+        """
+        with state_lock(self.root):
+            cur = self.current_id()
+            if not cur:
+                return None
+            if self.is_publishable(cur):
+                return None                               # healthy — nothing to do
+            replacement = self._latest_ok_version(exclude=cur)
+            if replacement:
+                rid, rev = replacement
+                _pio.atomic_write_json(self.current_file,
+                                       {"render_job_id": str(rid), "revision": int(rev)})
+            else:
+                try:
+                    self.current_file.unlink()
+                except OSError:
+                    pass
+            _fsync_path(self.root)
+            # The view still names the quarantined version: mark it dirty so the next refresh
+            # (recover(), or the next read) re-points it — or removes it when cleared.
+            self.mark_view_dirty(self.current_id() or "")
+        self.refresh_view()
+        return cur
+
     # -- reclamation (R1c #11) ----------------------------------------------
-    def reclaim(self, keep_success: int = KEEP_SUCCESS, protected: Optional[set] = None) -> List[str]:
+    def reclaim(self, keep_success: int = KEEP_SUCCESS, protected: Optional[set] = None,
+                protect_unsealed: bool = False) -> List[str]:
         """Delete reclaimable version directories: all stale failed/cancelled ones, and
         successful ones beyond the most-recent ``keep_success`` — never the current version or
-        any id in ``protected`` (running jobs, export references). Returns removed ids."""
+        any id in ``protected`` (running jobs, export references). ``protect_unsealed`` keeps
+        every not-yet-sealed dir (the direct CLI cannot know whether another process is still
+        rendering into one). Returns removed ids."""
         # Run the whole decision under the state lock so a concurrent ref() (export pinning a
         # version) and the reclaim set are consistent (R1d #6).
         with state_lock(self.root):
@@ -369,7 +551,12 @@ class VersionStore:
             dirs = [d for d in self.results.iterdir() if d.is_dir()]
             dirs.sort(key=lambda d: d.stat().st_mtime)
             successes = [d.name for d in dirs if self.is_complete(d.name)]
-            keep = set(successes[-keep_success:]) | protected
+            # (``[-0:]`` would be the WHOLE list — keep_success=0 must keep none.)
+            recent = successes[-keep_success:] if keep_success > 0 else []
+            keep = set(recent) | protected
+            if protect_unsealed:
+                keep |= {d.name for d in dirs if not self.is_complete(d.name)
+                         and not self.is_cancelled(d.name)}
             removed = []
             for d in dirs:
                 if d.name in keep:

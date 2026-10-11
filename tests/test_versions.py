@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -170,3 +171,258 @@ def test_reclaim_keeps_current_and_recent(tmp_path):
     assert "r4" in kept                              # within keep_success=2
     assert "failed" in removed                       # stale incomplete reclaimed
     assert "r1" in removed                           # old success reclaimed
+
+
+# ----------------------------------------------------------------------------- R1e (repair 5)
+
+def _seal_ok(store, rid, revision, required=None, files=None, ok=True):
+    """Seal a version with a declared artefact list (R1e #2)."""
+    vd = store.begin(rid)
+    for name, text in (files or {"fig1.dxf": "dxf-" + rid}).items():
+        (vd / name).write_text(text, encoding="utf-8")
+    body = {"figures": [{"id": "fig1", "pass": ok}], "ok": ok}
+    store.write_result(rid, body)
+    m = dict(body)
+    m["required_artefacts"] = list(required or ["fig1.dxf"])
+    store.seal(rid, m, revision)
+    return vd
+
+
+def test_verify_checks_declared_artefacts_not_just_present_files(tmp_path):
+    """R1e #2: a version that claims ok but lacks an artefact on its declared list fails verify
+    and can never become current — the seal no longer only registers what happened to exist."""
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "r1", 1, required=["fig1.dxf", "fig1_filing.dxf"])
+    assert not s.verify("r1") and not s.is_publishable("r1")
+    with pytest.raises(ValueError):
+        with V.state_lock(tmp_path):
+            s.commit_pointer("r1", 1)
+    assert s.current_id() is None
+
+
+def test_verify_rejects_zero_byte_required_artefact(tmp_path):
+    """R1e #3: a required artefact sealed at zero bytes is not deliverable (size matches the
+    seal, so only the declared-list check catches it)."""
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "r1", 1, files={"fig1.dxf": ""})
+    assert not s.verify("r1")
+    with pytest.raises(ValueError):
+        s.acquire_verified_version("r1")
+    assert s.referenced() == set(), "a refused acquire must not leave a reference behind"
+
+
+def test_okfalse_version_is_never_committed(tmp_path):
+    """R1e #1/#2: the store itself refuses to point current at a sealed ok=false version."""
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "good", 1)
+    with V.state_lock(tmp_path):
+        assert s.commit_pointer("good", 1)
+    _seal_ok(s, "bad", 2, ok=False)
+    assert s.verify("bad"), "ok=false is intact (kept for diagnosis) ..."
+    assert not s.is_publishable("bad"), "... but not publishable"
+    with pytest.raises(ValueError):
+        with V.state_lock(tmp_path):
+            s.commit_pointer("bad", 2)
+    assert s.current_id() == "good"
+
+
+def test_view_race_pause_a_commit_b_resume_a_ends_on_b(tmp_path, monkeypatch):
+    """R1e #6: A's view refresh pauses mid-swap; B commits and refreshes; A resumes. The view
+    must end on B — refreshes are serialised by the view lock and re-read current inside it."""
+    import threading
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "A", 1)
+    _seal_ok(s, "B", 2)
+    with V.state_lock(tmp_path):
+        assert s.commit_pointer("A", 1)
+    real = V.VersionStore.sync_out
+    paused, resume = threading.Event(), threading.Event()
+
+    def slow_sync(self, rid):
+        if rid == "A" and not paused.is_set():
+            paused.set()
+            assert resume.wait(10)
+        return real(self, rid)
+
+    monkeypatch.setattr(V.VersionStore, "sync_out", slow_sync)
+    ta = threading.Thread(target=lambda: V.VersionStore(tmp_path).refresh_view())
+    ta.start()
+    assert paused.wait(10)
+
+    def commit_b():
+        sb = V.VersionStore(tmp_path)
+        with V.state_lock(tmp_path):
+            assert sb.commit_pointer("B", 2)
+        sb.refresh_view()
+
+    tb = threading.Thread(target=commit_b)
+    tb.start()
+    import time as _t
+    _t.sleep(0.2)                       # B has committed and is waiting for the view lock
+    assert s.current_id() == "B"
+    resume.set()
+    ta.join(10)
+    tb.join(10)
+    assert os.path.realpath(str(s.out)) == os.path.realpath(str(s.version_dir("B")))
+    assert (s.out / "fig1.dxf").read_text(encoding="utf-8") == "dxf-B"
+    assert not s.view_is_dirty()
+
+
+def test_view_race_commit_from_outside_the_lock_is_caught_by_recheck(tmp_path, monkeypatch):
+    """R1e #6 (cross-process flavour): B commits WITHOUT taking the in-process view lock (as a
+    second process would). A's post-swap re-read of current sees B and installs it."""
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "A", 1)
+    _seal_ok(s, "B", 2)
+    with V.state_lock(tmp_path):
+        assert s.commit_pointer("A", 1)
+    real = V.VersionStore.sync_out
+    done = {"b": False}
+
+    def sync_then_b_commits(self, rid):
+        real(self, rid)
+        if rid == "A" and not done["b"]:
+            done["b"] = True
+            from patent_figure import project_io as pio
+            pio.atomic_write_json(self.current_file, {"render_job_id": "B", "revision": 2})
+
+    monkeypatch.setattr(V.VersionStore, "sync_out", sync_then_b_commits)
+    assert s.refresh_view() is True
+    assert (s.out / "fig1.dxf").read_text(encoding="utf-8") == "dxf-B"
+
+
+def test_install_view_second_rename_failure_restores_old_view(tmp_path, monkeypatch):
+    """R1e #1 fault injection — "the second rename fails": a directory view (Windows copy /
+    legacy dir) must be moved aside before the new one is renamed in. If that second rename
+    fails, the old view is renamed BACK: nothing is deleted, the commit stands, the view is
+    marked dirty and repaired by the next refresh."""
+    s = V.VersionStore(tmp_path)
+    monkeypatch.setattr(s, "_symlink_swap",
+                        lambda target: (_ for _ in ()).throw(OSError("no symlink")))
+    _seal_ok(s, "r1", 1)
+    with V.state_lock(tmp_path):
+        assert s.publish("r1", 1)
+    assert not s.out.is_symlink() and (s.out / "fig1.dxf").read_text("utf-8") == "dxf-r1"
+    _seal_ok(s, "r2", 2)
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        if str(dst) == str(s.out) and "out.new" in str(src):
+            calls["n"] += 1
+            raise OSError("injected: second rename failed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(V.os, "replace", flaky_replace)
+    with V.state_lock(tmp_path):
+        assert s.commit_pointer("r2", 2)                  # the commit itself succeeds
+    assert s.refresh_view() is False and calls["n"] == 1  # the view install failed
+    assert s.current_id() == "r2"                         # commit stands
+    assert (s.out / "fig1.dxf").read_text("utf-8") == "dxf-r1", "old view restored, not lost"
+    assert s.view_is_dirty()
+    assert not list(tmp_path.glob("out.new.*")) and not list(tmp_path.glob("out.old.*"))
+    assert s.version_dir("r1").is_dir() and s.version_dir("r2").is_dir()
+    monkeypatch.setattr(V.os, "replace", real_replace)
+    s.ensure_view()                                       # next read repairs the view
+    assert (s.out / "fig1.dxf").read_text("utf-8") == "dxf-r2" and not s.view_is_dirty()
+
+
+def test_symlink_view_replace_failure_keeps_old_link(tmp_path, monkeypatch):
+    """POSIX view: ONE os.replace of the link. If it fails the old link is untouched."""
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "r1", 1)
+    with V.state_lock(tmp_path):
+        assert s.publish("r1", 1)
+    _seal_ok(s, "r2", 2)
+    real_replace = os.replace
+    monkeypatch.setattr(V.os, "replace", lambda a, b: (_ for _ in ()).throw(OSError("boom"))
+                        if str(b) == str(s.out) else real_replace(a, b))
+    with V.state_lock(tmp_path):
+        assert s.commit_pointer("r2", 2)
+    assert s.refresh_view() is False
+    assert (s.out / "fig1.dxf").read_text("utf-8") == "dxf-r1"
+    assert not list(tmp_path.glob("out.lnk.*")), "staged link cleaned up"
+
+
+def test_reconcile_current_rolls_back_okfalse_current_to_last_ok(tmp_path):
+    """R1e #4: a current left pointing at a verify-clean but ok=false version (an older build
+    could do that) is isolated — rolled back to the last publishable version, view re-pointed."""
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "good", 1)
+    with V.state_lock(tmp_path):
+        s.publish("good", 1)
+    _seal_ok(s, "bad", 2, ok=False)
+    from patent_figure import project_io as pio
+    pio.atomic_write_json(s.current_file, {"render_job_id": "bad", "revision": 2})
+    s.sync_out("bad")
+    assert V.VersionStore(tmp_path).reconcile_current() == "bad"
+    assert s.current_id() == "good"
+    assert (s.out / "fig1.dxf").read_text("utf-8") == "dxf-good"
+    assert V.VersionStore(tmp_path).reconcile_current() is None     # idempotent
+
+
+def test_reconcile_current_clears_pointer_and_view_without_a_good_version(tmp_path):
+    """R1e #4: no publishable version to fall back to → pointer cleared AND the out/ view
+    removed, so nothing keeps naming the quarantined version."""
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "bad", 1, ok=False)
+    from patent_figure import project_io as pio
+    pio.atomic_write_json(s.current_file, {"render_job_id": "bad", "revision": 1})
+    s.sync_out("bad")
+    assert s.out.is_symlink()
+    assert s.reconcile_current() == "bad"
+    assert s.current_id() is None
+    assert not s.out.exists() and not s.out.is_symlink()
+    assert s.version_dir("bad").is_dir(), "the failed version is kept for inspection"
+
+
+def test_acquire_and_reclaim_are_one_critical_section(tmp_path, monkeypatch):
+    """R1e #7: verify + ref happen under the state lock that reclaim decides under. Pause the
+    acquire inside its verify; a concurrent reclaim must wait and then see the pin."""
+    import threading
+    s = V.VersionStore(tmp_path)
+    for i in range(1, 4):
+        _seal_ok(s, "r%d" % i, i)
+        with V.state_lock(tmp_path):
+            s.publish("r%d" % i, i)
+    real = V.VersionStore.is_publishable
+    inside, go = threading.Event(), threading.Event()
+
+    def slow(self, rid):
+        if rid == "r1" and not inside.is_set():
+            inside.set()
+            assert go.wait(10)
+        return real(self, rid)
+
+    monkeypatch.setattr(V.VersionStore, "is_publishable", slow)
+    got = {}
+    ta = threading.Thread(target=lambda: got.setdefault(
+        "pin", V.VersionStore(tmp_path).acquire_verified_version("r1")))
+    ta.start()
+    assert inside.wait(10)
+    removed = {}
+    tb = threading.Thread(target=lambda: removed.setdefault(
+        "ids", V.VersionStore(tmp_path).reclaim(keep_success=0)))
+    tb.start()
+    import time as _t
+    _t.sleep(0.2)
+    assert tb.is_alive(), "reclaim must block while the acquire holds the state lock"
+    go.set()
+    ta.join(10)
+    tb.join(10)
+    assert got["pin"][0] == "r1"
+    assert "r1" not in removed["ids"] and s.version_dir("r1").is_dir()
+    s.release("r1")
+    assert "r1" in s.reclaim(keep_success=0)
+
+
+def test_acquire_after_reclaim_refuses_without_leaking_a_ref(tmp_path):
+    s = V.VersionStore(tmp_path)
+    _seal_ok(s, "old", 1)
+    _seal_ok(s, "new", 2)
+    with V.state_lock(tmp_path):
+        s.publish("new", 2)
+    assert "old" in s.reclaim(keep_success=0)
+    with pytest.raises(ValueError):
+        s.acquire_verified_version("old")
+    assert s.referenced() == set()

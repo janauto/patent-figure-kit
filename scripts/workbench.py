@@ -51,6 +51,7 @@ from fastapi.responses import (FileResponse, JSONResponse,  # noqa: E402
                                RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
+from patent_figure import export as EXPORT  # noqa: E402
 from patent_figure import jobs as JOBS  # noqa: E402
 from patent_figure import project_io as PIO  # noqa: E402
 from patent_figure import publish as PUB  # noqa: E402
@@ -90,6 +91,28 @@ def ensure_token() -> str:
 # ----------------------------------------------------------------------------- projects
 
 
+def _studio_result(studio: Path):
+    """``(rid, result)`` of the current PUBLISHED version of a studio workspace, from ONE
+    version-store snapshot read — the single source of truth (R1e #5). There is no
+    last_render.json and no in-memory cache: every summary / thumb / carousel / showcase / MCP
+    figures reader goes through here (or ``snapshot()`` directly), so a REST/MCP publish is
+    visible on the very next read. ``(None, {})`` when nothing is published."""
+    try:
+        rid, _vd, res = VS.VersionStore(studio).snapshot()
+        return (rid, res) if res else (None, {})
+    except Exception:
+        return None, {}
+
+
+def _out_url(pid: str, name: str, rid: Optional[str]) -> str:
+    """A file URL bound to one version (R1e #5): ``/files/<pid>/out/<name>?v=<rid>``."""
+    return "/files/%s/out/%s" % (pid, name) + (("?v=%s" % rid) if rid else "")
+
+
+def _basename(url: str) -> str:
+    return Path(str(url).split("?", 1)[0]).name
+
+
 class Project:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -125,11 +148,7 @@ class Project:
     def summary(self) -> dict:
         m = self.meta
         studio = self.root / "studio"
-        last = {}
-        try:
-            last = json.loads((studio / "last_render.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
+        rid, last = _studio_result(studio)
         figs = last.get("figures", [])
         thumb = next((f.get("annotation", {}).get("png") for f in figs
                       if f.get("annotation", {}).get("png")), None)
@@ -141,8 +160,9 @@ class Project:
             "figures": len(figs), "figures_pass": sum(1 for f in figs if f.get("pass")),
             "flowcharts": len(list((studio / "flowcharts").glob("*.json"))),
             "rendered_at": last.get("finished_at"),
+            "version": rid,
             "structure": self._structure_brief(),
-            "thumb": ("/files/%s/out/%s" % (self.id, Path(thumb).name)) if thumb else None,
+            "thumb": _out_url(self.id, _basename(thumb), rid) if thumb else None,
         }
 
 
@@ -274,8 +294,10 @@ class Registry:
                 # was built before build_workbench set self.render_service.
                 svc = (lambda wait, _pid=pid: self.render_service(_pid, wait)
                        if self.render_service else None)
+                jst = (lambda _pid=pid: self.job_status(_pid)
+                       if getattr(self, "job_status", None) else None)
                 app = PS.build_app(proj.workspace(), self.token, home_url="/",
-                                   render_service=svc)
+                                   render_service=svc, job_status=jst)
                 self.apps[pid] = app
             return app
 
@@ -356,20 +378,28 @@ class Tools:
     def get_project_figures(self, args: dict):
         pid = args.get("project_id", "")
         studio = self.reg.studio(pid)
-        # Resolve the current version in ONE read (R1d #2): figures AND images come from the
-        # same version, never racing the pointer.
-        _rid, vdir, res = VS.VersionStore(studio.ws.root).snapshot()
-        data = self._figures(pid, res or {}, brief=False)
-        if args.get("include_images") and vdir is not None:
+        if not args.get("include_images"):
+            # Resolve the current version in ONE read (R1d #2); URLs carry its id (R1e #5).
+            rid, _vdir, res = VS.VersionStore(studio.ws.root).snapshot()
+            return self._figures(pid, res or {}, brief=False, rid=rid)
+        # Images are a longer read (lazy PNG per figure): pin the version like an export does,
+        # so figures, URLs and images all come from one verified version that cannot be
+        # reclaimed mid-read (R1e #3/#7).
+        try:
+            pin = EXPORT.acquire(studio.ws.root)
+        except EXPORT.ExportRefused:
+            return self._figures(pid, {}, brief=False)
+        with pin:
+            data = self._figures(pid, pin.result, brief=False, rid=pin.rid)
             imgs = []
             for f in data["figures"]:
-                png = vdir / (f["id"] + "_annotated.png")   # input DXF + output PNG both in vdir
+                png = pin.vdir / (f["id"] + "_annotated.png")  # input DXF + PNG both in vdir
                 if EXT.ensure_preview_png(png):
                     imgs.append(png.read_bytes())
             return data, imgs[:6]
-        return data
 
-    def _figures(self, pid: str, res: dict, brief: bool) -> dict:
+    def _figures(self, pid: str, res: dict, brief: bool, rid: Optional[str] = None) -> dict:
+        rid = rid or res.get("render_job_id")
         figs = []
         for f in res.get("figures", []):
             ann = f.get("annotation") or {}
@@ -380,14 +410,16 @@ class Tools:
                    "table": [(r["numeral"], r["name"]) for r in
                              ((ann.get("table") or {}).get("rows") or [])],
                    "figure_description": ann.get("figure_description", "")}
+            q = ("?v=%s" % rid) if rid else ""          # bound to this version (R1e #5)
             row["files"] = {
-                "交底版PNG": self.url(pid, "out", f["id"] + "_annotated.png"),
-                "交底版DXF": self.url(pid, "out", f["id"] + "_annotated.dxf"),
-                "递交版DXF": self.url(pid, "out", f["id"] + "_filing.dxf"),
+                "交底版PNG": self.url(pid, "out", f["id"] + "_annotated.png") + q,
+                "交底版DXF": self.url(pid, "out", f["id"] + "_annotated.dxf") + q,
+                "递交版DXF": self.url(pid, "out", f["id"] + "_filing.dxf") + q,
             }
             figs.append(row)
         nums = res.get("numerals") or {}
         return {"project_id": pid, "ok": bool(res.get("ok")), "finished_at": res.get("finished_at"),
+                "version": rid,
                 "figures": figs, "附图说明": res.get("figure_descriptions", []),
                 "附图标记说明": nums.get("description_zh", ""),
                 "studio": "%s/p/%s/" % (self.base, pid),
@@ -599,10 +631,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         for p in reg.all():
             s = p.summary()
             studio = p.root / "studio"
-            try:
-                last = json.loads((studio / "last_render.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                last = {}
+            rid, last = _studio_result(studio)
             for f in sorted(last.get("figures", []), key=lambda f: f.get("number", 99)):
                 ann = f.get("annotation") or {}
                 if not ann.get("png"):
@@ -612,7 +641,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                                "label": "图%s" % f.get("number", ""),
                                "caption": re.sub(r"^图\d+为", "", ann.get("figure_description", "")).rstrip("；。"),
                                "rows": len((ann.get("table") or {}).get("rows") or []),
-                               "src": "/files/%s/out/%s" % (p.id, Path(ann["png"]).name)})
+                               "src": _out_url(p.id, _basename(ann["png"]), rid)})
             for fl in EXT.list_flowcharts(SimpleWS(studio)):
                 r = fl.get("result") or {}
                 if r.get("ok"):
@@ -688,7 +717,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
 
     # ---- files -------------------------------------------------------------
     @app.get("/files/{pid}/{area}/{name}", include_in_schema=False)
-    def files(pid: str, area: str, name: str):
+    def files(pid: str, area: str, name: str, v: str = ""):
         if not FILE_RE.match(name) or area not in ("out", "flow", "model", "snap"):
             raise HTTPException(400, "非法路径")
         if pid == "_scratch":
@@ -700,11 +729,18 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                 raise HTTPException(400, "非法路径")
             path = reg.need(pid).root / "studio" / "model.glb"
         elif area == "out":
-            # R1d #2: resolve the current version in ONE read and serve from that directory; a
+            # R1e #5: ``?v=<rid>`` serves THAT sealed version (every URL the server hands out
+            # carries it); without it, the current version from ONE snapshot read (R1d #2). A
             # lazily-generated PNG's input DXF and output both live in that version dir.
-            _rid, vdir, _res = VS.VersionStore(reg.need(pid).root / "studio").snapshot()
-            if vdir is None:
-                raise HTTPException(404, "工程还没有已发布的渲染版本")
+            store = VS.VersionStore(reg.need(pid).root / "studio")
+            if v:
+                vdir = store.sealed_dir(v)
+                if vdir is None:
+                    raise HTTPException(404, "没有这个已封口的渲染版本")
+            else:
+                _rid, vdir, _res = store.snapshot()
+                if vdir is None:
+                    raise HTTPException(404, "工程还没有已发布的渲染版本")
             path = vdir / name
         else:
             path = reg.need(pid).root / "studio" / "flow_out" / name
@@ -777,41 +813,15 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     # 可取消、可查询、可 SSE 订阅。作业状态持久化到 data/jobs/，进程重启后未完成作业标 interrupted。
     jobs = JOBS.JobStore(reg.data / "jobs")
     app.state.jobs = jobs
-    # Startup recovery + transactional reconciliation (R1d #4/#5): re-point each project's out/
-    # view from current.json (repairs an interrupted swap, independently of the commit), then
-    # reconcile each render job's real terminal state against the sealed version — using
-    # verify() (integrity, not just the complete flag) and the sealed result.ok (not 'complete
-    # == success'). The current version only ever names an ok=true version (ok-gated commit).
+    # Startup reconciliation (R1d #4/#5 → R1e #4), ONE service function per workspace
+    # (publish.reconcile_startup): isolate a current that is not publishable (verify fails or
+    # sealed ok=false) — roll the pointer back to the last publishable version or clear it and
+    # the out/ view — and make each render job's state, committed flag, error and terminal
+    # event agree with the sealed version: current+publishable → succeeded; isolated or sealed
+    # ok=false unfinished → failed.
     for _proj in reg.all():
         try:
-            vs = VS.VersionStore(_proj.root / "studio")
-            vs.recover()
-            cur = vs.current_id()
-            # a) the current version's job must be succeeded + committed (it did commit)
-            if cur and vs.verify(cur):
-                cjob = jobs.get(cur)
-                if cjob is not None and cjob.state != JOBS.SUCCEEDED:
-                    cjob.mark_committed()
-                    cjob.result = cjob.result or vs.read_result(cur)
-                    cjob._set_state(JOBS.SUCCEEDED)
-                    cjob._persist()
-            # b) a sealed-but-not-current render job (ok=false, or stale) that died pre-raise
-            # must recover as FAILED with a rebuilt error/result — never silently succeeded.
-            for rj in jobs.list(_proj.id):
-                if rj.kind != "render" or rj.state not in (JOBS.INTERRUPTED, JOBS.RUNNING,
-                                                           JOBS.QUEUED):
-                    continue
-                if rj.id == cur:
-                    continue
-                res = vs.read_result(rj.id) if vs.is_complete(rj.id) else None
-                if res is not None and not res.get("ok"):
-                    rj.result = res
-                    rj.error = {"code": "E_RENDER_NOT_OK",
-                                "message": "出图未全部过闸（进程中断后按封口结果恢复）",
-                                "hint": "按每张图的 QA 提示改计划后重渲"}
-                    rj._set_state(JOBS.FAILED)
-                    rj.emit(JOBS.EV_ERROR, rj.error, stage=JOBS.FAILED)
-                    rj._persist()
+            PUB.reconcile_startup(_proj.root / "studio", jobs, _proj.id)
         except Exception:
             pass
     _proj_locks: Dict[str, threading.Lock] = {}
@@ -1113,23 +1123,24 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         etag = write_plan(ws, body, if_match if if_match else None, pid)
         return JSONResponse({"ok": True}, headers={"ETag": etag})
 
-    _VARIANT_SUFFIX = {"filing": ["_filing"], "disclosure": ["_annotated"],
-                       "both": ["_annotated", "_filing"]}
-    _VARIANT_LABEL = {"_annotated": "交底版_带件号表", "_filing": "递交版_仅图号"}
-
-    def _render_version_dir(render_job):
-        return VS.VersionStore(reg.need(render_job.project_id).workspace().root) \
-            .version_dir(render_job.id)
-
     def _latest_render_job(pid: str):
+        """The default export source: the CURRENT version's render job (contract §13.5.1),
+        falling back to the newest succeeded render job whose version is publishable."""
+        vs = VS.VersionStore(reg.need(pid).workspace().root)
+        cur = vs.current_id()
+        cj = jobs.get(cur) if cur else None
+        if cj is not None and cj.kind == "render" and cj.state == JOBS.SUCCEEDED:
+            return cj
         renders = [j for j in jobs.list(pid)
                    if j.kind == "render" and j.state == JOBS.SUCCEEDED
-                   and VS.VersionStore(reg.need(pid).workspace().root).is_complete(j.id)]
+                   and vs.is_publishable(j.id)]
         return renders[-1] if renders else None
 
-    def _validate_render_job(render_job, pid: str):
-        """Shared gate for HTTP + MCP export (R1b #4): the render must belong to this project,
-        be a render, have succeeded, and have a complete sealed version."""
+    def _validate_render_job(render_job, pid: str) -> None:
+        """Job-level gate for HTTP + MCP export (R1b #4): the render must belong to this project,
+        be a render, and have succeeded. Version integrity is NOT checked here — that happens
+        atomically with the pin in ``EXPORT.acquire`` (R1e #7), so there is no window between
+        "validated" and "pinned"."""
         if render_job is None:
             raise HTTPException(409, "没有可导出的成功渲染，请先出图")
         if render_job.project_id != pid:
@@ -1138,130 +1149,53 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             raise HTTPException(409, "render_job 不是渲染作业")
         if render_job.state != JOBS.SUCCEEDED:
             raise HTTPException(409, "render_job 未成功（state=%s），不能导出" % render_job.state)
-        vdir = _render_version_dir(render_job)
-        # verify() — not just is_complete — so a truncated/missing artefact is rejected (R1d #5).
-        if not VS.VersionStore(reg.need(pid).workspace().root).verify(render_job.id):
-            raise HTTPException(409, "render_job 的产物版本不完整或已损坏（未通过完整性校验）")
-        return vdir
-
-    def _build_export(version_dir: Path, dest: Path, variant: str, formats, dpi: int):
-        """Build the bundle from the render's **immutable version directory** (R1b #4), with per
-        figure×version×format accounting: skip = unsupported, fail = generation failed, ok =
-        in the package (R1b #7/#8). Word is accounted per figure by actual inclusion."""
-        from patent_figure import sheet as _sheet
-        if not version_dir.is_dir():
-            raise RuntimeError("渲染产物版本目录不存在：%s" % version_dir)
-        suffixes = _VARIANT_SUFFIX.get(variant or "both", _VARIANT_SUFFIX["both"])
-        figs = sorted(p.stem for p in version_dir.glob("*.dxf")
-                      if not p.stem.endswith(("_annotated", "_filing", "_engineering")))
-        manifest: Dict[str, str] = {}
-        notes: List[str] = []
-        dwg_log: List[str] = []
-        docx_png_by_fig: Dict[str, Path] = {}          # fid -> its 交底版 PNG, if it rendered
-        for fid in figs:
-            for suf in suffixes:
-                ver = "交底版" if suf == "_annotated" else "递交版"
-                srcdxf = version_dir / (fid + suf + ".dxf")
-                sub = dest / _VARIANT_LABEL[suf]
-                for fmt in formats:
-                    key = "%s/%s/%s" % (fid, ver, fmt)
-                    if fmt == "pdf":
-                        manifest[key] = "skip"                     # F1 PDF 在 WP2
-                        continue
-                    if fmt == "docx" and suf == "_filing":
-                        manifest[key] = "skip"                     # 递交版 Word 未实现 (R1b #7)
-                        continue
-                    if not srcdxf.is_file():
-                        manifest[key] = "fail"
-                        continue
-                    sub.mkdir(parents=True, exist_ok=True)
-                    if fmt == "dxf":
-                        shutil.copy2(srcdxf, sub / srcdxf.name)
-                        manifest[key] = "ok"
-                    elif fmt == "png":
-                        png = sub / (srcdxf.stem + ".png")
-                        try:
-                            _sheet.render_preview(srcdxf, png, dpi=dpi)
-                            manifest[key] = "ok" if png.is_file() else "fail"
-                        except Exception as exc:
-                            manifest[key] = "fail"; notes.append("%s PNG: %s" % (key, exc))
-                    elif fmt == "docx":                            # only 交底版 reaches here
-                        png = sub / (srcdxf.stem + ".png")
-                        try:
-                            _sheet.render_preview(srcdxf, png, dpi=dpi)
-                            if png.is_file():
-                                docx_png_by_fig[fid] = png
-                                manifest[key] = "pending"
-                            else:
-                                manifest[key] = "fail"
-                        except Exception as exc:
-                            manifest[key] = "fail"; notes.append("%s Word 页: %s" % (key, exc))
-                    elif fmt == "dwg":
-                        dwg = sub / (srcdxf.stem + ".dwg")
-                        proc = PS.run_cli([str(SCRIPTS / "autocad_core_dxf_to_dwg.py"),
-                                           str(srcdxf), str(dwg)], timeout=600)
-                        if proc.returncode != 0:
-                            proc = PS.run_cli([str(SCRIPTS / "libredwg_dxf_to_dwg.py"),
-                                               str(srcdxf), "-o", str(sub)], timeout=600)
-                        if dwg.is_file():
-                            manifest[key] = "ok"; dwg_log.append("%s: ok" % key)
-                        else:
-                            manifest[key] = "fail"; dwg_log.append("%s: 转换失败" % key)
-        # Build the 交底版 Word from the figures whose PNG rendered; mark each figure's /docx
-        # by whether it actually made it into the document (R1b #7 — no blanket ok).
-        if "docx" in formats and docx_png_by_fig:
-            ordered = [docx_png_by_fig[f] for f in figs if f in docx_png_by_fig]
-            included = set()
-            try:
-                EXT._docx(ordered, dest / "说明书附图_交底版.docx")
-                if (dest / "说明书附图_交底版.docx").is_file():
-                    included = set(docx_png_by_fig)
-            except Exception as exc:
-                notes.append("Word: %s" % exc)
-            for fid in figs:
-                key = "%s/交底版/docx" % fid
-                if manifest.get(key) == "pending":
-                    manifest[key] = "ok" if fid in included else "fail"
-        # reference-numerals always travels with the package.
-        numerals = version_dir / "reference-numerals.json"
-        if numerals.is_file():
-            shutil.copy2(numerals, dest / numerals.name)
-        return manifest, notes, dwg_log
 
     def _start_export(pid: str, formats, variant=None, dpi: int = 300, render_job=None):
-        """Create + start an export job bound to a validated, sealed render version (R1b #4/#7)."""
+        """Create + start an export job bound to one verified, pinned render version — through
+        the SINGLE export service the browser uses too (R1e #3).
+
+        ``EXPORT.acquire`` verifies (declared artefact list, sizes, non-empty, sealed ok) AND
+        pins in one state-lock critical section (R1e #7). The pin is released on EVERY path:
+        job creation failing, job start failing, or the export body finishing/failing
+        (``Pin.release`` is idempotent, so the overlapping guards are safe)."""
         reg.need(pid)
         formats = formats or ["docx", "dxf"]
+        variant = variant or "both"
+        if variant not in EXPORT.REST_VARIANTS:
+            raise HTTPException(400, "variant 只能是 filing / disclosure / both")
         if render_job is None:
             render_job = _latest_render_job(pid)
-        version_dir = _validate_render_job(render_job, pid)
-        vstore = VS.VersionStore(reg.need(pid).workspace().root)
-        vstore.ref(render_job.id)                        # pin the source version vs reclaim (R1d #6)
-        job, _ = jobs.create("export", pid, inputs={
-            "formats": formats, "variant": variant or "both", "dpi": dpi,
-            "render_job_id": render_job.id})
+        _validate_render_job(render_job, pid)            # project/kind/state → HTTP 409s
+        try:
+            pin = EXPORT.acquire(reg.need(pid).workspace().root, render_job.id)
+        except EXPORT.ExportRefused:
+            raise HTTPException(409, "render_job 的产物版本不完整、已损坏或未全部过闸"
+                                     "（未通过完整性校验），不能导出")
+        try:
+            job, _ = jobs.create("export", pid, inputs={
+                "formats": formats, "variant": variant, "dpi": dpi,
+                "render_job_id": render_job.id})
 
-        def fn(j):
-            try:
-                j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
-                dest = (jobs.root / j.id / "bundle")
-                dest.mkdir(parents=True, exist_ok=True)
-                manifest, notes, dwg_log = _build_export(version_dir, dest, variant or "both",
-                                                         formats, dpi)
-                import zipfile
-                archive = (jobs.root / j.id / "bundle.zip")
-                with zipfile.ZipFile(str(archive), "w", zipfile.ZIP_DEFLATED) as zf:
-                    for f in sorted(dest.rglob("*")):
-                        if f.is_file():
-                            zf.write(str(f), f.relative_to(dest).as_posix())
-                return {"export_id": j.id, "render_job_id": render_job.id,
-                        "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
-                        "manifest": manifest, "notes": notes, "dwg_log": dwg_log,
-                        "download_url": base + "/v1/exports/%s/download" % j.id}
-            finally:
-                vstore.unref(render_job.id)               # release the pin when the read is done
+            def fn(j):
+                try:
+                    j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
+                    dest = (jobs.root / j.id / "bundle")
+                    bundle = EXPORT.build_bundle(pin, dest,
+                                                 variants=EXPORT.REST_VARIANTS[variant],
+                                                 formats=formats, dpi=dpi, run_cli=PS.run_cli)
+                    EXPORT.zip_dir(dest, jobs.root / j.id / "bundle.zip")
+                    return {"export_id": j.id, "render_job_id": render_job.id,
+                            "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
+                            "manifest": bundle["manifest"], "notes": bundle["notes"],
+                            "dwg_log": bundle["dwg_log"],
+                            "download_url": base + "/v1/exports/%s/download" % j.id}
+                finally:
+                    pin.release()                        # the read is done (or failed)
 
-        jobs.start(job, fn)
+            jobs.start(job, fn)
+        except BaseException:
+            pin.release()                                # create/start failed → drop the pin
+            raise
         return job
 
     # Hand the job plumbing to the Tools instance so the MCP tools below can reach it.
@@ -1284,7 +1218,14 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                 "state": job.state, "render_job_id": job.id,
                 "log": (d.get("error") or {}).get("message", "")}
 
+    def _job_status(pid: str):
+        """This project's latest render job (any entry: browser, REST, MCP) — reported by the
+        browser sub-app as the current JOB status, separately from what is published."""
+        renders = [j for j in jobs.list(pid) if j.kind == "render"]
+        return renders[-1].to_dict() if renders else None
+
     reg.render_service = _render_service
+    reg.job_status = _job_status
     tools.jobs = jobs
     tools.start_render = _render_job
     tools.start_export = _start_export
@@ -1373,10 +1314,12 @@ def build_showcase(reg: "Registry") -> dict:
     figures, flows, live, names = [], [], None, []
     for p in examples:
         studio = p.root / "studio"
+        rid, last = _studio_result(studio)
         try:
-            last = json.loads((studio / "last_render.json").read_text(encoding="utf-8"))
             plan = json.loads((studio / "plan.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            continue
+        if not last:
             continue
         kinds = {f["id"]: f.get("kind") for f in plan.get("figures", [])}
         for f in last.get("figures", []):
@@ -1388,8 +1331,8 @@ def build_showcase(reg: "Registry") -> dict:
                 "number": f.get("number"), "kind": kinds.get(f["id"]),
                 "rows": len((ann.get("table") or {}).get("rows") or []),
                 "caption": re.sub(r"^图\d+为", "", ann.get("figure_description", "")).rstrip("；。"),
-                "annotated": "/files/%s/out/%s_annotated.png" % (p.id, f["id"]),
-                "filing": "/files/%s/out/%s_filing.png" % (p.id, f["id"]),
+                "annotated": _out_url(p.id, f["id"] + "_annotated.png", rid),
+                "filing": _out_url(p.id, f["id"] + "_filing.png", rid),
             })
         for fl in EXT.list_flowcharts(SimpleWS(studio)):
             r = fl.get("result") or {}

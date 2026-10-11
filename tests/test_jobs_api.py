@@ -101,6 +101,19 @@ def client(tmp_path_factory):
 PID = "example-synthetic"
 
 
+def _restart(reg):
+    """Build a second workbench over the SAME registry (a simulated process restart) without
+    re-binding the registry's late-bound services (render_service / job_status) to it: the
+    module-scoped ``client`` keeps serving later tests with its own job store."""
+    import workbench as W
+    saved = {k: getattr(reg, k, None) for k in ("render_service", "job_status")}
+    try:
+        return W.build_workbench(reg, "t0k", 8790)
+    finally:
+        for k, v in saved.items():
+            setattr(reg, k, v)
+
+
 def _poll(c, job_id, timeout=120):
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -502,8 +515,7 @@ def test_export_download_survives_restart(client, fresh_project, tmp_path_factor
     import workbench as W
     from starlette.testclient import TestClient
     reg = client.app.reg                        # the Dispatcher holds the Registry
-    c2 = TestClient(W.Dispatcher(W.build_workbench(reg, "t0k", 8790), reg),
-                    base_url="http://127.0.0.1:8790")
+    c2 = TestClient(W.Dispatcher(_restart(reg), reg), base_url="http://127.0.0.1:8790")
     dl = c2.get("/v1/exports/%s/download" % eid, headers=H)
     assert dl.status_code == 200 and len(dl.content) > 200
 
@@ -613,8 +625,7 @@ def test_recovery_marks_sealed_okfalse_job_failed(client, fresh_project):
         "events": [{"id": 1, "type": "stage", "stage": "running", "progress": 0.0,
                     "data": None, "ts": 0}], "next_event": 2}), encoding="utf-8")
     # rebuild the app (restart) → reconciliation runs
-    c2 = TestClient(W.Dispatcher(W.build_workbench(reg, "t0k", 8790), reg),
-                    base_url="http://127.0.0.1:8790")
+    c2 = TestClient(W.Dispatcher(_restart(reg), reg), base_url="http://127.0.0.1:8790")
     j = c2.get("/v1/jobs/%s" % rid, headers=H).json()
     assert j["state"] == "failed", j
     assert (j.get("result") or {}).get("ok") is False
@@ -643,7 +654,92 @@ def test_standalone_plan_studio_local_render_uses_publish_service(client, fresh_
     assert vs.current_id() and vs.is_complete(vs.current_id())
 
 
+def test_rest_publish_is_visible_to_the_browser_state_status_and_export(client, fresh_project):
+    """R1e #5 (Codex repro): after a FIRST publish made via REST, the browser sub-app must see
+    it — /api/state, /api/render/status and export all derive from the version-store snapshot
+    (there is no render_state / last_render.json cache to go stale). Preview URLs carry the
+    version id and serve that version."""
+    pid = fresh_project
+    st0 = client.get("/p/%s/api/state" % pid, headers=H).json()
+    assert st0["render"] is None and st0["version"] is None
+    assert client.post("/p/%s/api/export" % pid, headers=H, json={}).status_code == 409
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    rid = rr.json()["job_id"]
+    assert _poll(client, rid)["state"] == "succeeded"
+    st = client.get("/p/%s/api/state" % pid, headers=H).json()
+    assert st["version"] == rid and st["render"]["ok"] is True
+    assert st["render_job"]["id"] == rid and st["render_job"]["state"] == "succeeded"
+    status = client.get("/p/%s/api/render/status" % pid, headers=H).json()
+    assert status["version"] == rid and status["result"]["render_job_id"] == rid
+    assert status["job"]["id"] == rid                       # job status reported separately
+    fig = status["result"]["figures"][0]
+    assert fig["svg"].endswith("?v=%s" % rid), fig["svg"]
+    pv = client.get("/p/%s%s" % (pid, fig["svg"]), headers=H)
+    assert pv.status_code == 200 and b"<svg" in pv.content[:400]
+    assert client.get("/p/%s/api/preview/fig1.svg?v=nope" % pid, headers=H).status_code == 404
+    summary = client.get("/api/wb/projects/%s" % pid, headers=H).json()
+    assert summary["version"] == rid and summary["thumb"].endswith("?v=%s" % rid)
+    ex = client.post("/p/%s/api/export" % pid, headers=H, json={"dwg": False})
+    assert ex.status_code == 200, ex.text
+    body = ex.json()
+    assert body["render_job_id"] == rid and body["zip"].endswith(".zip")
+    assert all(v in ("ok", "skip") for v in body["manifest"].values()), body["manifest"]
+
+
+def test_browser_and_rest_export_refuse_a_corrupted_version_without_leaking_pins(
+        client, fresh_project):
+    """R1e #3/#7: the browser export uses the same verify+pin service as REST — a zero-byte
+    DXF in the current version is refused by BOTH (409), and no reference is left behind."""
+    from patent_figure import versions as VS
+    pid = fresh_project
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    rid = rr.json()["job_id"]
+    assert _poll(client, rid)["state"] == "succeeded"
+    ws_root = client.app.reg.need(pid).root / "studio"
+    vs = VS.VersionStore(ws_root)
+    (vs.version_dir(rid) / "fig1_filing.dxf").write_text("", encoding="utf-8")   # zero bytes
+    assert client.post("/p/%s/api/export" % pid, headers=H, json={}).status_code == 409
+    r = client.post("/v1/projects/%s/export" % pid, headers=H,
+                    json={"formats": ["dxf"], "render_job_id": rid})
+    assert r.status_code == 409
+    assert vs.referenced() == set()
+
+
 def test_mcp_has_new_job_tools():
     import workbench_mcp as M
     names = {t["name"] for t in M.TOOLS}
     assert {"submit_render", "get_job", "cancel_job", "get_export"} <= names
+
+
+@pytest.mark.parametrize("where", ["create", "start"])
+def test_rest_export_create_or_start_failure_releases_the_pin(client, fresh_project,
+                                                              monkeypatch, where):
+    """R1e #7 fault injection: the version is pinned atomically at submit; if creating or
+    starting the export job then fails, the pin is released — a failed export can never keep a
+    version pinned (and so unreclaimable) forever."""
+    from patent_figure import versions as VS
+    pid = fresh_project
+    rr = client.post("/v1/projects/%s/render" % pid, headers=H)
+    rid = rr.json()["job_id"]
+    assert _poll(client, rid)["state"] == "succeeded"
+    jobs = client.app.main.state.jobs
+    ws_root = client.app.reg.need(pid).root / "studio"
+    vs = VS.VersionStore(ws_root)
+
+    def boom(*a, **k):
+        raise RuntimeError("injected: export job %s failed" % where)
+
+    monkeypatch.setattr(jobs, where, boom)
+    seen = {}
+    real_release = VS.VersionStore.release
+
+    def spy_release(self, r):
+        seen[r] = seen.get(r, 0) + 1
+        return real_release(self, r)
+
+    monkeypatch.setattr(VS.VersionStore, "release", spy_release)
+    with pytest.raises(RuntimeError):
+        client.post("/v1/projects/%s/export" % pid, headers=H,
+                    json={"formats": ["dxf"], "render_job_id": rid})
+    assert vs.referenced() == set(), "the pin must be released when create/start fails"
+    assert seen.get(rid) == 1, "released exactly once (idempotent Pin)"

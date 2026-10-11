@@ -276,10 +276,13 @@ paths:
       tags: [导出]
       summary: 导出附图包（异步 202 → export_id，绑定一次成功渲染）
       description: >
-        绑定到一次成功的渲染作业（render_job_id，缺省取该工程最近一次成功渲染），读其不可变
-        产物快照打包，不读共享工作目录（R1 #7）。清单按「图号×版本×格式」逐项核对，区分
-        skip（不支持，如本轮的 pdf）与 fail（生成失败）（R1 #8）。variant/formats/dpi 真实生效；
-        sheet_preset 尚未实现，传入即 400（R1 #12）。F1 的 PDF 主交付在 WP2。
+        绑定到一次成功的渲染作业（render_job_id，缺省取该工程**当前版本**的渲染作业），读其不可变
+        产物快照打包，不读共享工作目录（R1 #7）。与浏览器导出、MCP get_export 共用单一导出服务
+        （R1e #3）：提交时在版本库状态锁内一次完成「完整性校验（按声明的产物清单，缺失/截断/
+        零字节即拒）+ 可发布（封口 ok）+ 登记引用」，失败 409；导出结束或任何失败路径释放引用。
+        清单按「图号×版本×格式」逐项核对，区分 skip（不支持，如本轮的 pdf）与 fail（源缺失/为空
+        或生成失败）（R1 #8）。variant/formats/dpi 真实生效；未知 variant 400；sheet_preset 尚未
+        实现，传入即 400（R1 #12）。F1 的 PDF 主交付在 WP2。
       requestBody:
         content:
           application/json:
@@ -306,8 +309,8 @@ paths:
                   export_id: {type: string}
                   job_id: {type: string}
                   render_job_id: {type: string}
-        "400": {description: 传了尚未实现的参数（如 sheet_preset）}
-        "409": {description: 没有可导出的成功渲染，或 plan_etag 与被导出渲染不一致}
+        "400": {description: 传了尚未实现的参数（如 sheet_preset）或未知 variant}
+        "409": {description: 没有可导出的成功渲染、其版本未通过完整性校验/未全部过闸，或 plan_etag 与被导出渲染不一致}
       x-manifest-note: >
         作业 result.manifest 的键是 "图号/版本/格式"（版本为 交底版/递交版），值为 ok|skip|fail；
         result.notes 与 result.dwg_log 保留错误明细。
