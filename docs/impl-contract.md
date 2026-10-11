@@ -2238,3 +2238,20 @@ produced the bogus "jsonschema missing" reading on the first pass.
   系统打开文件时一致：`alias/../out/fig1.dxf`（`alias → real/anchor`）判为 `real/out/fig1.dxf`。
   `abspath` 只作为字面形式之一。`realpath(原始父目录)/名字` 同理用原始父目录。首次发布 QA 失败
   （`-o` 仍不存在）时前置校验同样拒绝，目录树不变。
+
+#### 13.5.8 R1j 收敛：包含关系按文件系统身份判定（不再堆字符串规则）
+
+- 新模块 `scripts/patent_figure/fsid.py`（纯标准库）。`locate(path)`：对**原始路径**按操作系统
+  语义解析（`realpath`：先符号链接、后 `..`、跟随悬空链接），拆成「最近存在的前缀」（以
+  `os.lstat` 的 `(st_dev, st_ino)` 标识）+「尚不存在的尾段」。`inside(target, root)`：根已存在 →
+  根的身份在目标存在前缀的身份链中；根尚不存在 → 两者落到**同一个**存在目录（身份相等），且目标
+  尾段以根尾段开头，尾段名按该目录所在卷的规则比较。
+- **卷的名称规则靠探测**（`case_insensitive`）：在该目录（或同卷祖先）里取一个含字母的已有条目，
+  只读地查它的异大小写拼写并按身份比较——不写任何文件；探测不到才退回平台默认（macOS/Windows 不
+  敏感）。名称一律先做 NFC 规范化（APFS/HFS+ 视组合/分解形式为同名；在其他卷上只会更严格）。
+- `versions.protected_path_reason` 改为同一模型：已存在部分按身份判定「是否就是版本库根下的保留
+  子项」（`current.json`、`results`、`refs`、`out`、锁文件……，拼写无关）；尚不存在的首段按卷规则
+  比较保留名。`render_patent_figure._hits` 对根同时按「解析后」与「视图链接本身的位置」判定。
+- 效果：大小写别名（`CASE-OUT.VERSIONS/CURRENT.JSON`、`Case-Out/fig1.dxf`、首次发布
+  `FIRST/OUT/...`、`--cache CASE-OUT`）与此前各类别名同样前置退出码 2、不写任何文件。Windows
+  （NTFS 默认不区分大小写）同走探测路径，**待 Windows 实机验证**。

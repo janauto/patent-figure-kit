@@ -638,6 +638,53 @@ def test_symlink_then_dotdot_into_the_future_view_is_refused(rendered, tmp_path)
     assert not (real / "out").exists() and not (real / "out.versions").exists()
 
 
+def test_letter_case_aliases_are_the_same_place(rendered, tmp_path):
+    """R1j: on a case-insensitive volume (macOS / Windows default) ``CASE-OUT.VERSIONS/
+    CURRENT.JSON`` IS ``case-out.versions/current.json``. Containment and reserved names are
+    judged by file-system identity + the probed name rule, so a case alias of current.json,
+    of the published out view, of the store, of a first-publish out, and as --cache are all
+    refused before rendering — exit 2, directory tree and every existing byte unchanged."""
+    probe = tmp_path / "CaseProbe"
+    probe.write_text("x", encoding="utf-8")
+    insensitive = (tmp_path / "cASEpROBE").exists()
+    probe.unlink()
+    if not insensitive:
+        pytest.skip("case-sensitive volume: letter case is not an alias here")
+    out = tmp_path / "case-out"
+    ok = render_in_subprocess(rendered["plan"], rendered["assembly"], out)
+    assert ok.returncode == 0, ok.stderr
+    store = tmp_path / "case-out.versions"
+    thr = tmp_path / "thr.json"
+    thr.write_text(json.dumps({"text_height_mm_min": 99.0}), encoding="utf-8")
+    before_tree = _snapshot_tree(tmp_path)
+    before_bytes = _tree_hashes(out.resolve(), store / "current.json", store / "revision.json")
+    T = str(tmp_path)
+    published = [
+        ("--json", T + "/CASE-OUT.VERSIONS/CURRENT.JSON"),        # the pointer itself
+        ("--json", T + "/case-out.versions/Current.Json"),
+        ("--json", T + "/Case-Out/fig1.dxf"),                     # the published view
+        ("--json", T + "/CASE-OUT.versions/Results/x.json"),      # the version store
+        ("--cache", T + "/CASE-OUT"),
+        ("--cache", T + "/Case-Out.Versions/cache"),
+    ]
+    first = [                                                     # first publish: -o absent
+        ("--json", T + "/FIRST/OUT/fig1.dxf"),
+        ("--json", T + "/First/Out.Versions/current.json"),
+        ("--cache", T + "/FIRST/Out"),
+    ]
+    for extra in ([], ["--thresholds", str(thr)]):
+        for o, cases in ((out, published), (tmp_path / "first" / "out", first)):
+            for flag, target in cases:
+                proc = render_in_subprocess(rendered["plan"], rendered["assembly"], o,
+                                            [flag, target] + extra)
+                assert proc.returncode == 2, (o, flag, target, extra, proc.stderr[-300:])
+                assert "用法错误" in proc.stderr
+    assert _snapshot_tree(tmp_path) == before_tree
+    assert _tree_hashes(out.resolve(), store / "current.json",
+                        store / "revision.json") == before_bytes
+    assert not (tmp_path / "first").exists()
+
+
 def test_in_place_report_must_be_the_versions_dedicated_path(rendered, tmp_path):
     from patent_figure import versions as V
     s = V.VersionStore(tmp_path / "store")

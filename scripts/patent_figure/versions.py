@@ -309,18 +309,41 @@ def is_store_root(d: Path) -> bool:
 
 
 def protected_path_reason(path, resolve: bool = True) -> Optional[str]:
-    """Why ``path`` must not be written by a tool run (None if it may). R1g #1: any path that —
-    lexically OR after resolving symlink aliases — lies in a version store's reserved area:
-    a version directory (``results/…``, sealed or not), the leases (``refs/…``), the ``out``
-    view, or the store metadata (``current.json`` …)."""
-    raw = os.fspath(path)
-    raw = raw if os.path.isabs(raw) else os.path.join(os.getcwd(), raw)   # keep ``..`` (R1i)
-    lexical = Path(os.path.abspath(raw))
-    real = Path(os.path.realpath(raw))          # resolve symlinks BEFORE applying ``..``
-    for cand in ((lexical, real) if resolve else (lexical,)):
-        for anc in [cand] + list(cand.parents):
-            if anc.name in STORE_RESERVED and is_store_root(anc.parent):
-                return "位于版本库保留区（%s）：%s" % (anc.name, anc)
+    """Why ``path`` must not be written by a tool run (None if it may). R1g #1 / R1j: a path
+    that lands — after resolving symlinks and ``..`` as the OS does — in a version store's
+    reserved area: a version directory (``results/…``), the leases (``refs/…``), the ``out``
+    view, or the store metadata (``current.json`` …).
+
+    Matching is by FILE-SYSTEM IDENTITY for the existing part (an existing ancestor is the
+    store's reserved child iff it is the same inode, whatever its spelling) and by the probed
+    name rule of the store's volume for a not-yet-existing name (``CURRENT.JSON`` is
+    ``current.json`` on a case-insensitive volume). ``resolve=False`` checks only the location
+    of the leaf itself (its parent resolved), for a ``-o`` that is our own view link."""
+    from patent_figure import fsid as _fsid
+    locs = [_fsid.locate(path, follow_leaf=False)]
+    if resolve:
+        locs.insert(0, _fsid.locate(path, follow_leaf=True))
+    for loc in locs:
+        p = loc.existing
+        while True:
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            if is_store_root(Path(parent)):
+                me = _fsid._ident(p)
+                for name in STORE_RESERVED:
+                    child = os.path.join(parent, name)
+                    if os.path.lexists(child) and _fsid._ident(child) == me:
+                        return "位于版本库保留区（%s）：%s" % (name, p)
+                hit = _fsid.child_named(parent, os.path.basename(p), STORE_RESERVED)
+                if hit:
+                    return "位于版本库保留区（%s）：%s" % (hit, p)
+            p = parent
+        if loc.tail and is_store_root(Path(loc.existing)):
+            hit = _fsid.child_named(loc.existing, loc.tail[0], STORE_RESERVED)
+            if hit:
+                return "位于版本库保留区（%s）：%s" % (
+                    hit, os.path.join(loc.existing, *loc.tail))
     return None
 
 

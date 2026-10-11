@@ -40,6 +40,7 @@ from patent_figure import occ_backend as _occ  # noqa: E402
 from patent_figure import plan as _plan  # noqa: E402
 from patent_figure import qa as _qa  # noqa: E402
 from patent_figure import sheet as _sheet  # noqa: E402
+from patent_figure import fsid as _fsid  # noqa: E402
 from patent_figure import publish as _publish  # noqa: E402
 from patent_figure import versions as _versions  # noqa: E402
 
@@ -1017,43 +1018,19 @@ def _render_set(render_dir: Path, *, figures, plan_doc, assembly, selected, num,
     return ok, rendered, errors, numerals_doc, numeral_warnings
 
 
-def _inside(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
-
-
 def _raw_abs(path) -> str:
-    """Make ``path`` absolute WITHOUT normalising it: ``..`` stays where the user wrote it, so
-    a later ``realpath`` resolves it AFTER the symlinks before it — exactly as the OS does when
-    the file is opened (R1i). ``os.getcwd()`` is already a physical path."""
-    raw = os.fspath(path)
-    return raw if os.path.isabs(raw) else os.path.join(os.getcwd(), raw)
+    """Absolute WITHOUT normalising (``..`` applied after symlinks by realpath, R1i)."""
+    return _fsid.raw_abs(path)
 
 
-def _path_forms(path) -> set:
-    """Every spelling under which ``path`` can be reached, computed WITHOUT requiring it to
-    exist (R1h) and WITHOUT normalising before resolving (R1i):
-
-    * the absolute lexical path (``abspath`` — used only as the lexical form);
-    * ``realpath`` of the RAW path — resolves each symlink component left to right, applies a
-      ``..`` to the already-resolved prefix (``alias/../out`` with ``alias → real/anchor`` is
-      ``real/out``, as the OS sees it), follows dangling links to their future targets, and
-      appends the not-yet-existing remainder;
-    * ``realpath(raw parent)/name`` — where a leaf that may itself become a symlink (the out/
-      view) sits."""
-    raw = _raw_abs(path)
-    forms = {Path(os.path.abspath(raw)), Path(os.path.realpath(raw))}
-    parent, name = os.path.split(raw.rstrip(os.sep) or raw)
-    if name not in ("", os.curdir, os.pardir):
-        forms.add(Path(os.path.realpath(parent)) / name)
-    return forms
-
-
-def _hits(target: Path, root: Path) -> bool:
-    """Does ANY spelling of ``target`` fall inside ANY spelling of ``root``? Unconditional —
-    no ``exists()`` precondition: on a first publish ``-o`` does not exist yet, and a symlink
-    alias of its parent (e.g. /tmp → /private/tmp) or a dangling link to the future out/ must
-    still be caught (R1h)."""
-    return any(_inside(t, r) for t in _path_forms(target) for r in _path_forms(root))
+def _hits(target, root) -> bool:
+    """Does a write to ``target`` land in ``root`` (or would it, once ``root`` exists)? Decided
+    by FILE-SYSTEM IDENTITY (``patent_figure.fsid``, R1j), not by spelling: symlinked parents,
+    dangling links, ``alias/..``, letter-case aliases on case-insensitive volumes and
+    not-yet-existing roots (first publish, R1h) are all the same place to the OS and to this
+    check. The root is tested both as resolved and as the location of its own (view) link."""
+    return _fsid.inside(target, root, root_follow_leaf=True) or \
+        _fsid.inside(target, root, root_follow_leaf=False)
 
 
 def _guard_side_paths(args, out_dir: Path) -> Optional[str]:
@@ -1065,8 +1042,9 @@ def _guard_side_paths(args, out_dir: Path) -> Optional[str]:
     this run's store ``<out>.versions/``, nor in ANY version store's reserved area
     (``versions.protected_path_reason``). Containment is tested over every spelling of both
     paths (``_hits``: lexical, symlink-resolved through the nearest existing ancestor, dangling
-    links followed), never gated on existence. ``-o`` itself must not be another store's
-    reserved area (e.g. the workbench's ``studio/out``).
+    links followed), never gated on existence, and by file-system identity + the probed
+    name rule of the volume (R1j: letter-case aliases). ``-o`` itself must not be another
+    store's reserved area (e.g. the workbench's ``studio/out``).
 
     ``--in-place`` (internal): the report may ONLY be this unsealed version's dedicated
     ``render-report.json``; the cache must not be in any store's reserved area."""
