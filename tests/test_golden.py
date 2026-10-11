@@ -504,6 +504,65 @@ def test_in_place_refuses_anything_but_an_unsealed_version_dir(rendered, tmp_pat
     assert sorted(p.name for p in sealed.iterdir()) == before
 
 
+def _tree_hashes(*roots) -> dict:
+    import hashlib
+    out = {}
+    for root in roots:
+        root = Path(root)
+        files = [root] if root.is_file() else sorted(q for q in root.rglob("*") if q.is_file())
+        for f in files:
+            out[str(f)] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+def test_side_paths_cannot_overwrite_published_versions(rendered, tmp_path):
+    """R1g #1: --json (written after the commit) and --cache are validated BEFORE rendering.
+    Neither a successful nor a failing re-render may write into the out/ view (directly or via
+    a symlink alias), a sealed version dir, or the store metadata — the existing version's
+    result.json / fig*.dxf and current.json keep their exact bytes."""
+    out = tmp_path / "out"
+    cache = tmp_path / "cache"
+    ok = render_in_subprocess(rendered["plan"], rendered["assembly"], out,
+                              ["--cache", str(cache)])
+    assert ok.returncode == 0, ok.stderr
+    store = tmp_path / "out.versions"
+    sealed = out.resolve()
+    (tmp_path / "alias").symlink_to(out)
+    thr = tmp_path / "thr.json"
+    thr.write_text(json.dumps({"text_height_mm_min": 99.0}), encoding="utf-8")
+    before = _tree_hashes(sealed, store / "current.json", store / "revision.json")
+    assert any(k.endswith("result.json") for k in before)
+    bad = [("--json", out / "result.json"), ("--json", out / "fig1.dxf"),
+           ("--json", store / "current.json"), ("--json", sealed / "result.json"),
+           ("--json", tmp_path / "alias" / "result.json"),
+           ("--json", store / "results" / "x" / "r.json"), ("--cache", out),
+           ("--cache", store / "c")]
+    for extra in ([], ["--thresholds", str(thr)]):          # success AND failure re-renders
+        for flag, target in bad:
+            args = ["--cache", str(cache)] if flag == "--json" else []
+            proc = render_in_subprocess(rendered["plan"], rendered["assembly"], out,
+                                        args + [flag, str(target)] + extra)
+            assert proc.returncode == 2, (flag, target, proc.stdout[-300:], proc.stderr[-300:])
+            assert "用法错误" in proc.stderr
+    assert _tree_hashes(sealed, store / "current.json", store / "revision.json") == before
+    # control: a report OUTSIDE the view/store is fine — and the old version stays intact
+    rep = tmp_path / "report.json"
+    good = render_in_subprocess(rendered["plan"], rendered["assembly"], out,
+                                ["--cache", str(cache), "--json", str(rep)])
+    assert good.returncode == 0 and json.loads(rep.read_text(encoding="utf-8"))["published"]
+    assert _tree_hashes(sealed) == {k: v for k, v in before.items() if k.startswith(str(sealed))}
+
+
+def test_in_place_report_must_be_the_versions_dedicated_path(rendered, tmp_path):
+    from patent_figure import versions as V
+    s = V.VersionStore(tmp_path / "store")
+    vd = s.begin("r1")
+    proc = render_in_subprocess(rendered["plan"], rendered["assembly"], vd,
+                                ["--in-place", "--json", str(tmp_path / "elsewhere.json")])
+    assert proc.returncode == 2 and "专用报告" in proc.stderr
+    assert not (tmp_path / "elsewhere.json").exists()
+
+
 # --------------------------------------------------------------------------- regeneration
 
 

@@ -38,7 +38,10 @@ from patent_figure import project_io as _pio
 
 _state_locks: Dict[str, "StoreLock"] = {}
 _view_locks: Dict[str, "StoreLock"] = {}    # serialises out/ view swaps per store (R1e #6)
-_refs: Dict[str, Dict[str, int]] = {}        # ws_root -> {rid: refcount}, guarded by state_lock
+#: Leases this PROCESS holds: (store root, rid) -> [lease paths]. The truth is on disk
+#: (``<root>/refs/<rid>/<pid>.<token>.lease``); this only drives the heartbeat and release.
+_held: Dict[tuple, List[Path]] = {}
+_heartbeat_started = False
 _guard = threading.Lock()
 
 #: A lockfile whose holder is gone is reclaimed after this long (O_EXCL fallback only — the
@@ -46,16 +49,90 @@ _guard = threading.Lock()
 STALE_LOCK_S = 600.0
 LOCK_POLL_S = 0.05
 
+#: Version leases (R1g #2): a holder refreshes its lease files every LEASE_HEARTBEAT_S; a lease
+#: is stale when its pid is dead (same host) OR its heartbeat is older than LEASE_TTL_S (covers
+#: pid reuse, another host, a frozen holder). Stale leases are removed under the store lock.
+LEASE_HEARTBEAT_S = 30.0
+LEASE_TTL_S = 600.0
+
+
+def _platform() -> str:
+    """``os.name`` read at CALL time, so tests can simulate the Windows branches on macOS /
+    Linux by monkeypatching this function (R1g #3). Every platform switch below goes through it."""
+    return os.name
+
+
+def _fcntl():
+    try:
+        import fcntl
+        return fcntl
+    except ImportError:  # pragma: no cover - Windows
+        return None
+
+
+def _msvcrt():
+    try:
+        import msvcrt
+        return msvcrt
+    except ImportError:
+        return None
+
+
+def _excl_lock(path: Path):
+    """Last-resort portable lock: ``O_CREAT|O_EXCL`` lockfile with pid + time, reclaimed when its
+    holder is dead (same host) or the file is older than ``STALE_LOCK_S``."""
+    excl = path.with_name(path.name + ".excl")
+    while True:
+        try:
+            fd = os.open(str(excl), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.write(fd, json.dumps({"pid": os.getpid(), "t": time.time()}).encode("ascii"))
+            return ("excl", (fd, excl))
+        except FileExistsError:
+            try:
+                info = json.loads(excl.read_text(encoding="ascii") or "{}")
+            except (OSError, ValueError):
+                info = {}
+            try:
+                age = time.time() - excl.stat().st_mtime
+            except OSError:
+                continue                                    # vanished: retry immediately
+            if age > STALE_LOCK_S or (info.get("pid") and not _pid_alive(int(info["pid"]))):
+                try:
+                    excl.unlink()                           # stale holder: reclaim
+                except OSError:
+                    pass
+                continue
+            time.sleep(LOCK_POLL_S)
+
 
 def _os_lock(path: Path):
     """Take an exclusive CROSS-PROCESS lock on ``path``; returns a handle for ``_os_unlock``.
 
-    POSIX ``fcntl.flock`` / Windows ``msvcrt.locking``: kernel locks, released automatically if
-    the holder dies — no stale lock is possible. Fallback (neither module): ``O_CREAT|O_EXCL``
-    lockfile carrying pid + time, reclaimed when older than ``STALE_LOCK_S``."""
+    POSIX ``fcntl.flock`` / Windows (``_platform() == "nt"``) ``msvcrt.locking``: kernel locks,
+    released automatically if the holder dies — no stale lock is possible. If the platform's
+    module is unavailable: the ``O_CREAT|O_EXCL`` lockfile (``_excl_lock``) with stale
+    reclamation. The Windows branch is exercised on macOS by monkeypatching ``_platform`` /
+    ``_msvcrt`` (tests); it is **pending verification on a real Windows machine**."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import fcntl  # POSIX
+    if _platform() == "nt":
+        msvcrt = _msvcrt()
+        if msvcrt is not None:
+            fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                while True:
+                    try:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(LOCK_POLL_S)
+            except BaseException:
+                os.close(fd)
+                raise
+            return ("msvcrt", fd)
+        return _excl_lock(path)
+    fcntl = _fcntl()
+    if fcntl is not None:
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -63,55 +140,18 @@ def _os_lock(path: Path):
             os.close(fd)
             raise
         return ("fcntl", fd)
-    except ImportError:
-        pass
-    try:
-        import msvcrt  # Windows
-        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            while True:
-                try:
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(LOCK_POLL_S)
-        except BaseException:
-            os.close(fd)
-            raise
-        return ("msvcrt", fd)
-    except ImportError:
-        pass
-    excl = path.with_name(path.name + ".excl")
-    while True:
-        try:
-            fd = os.open(str(excl), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            os.write(fd, ("%d %f" % (os.getpid(), time.time())).encode("ascii"))
-            return ("excl", (fd, excl))
-        except FileExistsError:
-            try:
-                if time.time() - excl.stat().st_mtime > STALE_LOCK_S:
-                    excl.unlink()                       # stale holder: reclaim
-                    continue
-            except OSError:
-                pass
-            time.sleep(LOCK_POLL_S)
-        except OSError as exc:  # pragma: no cover - unwritable store
-            if exc.errno in (errno.EACCES, errno.EROFS):
-                raise
-            raise
+    return _excl_lock(path)
 
 
 def _os_unlock(handle) -> None:
     kind, h = handle
     if kind == "fcntl":
-        import fcntl
         try:
-            fcntl.flock(h, fcntl.LOCK_UN)
+            _fcntl().flock(h, _fcntl().LOCK_UN)
         finally:
             os.close(h)
     elif kind == "msvcrt":
-        import msvcrt
+        msvcrt = _msvcrt()
         try:
             os.lseek(h, 0, os.SEEK_SET)
             msvcrt.locking(h, msvcrt.LK_UNLCK, 1)
@@ -124,6 +164,54 @@ def _os_unlock(handle) -> None:
             excl.unlink()
         except OSError:
             pass
+
+
+# -- process liveness (lease + lock staleness) ---------------------------------
+
+_STILL_ACTIVE = 259                     # Windows GetExitCodeProcess "still running"
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def _kernel32():  # pragma: no cover - Windows only; monkeypatched in tests
+    import ctypes
+    return ctypes.windll.kernel32
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is process ``pid`` (on this host) still running?
+
+    POSIX: ``os.kill(pid, 0)`` (ESRCH → dead, EPERM → alive under another user). Windows: NEVER
+    ``os.kill`` (any signal other than CTRL_* *terminates* the target) — ``OpenProcess`` +
+    ``GetExitCodeProcess`` via ``_kernel32()``; simulated on macOS in tests, **pending real
+    Windows verification**."""
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if _platform() == "nt":
+        try:
+            k32 = _kernel32()
+            h = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not h:
+                return False
+            try:
+                import ctypes
+                code = ctypes.c_ulong(0)
+                ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+                return bool(ok) and code.value == _STILL_ACTIVE
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return True                  # cannot tell: treat as alive; the TTL still applies
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 class StoreLock:
@@ -206,6 +294,34 @@ def is_unsealed_version_dir(path) -> bool:
         return False
 
 
+#: Names directly under a store root that belong to the store (never a user write target).
+STORE_RESERVED = ("results", "refs", "out", "current.json", "revision.json", "view-dirty.json",
+                  ".store.lock", ".view.lock", ".store.lock.excl", ".view.lock.excl")
+
+
+def is_store_root(d: Path) -> bool:
+    d = Path(d)
+    try:
+        return (d / "results").is_dir() and any(
+            (d / m).exists() for m in ("current.json", "revision.json", ".store.lock"))
+    except OSError:
+        return False
+
+
+def protected_path_reason(path, resolve: bool = True) -> Optional[str]:
+    """Why ``path`` must not be written by a tool run (None if it may). R1g #1: any path that —
+    lexically OR after resolving symlink aliases — lies in a version store's reserved area:
+    a version directory (``results/…``, sealed or not), the leases (``refs/…``), the ``out``
+    view, or the store metadata (``current.json`` …)."""
+    lexical = Path(os.path.abspath(str(path)))
+    real = Path(os.path.realpath(str(path)))
+    for cand in ((lexical, real) if resolve else (lexical,)):
+        for anc in [cand] + list(cand.parents):
+            if anc.name in STORE_RESERVED and is_store_root(anc.parent):
+                return "位于版本库保留区（%s）：%s" % (anc.name, anc)
+    return None
+
+
 def state_lock(ws_root) -> StoreLock:
     """THE lock of a version store — reentrant, cross-thread and cross-process (R1f #1): held
     for revision allocation, the current compare-and-replace (commit), cancellation, reference
@@ -230,6 +346,41 @@ def _fsync_path(path: Path) -> None:
             os.close(fd)
     except (OSError, PermissionError):
         pass        # best effort (e.g. directory fsync unsupported on some platforms)
+
+
+def _host() -> str:
+    try:
+        import socket
+        return socket.gethostname()
+    except Exception:  # pragma: no cover
+        return ""
+
+
+def _heartbeat_once() -> None:
+    """Refresh the mtime of every lease this process holds (the liveness signal)."""
+    with _guard:
+        paths = [p for lst in _held.values() for p in lst]
+    now = time.time()
+    for path in paths:
+        try:
+            os.utime(str(path), (now, now))
+        except OSError:
+            pass
+
+
+def _start_heartbeat() -> None:
+    global _heartbeat_started
+    with _guard:
+        if _heartbeat_started:
+            return
+        _heartbeat_started = True
+
+    def loop():
+        while True:
+            time.sleep(LEASE_HEARTBEAT_S)
+            _heartbeat_once()
+
+    threading.Thread(target=loop, name="pfk-lease-heartbeat", daemon=True).start()
 
 
 class VersionStore:
@@ -457,43 +608,103 @@ class VersionStore:
         if self._view_dirty_file.is_file():
             self.refresh_view()
 
-    # -- version references (R1d #6 / R1e #3,#7) -----------------------------
-    def _ref_locked(self, rid: str) -> None:
-        d = _refs.setdefault(str(self.root.resolve()), {})
-        d[str(rid)] = d.get(str(rid), 0) + 1
+    # -- version references: cross-process LEASES (R1d #6 / R1e #3,#7 / R1g #2) ----
+    @property
+    def refs_dir(self) -> Path:
+        return self.root / "refs"
+
+    def lease_path(self, rid: str, pid: int, token: str) -> Path:
+        """``<root>/refs/<rid>/<pid>.<token>.lease`` — visible to every process sharing the store."""
+        return self.refs_dir / str(rid) / ("%d.%s.lease" % (int(pid), token))
+
+    def _lease_locked(self, rid: str) -> Path:
+        """Write a lease for ``rid`` held by THIS process (caller holds the store lock)."""
+        if not RID_RE.match(str(rid)):
+            raise ValueError("非法版本 id：%r" % rid)
+        token = uuid.uuid4().hex[:12]
+        path = self.lease_path(rid, os.getpid(), token)
+        _pio.atomic_write_json(path, {"pid": os.getpid(), "host": _host(), "rid": str(rid),
+                                      "token": token, "created": time.time()})
+        with _guard:
+            _held.setdefault((str(self.root.resolve()), str(rid)), []).append(path)
+        _start_heartbeat()
+        return path
+
+    def _lease_is_live(self, path: Path) -> bool:
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+            age = time.time() - path.stat().st_mtime
+        except (OSError, ValueError):
+            return False                                  # torn / vanished → not a live holder
+        if age > LEASE_TTL_S:
+            return False                                  # no heartbeat: pid reuse / frozen
+        if info.get("host") not in (None, _host()):
+            return True                                   # another host: only the TTL applies
+        return _pid_alive(int(info.get("pid") or 0))
 
     def ref(self, rid: str) -> None:
-        """Pin a version against reclamation for the duration of a long read (export)."""
+        """Pin a version against reclamation (a cross-process lease) for a long read."""
         with state_lock(self.root):
-            self._ref_locked(rid)
+            self._lease_locked(rid)
 
     def unref(self, rid: str) -> None:
+        """Release ONE lease this process holds on ``rid`` (no-op if none)."""
         with state_lock(self.root):
-            d = _refs.get(str(self.root.resolve()), {})
-            if d.get(str(rid), 0) <= 1:
-                d.pop(str(rid), None)
-            else:
-                d[str(rid)] -= 1
+            with _guard:
+                lst = _held.get((str(self.root.resolve()), str(rid))) or []
+                path = lst.pop() if lst else None
+                if not lst:
+                    _held.pop((str(self.root.resolve()), str(rid)), None)
+            if path is not None:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                try:
+                    path.parent.rmdir()                   # last lease of this rid → tidy
+                except OSError:
+                    pass
 
     def referenced(self) -> set:
+        """Version ids with at least one LIVE lease from ANY process. Stale leases (dead pid,
+        no heartbeat within LEASE_TTL_S) are deleted here, under the store lock."""
+        live = set()
         with state_lock(self.root):
-            return set(_refs.get(str(self.root.resolve()), {}).keys())
+            if not self.refs_dir.is_dir():
+                return live
+            for rdir in self.refs_dir.iterdir():
+                if not rdir.is_dir():
+                    continue
+                for lease in rdir.glob("*.lease"):
+                    if self._lease_is_live(lease):
+                        live.add(rdir.name)
+                    else:
+                        try:
+                            lease.unlink()
+                        except OSError:
+                            pass
+                try:
+                    rdir.rmdir()                          # only succeeds when now empty
+                except OSError:
+                    pass
+        return live
 
     def acquire_verified_version(self, rid=None):
-        """Atomically (R1e #3/#7) resolve + verify + pin a version under the state lock — the
-        same lock ``reclaim`` decides under — so nothing can delete it between the check and the
-        pin. ``rid=None`` resolves the current version. The version must be publishable
+        """Atomically (R1e #3/#7) resolve + verify + pin a version under the store lock — the
+        same cross-process lock ``reclaim`` decides under — so nothing can delete it between the
+        check and the pin. The pin is a LEASE FILE (R1g #2), so a reclaim in ANOTHER process
+        sees it too; if this process dies the lease goes stale and becomes reclaimable.
+        ``rid=None`` resolves the current version. The version must be publishable
         (integrity-verified against its declared artefact list, sealed ``ok`` and result
-        ``ok``): a missing / truncated / zero-byte required artefact is refused. Returns
-        ``(rid, version_dir)``; raises ``ValueError`` otherwise. Callers ``release(rid)`` on
-        every exit path (see ``patent_figure.export.Pin``)."""
+        ``ok``). Returns ``(rid, version_dir)``; raises ``ValueError`` otherwise. Callers
+        ``release(rid)`` on every exit path (see ``patent_figure.export.Pin``)."""
         with state_lock(self.root):
             if rid is None:
                 rid = self.current_id()
             if not rid or not self.is_publishable(rid):
                 raise ValueError("没有可导出的版本（缺失、未完成、未通过完整性校验或未全部过闸）：%r"
                                  % rid)
-            self._ref_locked(rid)
+            self._lease_locked(rid)
             return rid, self.version_dir(rid)
 
     def release(self, rid: str) -> None:

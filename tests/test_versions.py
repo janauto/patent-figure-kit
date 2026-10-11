@@ -544,3 +544,233 @@ def test_no_compat_publish_shortcuts_remain():
     """R1f bypass list: the store exposes no publish shortcut that skips commit_version."""
     for name in ("publish", "write_manifest", "current_result"):
         assert not hasattr(V.VersionStore, name), name
+
+
+# ----------------------------------------------------------------------------- R1g #2 (leases)
+
+_PIN_CHILD = r'''
+import sys, time, json
+from pathlib import Path
+sys.path.insert(0, %r)
+from patent_figure import versions as V
+root, rid, d = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+s = V.VersionStore(root)
+s.acquire_verified_version(rid)                  # an export pin on a HISTORICAL version
+(d / "pinned").write_text(str(time.time()))
+while not (d / "go").exists():
+    time.sleep(0.02)
+s.release(rid)
+(d / "released").write_text(str(time.time()))
+while not (d / "exit").exists():
+    time.sleep(0.02)
+''' % _SCRIPTS
+
+_RECLAIM_CHILD = ("import sys, json; sys.path.insert(0, %r)\n"
+                  "from patent_figure import versions as V\n"
+                  "print(json.dumps(V.VersionStore(sys.argv[1]).reclaim(keep_success=0)))\n"
+                  ) % _SCRIPTS
+
+
+def _wait_file(path, proc=None, timeout=30):
+    t0 = time.time()
+    while not path.exists():
+        if proc is not None and proc.poll() is not None:
+            raise AssertionError(proc.stderr.read())
+        assert time.time() - t0 < timeout, "timeout waiting for %s" % path
+        time.sleep(0.02)
+
+
+def _reclaim_in_other_process(root):
+    import json as _json
+    p = _py(_RECLAIM_CHILD, root)
+    out, err = p.communicate(timeout=60)
+    assert p.returncode == 0, err
+    return _json.loads(out)
+
+
+def _three_versions(root):
+    s = V.VersionStore(root)
+    for i in range(1, 4):
+        _seal_ok(s, "r%d" % i, i)
+        _commit(s, "r%d" % i, i)                 # current = r3; r1 is history beyond keep=0
+    return s
+
+
+def test_export_pin_in_one_process_blocks_reclaim_in_another(tmp_path):
+    """R1g #2 (real two processes): A pins the historical version r1 (beyond the retention
+    count) for an export; B — a different process — reclaims with keep_success=0. Before A
+    releases, r1 must survive; after A releases, B's next reclaim removes it."""
+    s = _three_versions(tmp_path / "store")
+    sig = tmp_path / "sig"
+    sig.mkdir()
+    a = _py(_PIN_CHILD, s.root, "r1", sig)
+    try:
+        _wait_file(sig / "pinned", a)
+        assert list((s.refs_dir / "r1").glob("%d.*.lease" % a.pid)), "lease is a file"
+        removed = _reclaim_in_other_process(s.root)
+        assert "r1" not in removed and s.version_dir("r1").is_dir(), removed
+        assert "r2" in removed                       # unpinned history does go
+        (sig / "go").write_text("1")
+        _wait_file(sig / "released", a)
+        assert "r1" in _reclaim_in_other_process(s.root)
+        assert not s.version_dir("r1").exists()
+    finally:
+        (sig / "exit").write_text("1")
+        a.communicate(timeout=30)
+
+
+def test_lease_of_a_killed_holder_is_reclaimable(tmp_path):
+    """R1g #2: A pins r1 and is killed (no release). Its lease names a dead pid → stale → B's
+    reclaim removes both the lease and the version."""
+    import signal
+    s = _three_versions(tmp_path / "store")
+    sig = tmp_path / "sig"
+    sig.mkdir()
+    a = _py(_PIN_CHILD, s.root, "r1", sig)
+    _wait_file(sig / "pinned", a)
+    a.send_signal(signal.SIGKILL)
+    a.wait(timeout=30)                               # reaped: the pid is really gone
+    assert "r1" in _reclaim_in_other_process(s.root)
+    assert not s.version_dir("r1").exists()
+    assert not (s.refs_dir / "r1").exists(), "stale lease cleaned"
+
+
+def test_lease_without_heartbeat_is_stale_even_if_pid_alive(tmp_path, monkeypatch):
+    """PID reuse / frozen holder: a lease whose heartbeat is older than LEASE_TTL_S is stale
+    even though its pid (here: our own) is alive."""
+    s = _three_versions(tmp_path / "store")
+    lease = s.lease_path("r1", os.getpid(), "deadbeef")
+    from patent_figure import project_io as pio
+    pio.atomic_write_json(lease, {"pid": os.getpid(), "host": V._host(), "token": "deadbeef"})
+    assert s.referenced() == {"r1"}
+    old = time.time() - V.LEASE_TTL_S - 5
+    os.utime(str(lease), (old, old))
+    assert s.referenced() == set() and not lease.exists()
+
+
+def test_heartbeat_refreshes_held_leases(tmp_path):
+    s = _three_versions(tmp_path / "store")
+    s.acquire_verified_version("r1")
+    lease = next((s.refs_dir / "r1").glob("*.lease"))
+    old = time.time() - 100
+    os.utime(str(lease), (old, old))
+    V._heartbeat_once()
+    assert time.time() - lease.stat().st_mtime < 5
+    s.release("r1")
+    assert not lease.exists()
+
+
+# ----------------------------------------------------------------------------- R1g #3 (Windows)
+# The Windows branches cannot run on this macOS host; they are simulated by monkeypatching the
+# platform switch (versions._platform) and the OS bindings (_msvcrt / _kernel32). Real Windows
+# verification is still PENDING (契约 §13.5.5).
+
+class _FakeKernel32:
+    """OpenProcess / GetExitCodeProcess / CloseHandle over a {pid: exit_code} table."""
+
+    def __init__(self, table):
+        self.table, self.closed = table, 0
+
+    def OpenProcess(self, access, inherit, pid):
+        return pid if pid in self.table else 0
+
+    def GetExitCodeProcess(self, handle, ref):
+        ref._obj.value = self.table[handle]
+        return 1
+
+    def CloseHandle(self, handle):
+        self.closed += 1
+
+
+def test_windows_pid_liveness_never_uses_os_kill(monkeypatch):
+    k32 = _FakeKernel32({4242: V._STILL_ACTIVE, 4343: 0})
+    monkeypatch.setattr(V, "_platform", lambda: "nt")
+    monkeypatch.setattr(V, "_kernel32", lambda: k32)
+    monkeypatch.setattr(V.os, "kill", lambda *a: (_ for _ in ()).throw(
+        AssertionError("os.kill on Windows would TERMINATE the process")))
+    assert V._pid_alive(4242) is True               # STILL_ACTIVE
+    assert V._pid_alive(4343) is False              # exited
+    assert V._pid_alive(4444) is False              # OpenProcess failed: no such process
+    assert k32.closed == 2
+
+
+def test_windows_stale_lease_cleanup(tmp_path, monkeypatch):
+    s = _three_versions(tmp_path / "store")
+    from patent_figure import project_io as pio
+    live = s.lease_path("r1", 4242, "aaaa")
+    dead = s.lease_path("r2", 4343, "bbbb")
+    for path, pid in ((live, 4242), (dead, 4343)):
+        pio.atomic_write_json(path, {"pid": pid, "host": V._host(), "token": "t"})
+    assert live.name == "4242.aaaa.lease" and live.parent == s.root / "refs" / "r1"
+    monkeypatch.setattr(V, "_platform", lambda: "nt")
+    monkeypatch.setattr(V, "_kernel32", lambda: _FakeKernel32({4242: V._STILL_ACTIVE,
+                                                               4343: 0}))
+    assert s.referenced() == {"r1"}
+    assert live.exists() and not dead.exists() and not (s.refs_dir / "r2").exists()
+
+
+class _FakeMsvcrt:
+    """msvcrt.locking over a process-wide {inode: fd} table (byte-range lock on byte 0)."""
+    LK_NBLCK, LK_UNLCK = 2, 0
+
+    def __init__(self):
+        import threading as _th
+        self.held, self.calls, self._g = {}, [], _th.Lock()
+
+    def locking(self, fd, mode, nbytes):
+        ino = os.fstat(fd).st_ino
+        with self._g:
+            self.calls.append(mode)
+            if mode == self.LK_NBLCK:
+                if ino in self.held and self.held[ino] != fd:
+                    raise OSError(36, "Resource deadlock avoided")   # what msvcrt raises
+                self.held[ino] = fd
+            else:
+                self.held.pop(ino, None)
+
+
+def test_windows_store_lock_branch_excludes_and_releases(tmp_path, monkeypatch):
+    """Two StoreLock instances on the same lockfile = two processes (separate OS handles)."""
+    import threading
+    fake = _FakeMsvcrt()
+    monkeypatch.setattr(V, "_platform", lambda: "nt")
+    monkeypatch.setattr(V, "_msvcrt", lambda: fake)
+    monkeypatch.setattr(V, "_fcntl", lambda: (_ for _ in ()).throw(
+        AssertionError("the POSIX branch must not be used on Windows")))
+    a = V.StoreLock(tmp_path / ".store.lock")
+    b = V.StoreLock(tmp_path / ".store.lock")
+    order = []
+    a.acquire()
+    t = threading.Thread(target=lambda: (b.acquire(), order.append("b"), b.release()))
+    t.start()
+    time.sleep(0.3)
+    order.append("a-release")
+    a.release()
+    t.join(10)
+    assert order == ["a-release", "b"]
+    assert fake.held == {} and fake.LK_UNLCK in fake.calls
+    assert (tmp_path / ".store.lock").is_file()
+
+
+def test_excl_fallback_reclaims_a_dead_holders_lockfile(tmp_path, monkeypatch):
+    """Neither fcntl nor msvcrt (or Windows without msvcrt): O_CREAT|O_EXCL lockfile whose
+    holder is dead (or older than STALE_LOCK_S) is reclaimed, never waited on forever."""
+    for plat in ("posix", "nt"):
+        monkeypatch.setattr(V, "_platform", lambda p=plat: p)
+        monkeypatch.setattr(V, "_fcntl", lambda: None)
+        monkeypatch.setattr(V, "_msvcrt", lambda: None)
+        monkeypatch.setattr(V, "_pid_alive", lambda pid: pid != 999999)
+        lock = tmp_path / plat / ".store.lock"
+        lock.parent.mkdir()
+        excl = lock.with_name(lock.name + ".excl")
+        excl.write_text('{"pid": 999999, "t": 0}', encoding="ascii")     # dead holder
+        h = V._os_lock(lock)
+        assert h[0] == "excl"
+        V._os_unlock(h)
+        assert not excl.exists()
+        excl.write_text('{"pid": %d, "t": 0}' % os.getpid(), encoding="ascii")
+        old = time.time() - V.STALE_LOCK_S - 5                          # alive but ancient
+        os.utime(str(excl), (old, old))
+        h = V._os_lock(lock)
+        V._os_unlock(h)
+        assert not excl.exists()

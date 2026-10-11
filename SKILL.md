@@ -119,7 +119,9 @@ moved aside to `out.pre-versions-<stamp>/` (never deleted), and a folder that ho
 assembly or STEP is refused. `--in-place` is internal to the workbench's publish service and only accepts an unsealed
 version directory as `-o` (anything else is a usage error); never use it for delivery. Two runs
 writing the same `-o` at once are safe: revisions and the commit are serialised by a
-cross-process lock, so the newer revision always ends up current.
+cross-process lock, so the newer revision always ends up current. `--json` and `--cache` must
+point OUTSIDE `-o` and `out.versions/` (checked before rendering, symlink aliases included —
+otherwise a report could overwrite a published version); such a path is a usage error (exit 2).
 
 `--thresholds overrides.json` tightens or loosens the QA gate (a JSON object of
 `qa.DEFAULT_THRESHOLDS` keys → values); omit it for the contract-frozen thresholds. Use it for

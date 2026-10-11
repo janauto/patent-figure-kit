@@ -1017,6 +1017,62 @@ def _render_set(render_dir: Path, *, figures, plan_doc, assembly, selected, num,
     return ok, rendered, errors, numerals_doc, numeral_warnings
 
 
+def _inside(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _guard_side_paths(args, out_dir: Path) -> Optional[str]:
+    """R1g #1: validate EVERY path this run will write besides its own version, BEFORE
+    rendering — the ``--json`` report (written after the commit) and the ``--cache`` dir.
+
+    Pointer mode: neither may lie in ``-o`` (the view — checked lexically, because the view may
+    not exist yet and will alias the NEW version after the commit, and after resolving
+    symlinks, because ``-o`` aliases the CURRENT version), nor in this run's store
+    ``<out>.versions/``, nor in ANY version store's reserved area (``versions.
+    protected_path_reason``: version dirs, leases, the view, ``current.json``…). ``-o`` itself
+    must not be another store's reserved area (e.g. the workbench's ``studio/out``).
+
+    ``--in-place`` (internal): the report may ONLY be this unsealed version's dedicated
+    ``render-report.json``; the cache must not be in any store's reserved area."""
+    targets = []
+    if args.json_out:
+        targets.append(("--json", Path(args.json_out)))
+    if args.cache:
+        targets.append(("--cache", Path(args.cache)))
+    if args.in_place:
+        dedicated = Path(os.path.realpath(str(out_dir))) / "render-report.json"
+        for flag, raw in targets:
+            if flag == "--json":
+                if Path(os.path.realpath(str(raw))) != dedicated:
+                    return ("--in-place 模式下 --json 只能是本次未封口版本的专用报告 %s，"
+                            "实得 %s" % (dedicated, raw))
+            else:
+                why = _versions.protected_path_reason(raw)
+                if why:
+                    return "%s %s %s" % (flag, raw, why)
+        return None
+    # -o itself: our own view legitimately resolves into OUR store's results/ — only resolve
+    # symlinks when -o is NOT our view (e.g. an alias of the workbench's studio/out).
+    own_view = _publish._is_own_view(_publish.cli_store(out_dir))
+    why = _versions.protected_path_reason(out_dir, resolve=not own_view)
+    if why:
+        return "-o %s %s——它属于另一个版本库，请换一个专用输出目录" % (out_dir, why)
+    store_root = _publish.cli_store(out_dir).root
+    view_real = Path(os.path.realpath(str(out_dir)))
+    for flag, raw in targets:
+        lexical = Path(os.path.abspath(str(raw)))
+        real = Path(os.path.realpath(str(raw)))
+        if _inside(lexical, out_dir) or (out_dir.exists() and _inside(real, view_real)):
+            return ("%s %s 落在输出视图 -o %s 内（视图即已封口的当前版本，提交后还会指向新版本），"
+                    "请写到 -o 之外" % (flag, raw, out_dir))
+        if _inside(lexical, store_root) or _inside(real, Path(os.path.realpath(str(store_root)))):
+            return "%s %s 落在版本库 %s 内，请写到版本库之外" % (flag, raw, store_root)
+        why = _versions.protected_path_reason(raw)
+        if why:
+            return "%s %s %s" % (flag, raw, why)
+    return None
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -1094,6 +1150,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       % out_dir)
                 return EXIT_USAGE
         out_dir = here
+
+    problem = _guard_side_paths(args, out_dir)
+    if problem:
+        _fail("用法错误：%s" % problem)
+        return EXIT_USAGE
 
     figures = [f for f in plan_doc.get("figures", []) if isinstance(f, dict)]
     if args.only is not None:

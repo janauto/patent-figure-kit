@@ -2197,3 +2197,27 @@ produced the bogus "jsonschema missing" reading on the first pass.
   | `Workspace.out` | **删除**（`<root>/out` 只是版本库视图，读者一律 `snapshot()`）。 |
   | CLI `--only` 合并源 / 失败提示 | 改为 `snapshot()` 读取，不再单独 `current_dir()`。 |
   非交付的只读路径（不入清单）：验收与测试直接读 `-o/fig1.dxf`（视图），`studio_ext.ensure_preview_png` 在版本目录里派生预览 PNG（临时文件 + 原子替换，不进 manifest）。
+
+#### 13.5.5 R1g 收敛：旁路写入目标校验、跨进程版本租约、Windows 分支标注
+
+- **写入目标前置校验**（`render_patent_figure._guard_side_paths`，渲染前执行，违者退出码 2 且不写
+  任何文件）：缺省模式下 `--json`（提交后才写）与 `--cache` 不得位于 `-o` 视图内（**按字面路径**
+  判——视图可能尚未存在、提交后会指向新版本；**并按符号链接解析后**判——`-o` 是当前已封口版本的
+  别名）、不得位于本次版本库 `<-o>.versions/` 内（无论是否已存在），也不得位于任何版本库的保留区
+  （`versions.protected_path_reason`：根下 `results/`、`refs/`、`out`、`current.json`、
+  `revision.json`、`view-dirty.json`、锁文件；字面与解析后两次判定）。`-o` 本身若是别的版本库的
+  保留区（如工作台 `studio/out` 的别名）同样拒绝。`--in-place` 下 `--json` 只能是本次未封口版本的
+  专用报告 `<vd>/render-report.json`，`--cache` 不得落在保留区。
+- **跨进程版本租约**（取代进程内引用计数）：`acquire_verified_version`/`ref` 在存储锁内写
+  `<root>/refs/<rid>/<pid>.<token>.lease`（JSON：pid、host、token、创建时间）；本进程持有的租约
+  由守护线程每 `LEASE_HEARTBEAT_S`（30 s）刷新 mtime。`referenced()` 在存储锁内扫描租约：pid 已死
+  （同主机）或心跳超过 `LEASE_TTL_S`（600 s，覆盖 pid 复用/他机/卡死）即为陈旧并删除；`reclaim`
+  在同一把锁内跳过存活租约。`release`/`unref` 删除本进程的一个租约。进程被杀 → 租约随即可判陈旧
+  → 版本可回收。存活判定：POSIX `os.kill(pid, 0)`；Windows **绝不**用 `os.kill`（会终止目标），
+  改 `OpenProcess`+`GetExitCodeProcess`。
+- **平台分支可测**：所有平台切换经 `versions._platform()`（调用时读 `os.name`），OS 绑定经
+  `_fcntl()/_msvcrt()/_kernel32()`；测试在 macOS 上 monkeypatch 模拟 `nt`，覆盖 Windows 锁
+  （`msvcrt.locking` 互斥与解锁）、租约路径计算与陈旧清理、`O_EXCL` 回退的死持有者/超时回收、目录
+  视图拷贝与「第二步改名失败回滚」。**待 Windows 实机验证**：`msvcrt.locking` 实际语义、
+  `OpenProcess` 权限、目录视图拷贝与 `os.replace` 在 Windows 上的行为、符号链接权限不足时的拷贝
+  回退。
