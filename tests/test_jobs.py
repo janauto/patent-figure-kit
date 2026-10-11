@@ -178,6 +178,50 @@ def test_interrupted_job_keeps_event_sequence_for_replay(tmp_path):
     assert fresh[-1]["id"] > last_seen
 
 
+def test_committed_job_cannot_become_cancelled(tmp_path):
+    """R1c #2: once a job is marked committed (inside the commit lock), a cancel racing the
+    success transition must lose — the job stays succeeded."""
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("render", "p")
+
+    def fn(j):
+        j.mark_committed()          # commit point reached
+        j.request_cancel()          # a cancel arrives in the post-commit window
+        return {"ok": True}         # fn returns normally
+
+    store.run(job, fn)
+    assert job.state == J.SUCCEEDED, "committed job must not be cancelled by a late cancel"
+
+
+def test_idempotency_is_project_scoped_and_conflicts_on_different_input(tmp_path):
+    """R1c #8: the key is scoped to (project, kind, key) so it can't cross projects, and a
+    reuse with a different fingerprint is a conflict."""
+    store = J.JobStore(tmp_path)
+    a, ca = store.create("render", "projA", idempotency_key="k", fingerprint="e1")
+    # same key, different project → a fresh job (no cross-project sharing)
+    b, cb = store.create("render", "projB", idempotency_key="k", fingerprint="e1")
+    assert ca and cb and a.id != b.id and b.project_id == "projB"
+    # same key+project, same fingerprint → reuse
+    a2, c2 = store.create("render", "projA", idempotency_key="k", fingerprint="e1")
+    assert not c2 and a2.id == a.id
+    # same key+project, different fingerprint → conflict
+    with pytest.raises(J.JobConflict):
+        store.create("render", "projA", idempotency_key="k", fingerprint="e2")
+
+
+def test_recovery_marks_committed_running_job_succeeded(tmp_path):
+    """R1c #5: a job persisted committed but still 'running' (crash between commit and the
+    success transition) recovers as succeeded, not interrupted."""
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("render", "p")
+    job.mark_committed()
+    job.result = {"ok": True}
+    job._set_state(J.RUNNING)
+    job._persist()
+    rec = J.JobStore(tmp_path).get(job.id)
+    assert rec.state == J.SUCCEEDED and rec.committed
+
+
 def test_concurrent_saves_keep_terminal_state(tmp_path):
     """R1b #10: snapshotting inside the save lock totally orders writes, so a late older
     snapshot can never roll a terminal job back to running on disk."""

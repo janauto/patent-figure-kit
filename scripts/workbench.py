@@ -60,6 +60,8 @@ REPO = SCRIPTS.parent
 WEBUI = PS.WEBUI
 DEFAULT_DATA = Path.home() / ".patent-workbench"
 DEFAULT_PORT = 8790
+#: Refuse a new render job when free disk space is below this (R1c #11).
+MIN_FREE_BYTES = 100 * 1024 * 1024
 PID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
 FILE_RE = re.compile(r"^[A-Za-z0-9_\-]+\.(png|svg|dxf|dwg|json|glb)$")
 MEDIA = {"png": "image/png", "svg": "image/svg+xml", "dxf": "application/octet-stream",
@@ -350,15 +352,16 @@ class Tools:
     def get_project_figures(self, args: dict):
         pid = args.get("project_id", "")
         studio = self.reg.studio(pid)
-        res = studio.render_state.get("result") or {}
+        # Resolve the current version once and read its sealed result — every reader goes
+        # through current.json, never the mutable render_state (R1c #1).
+        vs = VS.VersionStore(studio.ws.root)
+        vdir = vs.current_dir()
+        res = vs.current_result() or {}
         data = self._figures(pid, res, brief=False)
-        if args.get("include_images"):
+        if args.get("include_images") and vdir is not None:
             imgs = []
             for f in data["figures"]:
-                png = studio.ws.out / (f["id"] + "_annotated.png")
-                # R1 #14: the interactive path writes SVGs only, so the PNG may not exist yet.
-                # Generate it on demand (from the sibling DXF) exactly like the HTTP image
-                # routes do, so a pure-MCP client gets images without a browser visit / export.
+                png = vdir / (f["id"] + "_annotated.png")   # input DXF + output PNG both in vdir
                 if EXT.ensure_preview_png(png):
                     imgs.append(png.read_bytes())
             return data, imgs[:6]
@@ -694,13 +697,19 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             if name != "model.glb":
                 raise HTTPException(400, "非法路径")
             path = reg.need(pid).root / "studio" / "model.glb"
+        elif area == "out":
+            # R1c #1: resolve the current version directory via current.json and serve from it,
+            # so a file read is pinned to one consistent version (not the mutable out view). A
+            # lazily-generated PNG's input DXF and output both live in that version dir.
+            vdir = VS.VersionStore(reg.need(pid).root / "studio").current_dir()
+            if vdir is None:
+                raise HTTPException(404, "工程还没有已发布的渲染版本")
+            path = vdir / name
         else:
-            proj = reg.need(pid)
-            sub = "out" if area == "out" else "flow_out"
-            path = proj.root / "studio" / sub / name
+            path = reg.need(pid).root / "studio" / "flow_out" / name
         if not path.is_file():
-            # WP1-5: raster PNGs are produced lazily from the sibling DXF (the interactive
-            # render path only writes SVGs now). A missing SVG/DXF still 404s.
+            # Raster PNGs are produced lazily from the sibling DXF in the SAME version dir
+            # (the render path writes SVGs only). A missing SVG/DXF still 404s.
             if not (path.suffix == ".png" and area == "out"
                     and EXT.ensure_preview_png(path)):
                 raise HTTPException(404)
@@ -767,12 +776,24 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     # 可取消、可查询、可 SSE 订阅。作业状态持久化到 data/jobs/，进程重启后未完成作业标 interrupted。
     jobs = JOBS.JobStore(reg.data / "jobs")
     app.state.jobs = jobs
-    # Startup recovery (R1b #2): re-point each project's out/ view from its current.json (repairs
-    # an interrupted swap). JobStore already recovered its own jobs, marking any that were
-    # mid-flight 'interrupted'. current.json only ever names a complete version.
+    # Startup recovery + transactional reconciliation (R1c #5): re-point each project's out/ view
+    # from current.json (repairs an interrupted swap, independently of the commit), and reconcile
+    # job state with the committed version — a job that is current + whose version is complete
+    # DID commit, so a recovery that marked it 'interrupted' is corrected to succeeded.
     for _proj in reg.all():
         try:
-            VS.VersionStore(_proj.root / "studio").recover()
+            vs = VS.VersionStore(_proj.root / "studio")
+            vs.recover()
+            cur = vs.current_id()
+            if cur and vs.is_complete(cur):
+                cjob = jobs.get(cur)
+                if cjob is not None and cjob.state in (JOBS.INTERRUPTED, JOBS.RUNNING,
+                                                       JOBS.QUEUED, JOBS.CANCELLED):
+                    cjob.mark_committed()
+                    if cjob.result is None:
+                        cjob.result = vs.read_result(cur)
+                    cjob._set_state(JOBS.SUCCEEDED)
+                    cjob._persist()
         except Exception:
             pass
     _proj_locks: Dict[str, threading.Lock] = {}
@@ -832,21 +853,40 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         studio = reg.studio(pid)                        # 409 if the project isn't ready
         ws = studio.ws
         vstore = VS.VersionStore(ws.root)
+        # R1c #11: reclaim old versions (protecting current + running renders) and refuse a new
+        # job when the disk is critically low, before creating anything.
+        running = {j.id for j in jobs.list(pid) if j.kind == "render" and not j.is_terminal()}
+        try:
+            vstore.reclaim(protected=running)
+        except Exception:
+            pass
+        try:
+            if shutil.disk_usage(str(ws.root)).free < MIN_FREE_BYTES:
+                raise HTTPException(507, "磁盘剩余空间不足，拒绝新建渲染作业（请清理后重试）")
+        except OSError:
+            pass
         # idempotency FIRST — a repeated key must not spawn a second version dir (R1b #3).
-        job, created = jobs.create("render", pid, idempotency_key=idem)
+        fp = _plan_etag(ws)                             # same key + different plan → 409 (R1c #8)
+        try:
+            job, created = jobs.create("render", pid, idempotency_key=idem, fingerprint=fp)
+        except JOBS.JobConflict as exc:
+            raise HTTPException(409, str(exc))
         if not created:
             return job
         rid = job.id
-        # Freeze + hash + persist synchronously, inside the plan lock, before starting.
+        # Freeze + hash + a project-level monotonic revision + persist, inside the plan lock,
+        # before starting (R1c #3). The revision decides commit precedence.
         with PIO.plan_lock(ws.plan):
             vstore.begin(rid)
             snap = _freeze_inputs(ws, vstore.inputs_dir(rid))
+            snap["revision"] = vstore.next_revision()
         job.inputs.update(snap)
         job._persist()
 
         def fn(j):
             j.raise_if_cancelled()                      # before executing
             vd = vstore.version_dir(rid)
+            revision = int(job.inputs.get("revision", 0))
             plan_p, asm_p = vd / "inputs" / "plan.json", vd / "inputs" / "assembly.json"
             j.emit(JOBS.EV_STAGE, "渲染中", stage="render", progress=0.2)
             worker = WK.get_shared_worker()
@@ -862,24 +902,31 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             j.raise_if_cancelled()                      # before sealing/commit
             manifest["render_job_id"] = rid
             manifest["inputs"] = dict(job.inputs)
-            vstore.write_manifest(rid, manifest)        # seal the version (completion marker)
-            # Commit point: current.json swap + out view, under the state lock shared with cancel.
+            result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            result["render_job_id"] = rid
+            result["ok"] = bool(ok)
+            vstore.write_result(rid, result)            # reader-facing view, sealed with the set
+            vstore.seal(rid, manifest, revision)        # fsync artefacts → manifest (R1c #6)
+            # Commit point: monotonic current.json swap, under the state lock shared with cancel.
+            # committed is recorded IN the lock and is irreversible (R1c #2).
+            became_current = False
             with VS.state_lock(ws.root):
-                if j.cancel_requested:
+                if j.cancel_requested and not j.committed:
                     vstore.mark_cancelled(rid)
                     raise JOBS.JobCancelled()
-                vstore.publish(rid)
-                result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                result["render_job_id"] = rid
-                studio.render_state["result"] = result
-                try:
-                    (ws.root / "last_render.json").write_text(
-                        json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
-                except OSError:
-                    pass
+                became_current = vstore.publish(rid, revision)   # False if a newer rev is current
+                if became_current:
+                    j.mark_committed()                   # irreversible — cancel can't undo it now
+                    try:
+                        (ws.root / "last_render.json").write_text(
+                            json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+                    except OSError:
+                        pass
             data = tools._figures(pid, result, brief=True)
             data["ok"] = bool(ok)
             data["render_job_id"] = rid
+            data["revision"] = revision
+            data["became_current"] = became_current
             data["plan_etag"] = job.inputs.get("plan_etag", "")
             data["manifest"] = manifest
             if not ok:
@@ -1234,16 +1281,22 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     # Hand the job plumbing to the Tools instance so the MCP tools below can reach it.
     def _render_service(pid: str, wait: bool = True):
         """The render entry a mounted sub-app's browser /api/render uses, so it submits the SAME
-        isolated job as REST/MCP (R1b #5). Returns the render result dict (render_state shape)."""
+        isolated job as REST/MCP (R1b #5). Returns ONLY this job's own result — never a prior
+        run's shared state (R1c #4). On timeout/failure/cancel it reports this job's status."""
         job = _render_job(pid, None)
-        if wait:
-            _wait_job(job, 1800.0)
-        res = reg.studio(pid).render_state.get("result")
-        if res is not None:
-            return res
+        done = _wait_job(job, 1800.0) if wait else job.is_terminal()
+        vs = VS.VersionStore(reg.studio(pid).ws.root)
+        if not done:
+            return {"figures": [], "ok": False, "running": True,
+                    "render_job_id": job.id, "state": job.state}
+        if job.state == JOBS.SUCCEEDED:
+            r = vs.read_result(job.id) or (job.result or {})   # this job's sealed version result
+            r.setdefault("render_job_id", job.id)
+            return r
         d = job.to_dict()
-        return {"figures": [], "ok": False,
-                "log": (d.get("error") or {}).get("message", ""), "render_job_id": job.id}
+        return {"figures": (d.get("result") or {}).get("figures", []), "ok": False,
+                "state": job.state, "render_job_id": job.id,
+                "log": (d.get("error") or {}).get("message", "")}
 
     reg.render_service = _render_service
     tools.jobs = jobs

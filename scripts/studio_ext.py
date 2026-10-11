@@ -303,6 +303,10 @@ def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: boo
                   png_dpi: int = EXPORT_PNG_DPI) -> dict:
     files, notes = [], []
     figs = sorted(result.get("figures", []), key=lambda f: f.get("number", 999))
+    # R1c #1: the browser export reads the pinned current version directory via current.json,
+    # not the mutable out view, so the whole package comes from one consistent version.
+    from patent_figure import versions as _VS
+    src_dir = _VS.VersionStore(ws.root).current_dir() or ws.out
     # WP1-5: raster PNGs are generated here, at export, by dpi — the interactive path only
     # ever made SVGs. Render each annotated/filing DXF to PNG in-process (matplotlib is
     # imported lazily inside render_preview); a failure is cosmetic and must not block export.
@@ -310,8 +314,8 @@ def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: boo
         from patent_figure import sheet as _sheet
         for fig in figs:
             for suffix in ("_annotated", "_filing"):
-                dxf = ws.out / (fig["id"] + suffix + ".dxf")
-                png = ws.out / (fig["id"] + suffix + ".png")
+                dxf = src_dir / (fig["id"] + suffix + ".dxf")
+                png = src_dir / (fig["id"] + suffix + ".png")
                 if dxf.is_file() and not png.is_file():
                     try:
                         _sheet.render_preview(dxf, png, dpi=png_dpi)
@@ -322,7 +326,7 @@ def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: boo
     for fig in figs:
         for suffix in ("", "_annotated", "_filing"):
             for ext in (".dxf", ".png", ".svg"):
-                src = ws.out / (fig["id"] + suffix + ext)
+                src = src_dir / (fig["id"] + suffix + ext)
                 if src.is_file():
                     sub = {"": "原始出图", "_annotated": "交底版_带件号表",
                            "_filing": "递交版_仅图号"}[suffix]
@@ -337,7 +341,7 @@ def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: boo
                 (dest / "流程图").mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dest / "流程图" / src.name)
                 files.append("流程图/" + src.name)
-    numerals = ws.out / "reference-numerals.json"
+    numerals = src_dir / "reference-numerals.json"
     lines = []
     if numerals.is_file():
         shutil.copy2(numerals, dest / numerals.name)
@@ -352,7 +356,7 @@ def export_bundle(ws, result: dict, dest: Path, run_cli: Callable, want_dwg: boo
     (dest / "附图说明.txt").write_text(text, encoding="utf-8")
     files.append("附图说明.txt")
     # 说明书附图.docx：每图一页（交底版 PNG + 流程图 PNG），A4 版心等比缩放
-    pngs = [ws.out / (f["id"] + "_annotated.png") for f in figs]
+    pngs = [src_dir / (f["id"] + "_annotated.png") for f in figs]
     pngs += [flow_out(ws) / (f["id"] + ".png") for f in flows]
     pngs = [p for p in pngs if p.is_file()]
     if pngs:

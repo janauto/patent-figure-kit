@@ -540,7 +540,22 @@ def n16(ctx):
     assert (out / "reference-numerals.json").is_file(), "计划级的附图标记说明应照常发布"
     # 暂存目录必须已清理。
     assert not (out / "_work").exists(), "暂存目录 _work 未清理"
-    return "失败件 %d 张全部进 diag/，输出目录 0 张未过闸图（退出码 1）" % len(quarantined)
+
+    # R1c #7：先成功、再（改 thresholds）失败重渲进同一目录——不得残留旧图配新标记表。
+    out2 = ctx["tmp"] / "out_n16b"
+    ok1 = run([SCRIPTS / "render_patent_figure.py", ctx["plan"], "--assembly", ctx["assembly"],
+               "-o", out2, "--cache", ctx["tmp"] / "cache_n16b"])
+    assert ok1.returncode == 0, "首次渲染应成功"
+    good = sorted(p.name for p in out2.glob("*.dxf"))
+    assert good, "首次渲染应有图"
+    bad = run([SCRIPTS / "render_patent_figure.py", ctx["plan"], "--assembly", ctx["assembly"],
+               "-o", out2, "--thresholds", thr, "--cache", ctx["tmp"] / "cache_n16b"])
+    assert bad.returncode == 1, "二次（强制失败）重渲退出码应为 1"
+    stale = sorted(p.name for p in out2.glob("*.dxf"))
+    assert not stale, "二次失败重渲后输出目录竟残留旧图：%s（R1c #7 图文混配）" % stale
+    assert (out2 / "diag").is_dir() and list((out2 / "diag").glob("*.dxf")), "失败件应在 diag/"
+    return ("失败件 %d 张全部进 diag/，输出目录 0 张未过闸图；成功→改口径→失败重渲无残留旧图"
+            % len(quarantined))
 
 
 NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n10b, n11, n12, n13, n14, n15, n16]

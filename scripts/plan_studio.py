@@ -638,10 +638,14 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None,
     def preview(name: str):
         if not re.fullmatch(r"[A-Za-z0-9_\-]+\.(svg|png|dxf)", name):
             raise HTTPException(400, "非法文件名")
-        path = ws.out / name
+        # R1c #1: resolve the current version directory via current.json and serve from it,
+        # so the read is pinned to one version; a lazy PNG is generated inside that dir.
+        from patent_figure import versions as _VS
+        vdir = _VS.VersionStore(ws.root).current_dir()
+        if vdir is None:
+            raise HTTPException(404, "还没有已发布的渲染版本")
+        path = vdir / name
         if not path.is_file():
-            # WP1-5: PNGs are made lazily from the sibling DXF (the interactive path writes
-            # SVGs only). SVG/DXF that are genuinely absent still 404.
             if not (path.suffix == ".png" and studio_ext.ensure_preview_png(path)):
                 raise HTTPException(404)
         media = {"svg": "image/svg+xml", "png": "image/png",

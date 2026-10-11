@@ -48,6 +48,10 @@ class JobCancelled(Exception):
     """Raised inside a job's run function when a cancel was requested."""
 
 
+class JobConflict(Exception):
+    """A reused idempotency key arrived with a different request fingerprint (R1c #8)."""
+
+
 class Job:
     """One unit of async work and its observable history.
 
@@ -72,6 +76,7 @@ class Job:
         self.events: List[Dict[str, Any]] = []
         self._next_event = 1
         self._cancel = threading.Event()
+        self._committed = threading.Event()
         self._cond = threading.Condition()
         self._store: "Optional[JobStore]" = None
 
@@ -124,8 +129,18 @@ class Job:
     def cancel_requested(self) -> bool:
         return self._cancel.is_set()
 
+    def mark_committed(self) -> None:
+        """Mark this job's result irreversibly committed (R1c #2). Must be set inside the
+        workspace state lock at the commit point. Once set, a late cancel cannot undo it."""
+        self._committed.set()
+
+    @property
+    def committed(self) -> bool:
+        return self._committed.is_set()
+
     def raise_if_cancelled(self) -> None:
-        if self._cancel.is_set():
+        # A committed job is past the point of no return — a cancel racing the commit loses.
+        if self._cancel.is_set() and not self._committed.is_set():
             raise JobCancelled()
 
     def is_terminal(self) -> bool:
@@ -139,6 +154,7 @@ class Job:
                 "inputs": dict(self.inputs),
                 "result": self.result, "error": self.error,
                 "idempotency_key": self.idempotency_key,
+                "committed": self.committed,
                 "created_at": self.created_at, "updated_at": self.updated_at,
                 "logs": [e["data"] for e in self.events if e["type"] == EV_LOG],
                 "last_event_id": self._next_event - 1,
@@ -240,6 +256,13 @@ class JobStore:
             job.updated_at = data.get("updated_at", job.created_at)
             job.stage = data.get("stage", state)
             job.progress = float(data.get("progress", 0.0))
+            if data.get("committed"):
+                job._committed.set()
+            if state in (QUEUED, RUNNING) and job.committed:
+                # Crashed AFTER the commit point but before the success transition persisted:
+                # the version is published, so this job did succeed (R1c #5 / #2).
+                state = SUCCEEDED
+                job.state = SUCCEEDED
             if state in (QUEUED, RUNNING):
                 # Crashed mid-flight: mark interrupted AND append a terminal event continuing
                 # the id sequence, so Last-Event-ID replay sees the end (R1 #10).
@@ -252,31 +275,41 @@ class JobStore:
                 job._store = self
                 self._jobs[job.id] = job
                 if job.idempotency_key:
-                    self._by_key[job.idempotency_key] = job.id
+                    self._by_key[(job.project_id, job.kind, job.idempotency_key)] = job.id
                 job._persist()           # write the interrupted event back durably
                 continue
             job.state = state
             self._jobs[job.id] = job
             if job.idempotency_key:
-                self._by_key[job.idempotency_key] = job.id
+                self._by_key[(job.project_id, job.kind, job.idempotency_key)] = job.id
 
     # -- api -----------------------------------------------------------------
     def create(self, kind: str, project_id: str, *, inputs: Optional[Dict[str, Any]] = None,
-               idempotency_key: Optional[str] = None) -> "tuple[Job, bool]":
+               idempotency_key: Optional[str] = None,
+               fingerprint: Optional[str] = None) -> "tuple[Job, bool]":
         """Create a queued job, or return the existing one for a repeated idempotency key.
 
-        Returns ``(job, created)`` where ``created`` is False on an idempotent hit.
+        The key is scoped to ``(project_id, kind, key)`` so it cannot cross projects (R1c #8);
+        a repeat with a different ``fingerprint`` raises ``JobConflict``. Returns
+        ``(job, created)`` where ``created`` is False on an idempotent hit.
         """
         with self._lock:
-            if idempotency_key and idempotency_key in self._by_key:
-                existing = self._jobs.get(self._by_key[idempotency_key])
+            tk = (project_id, kind, idempotency_key) if idempotency_key else None
+            if tk and tk in self._by_key:
+                existing = self._jobs.get(self._by_key[tk])
                 if existing is not None:
+                    if (fingerprint is not None and existing.inputs.get("_fingerprint")
+                            not in (None, fingerprint)):
+                        raise JobConflict(
+                            "幂等键 %r 已用于不同输入（%s）" % (idempotency_key, kind))
                     return existing, False
             job = Job(kind, project_id, inputs=inputs, idempotency_key=idempotency_key)
+            if fingerprint is not None:
+                job.inputs["_fingerprint"] = fingerprint
             job._store = self
             self._jobs[job.id] = job
-            if idempotency_key:
-                self._by_key[idempotency_key] = job.id
+            if tk:
+                self._by_key[tk] = job.id
         job._persist()
         return job, True
 

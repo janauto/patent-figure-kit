@@ -508,6 +508,44 @@ def test_export_download_survives_restart(client, fresh_project, tmp_path_factor
     assert dl.status_code == 200 and len(dl.content) > 200
 
 
+def test_wait1_failure_returns_this_jobs_status_not_prior_success(client, fresh_project):
+    """R1c #4: a sync wait=1 render that fails must report THIS job's failure, never a prior
+    successful run's result."""
+    pid = fresh_project
+    # first a successful render establishes a prior success
+    ok = client.post("/v1/projects/%s/render?wait=1" % pid, headers=H)
+    assert ok.status_code == 200 and ok.json().get("ok") is True
+    # now break the plan so the next render fails, and wait=1
+    cur = client.get("/v1/projects/%s/plan" % pid, headers=H)
+    doc = cur.json()
+    doc["figures"] = [{"id": "figX", "caption": "坏", "kind": "assembly",
+                       "members": ["NOPE-NONE"]}]
+    client.put("/v1/projects/%s/plan" % pid, headers={**H, "If-Match": cur.headers["etag"]},
+               json=doc)
+    bad = client.post("/v1/projects/%s/render?wait=1" % pid, headers=H)
+    body = bad.json()
+    # must reflect THIS job's failure, never the prior success
+    assert body.get("state") == "failed", body
+    assert (body.get("result") or {}).get("ok") is False, body
+    assert body.get("ok") is not True
+
+
+def test_idempotency_different_plan_conflicts(client, fresh_project):
+    """R1c #8: reusing a render idempotency key after the plan changed is a 409."""
+    pid = fresh_project
+    k = {"Idempotency-Key": "render-key-1"}
+    r1 = client.post("/v1/projects/%s/render" % pid, headers={**H, **k})
+    assert r1.status_code == 202
+    _poll(client, r1.json()["job_id"])
+    # change the plan, reuse the same key → conflict
+    cur = client.get("/v1/projects/%s/plan" % pid, headers=H)
+    doc = cur.json(); doc["layout"] = dict(doc.get("layout") or {}, density="compact")
+    client.put("/v1/projects/%s/plan" % pid, headers={**H, "If-Match": cur.headers["etag"]},
+               json=doc)
+    r2 = client.post("/v1/projects/%s/render" % pid, headers={**H, **k})
+    assert r2.status_code == 409
+
+
 def test_mcp_has_new_job_tools():
     import workbench_mcp as M
     names = {t["name"] for t in M.TOOLS}

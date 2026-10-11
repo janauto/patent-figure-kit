@@ -874,6 +874,23 @@ def _print_qa_failures(figure_id: str, report: dict) -> None:
             _fail("      修复：%s" % hint)
 
 
+def _clear_published(out_dir: Path) -> None:
+    """Remove a previous run's published artefacts from ``out_dir`` so this run's set fully
+    replaces them (R1c #7). Keeps a frozen ``inputs/`` snapshot and the scratch dir."""
+    if not out_dir.is_dir():
+        return
+    for p in sorted(out_dir.iterdir()):
+        if p.name in ("inputs", WORK_SUBDIR):
+            continue
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink()
+        except OSError:
+            pass
+
+
 def _publish_figure(figure_id: str, work_dir: Path, dest_dir: Path,
                     info: Dict[str, Any]) -> Path:
     """Move one figure's artefacts from the scratch dir to its final home atomically.
@@ -997,7 +1014,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return EXIT_USAGE
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Atomic publish (§S0-04): render into a scratch dir, publish only what clears the gate.
+    # Whole-set publish (§S0-04 / R1c #7): the output is exactly THIS run's set. Clear any
+    # previously-published artefacts first (keeping a frozen ``inputs/`` and the scratch dir),
+    # so a re-render can never leave a stale figure beside a new reference-numerals table. The
+    # version-store path renders into a fresh version dir, so this is a no-op there; current.json
+    # provides that path's atomicity. reference-numerals is published WITH the figures (below).
+    _clear_published(out_dir)
     work_dir = out_dir / WORK_SUBDIR
     diag_dir = out_dir / DIAG_SUBDIR
     if work_dir.exists():
@@ -1005,10 +1027,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     numeral_figures = _numeral_figures(plan_doc, assembly, num)
-    # reference-numerals.json is a property of the plan, not of any one figure, so it is
-    # always published directly to the output directory.
     numerals_doc, numeral_warnings = write_numerals(
-        out_dir / NUMERALS_FILENAME, num, numeral_figures)
+        work_dir / NUMERALS_FILENAME, num, numeral_figures)
     for warning in numeral_warnings:
         _fail("警告：%s" % warning)
 
@@ -1081,6 +1101,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not qa_pass:
                 _fail("figure %s 的 QA 闸门未通过（已降级到 %s/）：" % (figure_id, DIAG_SUBDIR))
                 _print_qa_failures(figure_id, report)
+
+    # Publish reference-numerals.json WITH the figures (R1c #7): move it from the scratch dir
+    # to the output directory as part of this run's set, so the numeral table always matches
+    # the figures that were just published (never a stale table beside new figures).
+    staged_numerals = work_dir / NUMERALS_FILENAME
+    if staged_numerals.is_file():
+        os.replace(str(staged_numerals), str(out_dir / NUMERALS_FILENAME))
 
     # The scratch dir has served its purpose; everything in it was either published to the
     # output directory or quarantined in diag/.

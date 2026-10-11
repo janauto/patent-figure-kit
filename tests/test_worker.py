@@ -142,6 +142,23 @@ def test_snapshot_inputs_hashes(prepared):
     assert W.snapshot_inputs(prepared["plan"]) == snap
 
 
+def test_fallback_subprocess_timeout_is_killed_and_reaped(prepared):
+    """R1c #10: a token-tagged subprocess fallback that times out is killed and reaped (not
+    left running), and returns a clear timeout result."""
+    w = W.Worker()
+    try:
+        # doctor.py is NOT in DISPATCH → it takes the subprocess fallback path (with token).
+        doctor = str(_ROOT / "scripts" / "doctor.py")
+        res = w.run([doctor, "--json"], timeout=0.001, token="fb-timeout")
+        assert res.returncode == 124, res.stderr
+        assert "超时" in (res.stderr or "")
+        # handle cleaned up
+        with w._abort_lock:
+            assert "fb-timeout" not in w._fallback
+    finally:
+        w.close()
+
+
 def test_cancel_while_queued_aborts_before_running(prepared):
     """R1b #9: a job cancelled while it is still waiting for the worker lock must abort the
     moment it enters run() (the pre-lock-wait gap), not render."""

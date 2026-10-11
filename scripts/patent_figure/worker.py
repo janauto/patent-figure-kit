@@ -258,7 +258,12 @@ class Worker:
                 return self._subprocess(argv, limit, note="worker 不可用，回退子进程：%s" % exc,
                                         token=token)
             assert self._proc is not None and self._queue is not None
+            # (C) close the handshake window (R1c #9): re-check cancellation and register the
+            # token atomically in abort_lock, so a cancel that arrived during _ensure/_spawn
+            # (when no token was registered yet) is honoured instead of dispatching.
             with self._abort_lock:
+                if token is not None and token in self._cancelled:
+                    return subprocess.CompletedProcess(argv, 125, "", "worker: 握手期间被取消")
                 self._current_token = token
             try:
                 self._proc.stdin.write(json.dumps({"argv": argv}) + "\n")
@@ -267,7 +272,8 @@ class Worker:
                 with self._abort_lock:
                     self._current_token = None
                 self._hard_kill()
-                return self._subprocess(argv, limit, note="worker 写入失败，回退子进程")
+                return self._subprocess(argv, limit, note="worker 写入失败，回退子进程",
+                                        token=token)
             line = self._queue.get(limit)
             with self._abort_lock:
                 self._current_token = None
@@ -282,10 +288,11 @@ class Worker:
                 resp = json.loads(line)
             except ValueError:
                 self._hard_kill()
-                return self._subprocess(argv, limit, note="worker 响应非法，回退子进程")
+                return self._subprocess(argv, limit, note="worker 响应非法，回退子进程",
+                                        token=token)
 
         if resp.get("unhandled"):
-            return self._subprocess(argv, limit)
+            return self._subprocess(argv, limit, token=token)
         return subprocess.CompletedProcess(
             argv, int(resp.get("rc", 1)), resp.get("stdout", ""), resp.get("stderr", ""))
 
@@ -309,12 +316,29 @@ class Worker:
                     popen.kill()
                 except Exception:
                     pass
+            timed_out = False
             try:
                 out, err = popen.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # R1c #10: never leave a runaway child — kill, then drain/reap before dropping
+                # the handle, so the process has actually exited.
+                timed_out = True
+                try:
+                    popen.kill()
+                except Exception:
+                    pass
+                try:
+                    out, err = popen.communicate()
+                except Exception:
+                    out, err = "", ""
             finally:
                 with self._abort_lock:
                     self._fallback.pop(token, None)
-            proc = subprocess.CompletedProcess(argv, popen.returncode, out, err)
+            rc = popen.returncode if popen.returncode is not None else 124
+            if timed_out:
+                err = (err or "") + "\n回退子进程执行超时（>%gs），已杀掉回收" % timeout
+                rc = 124
+            proc = subprocess.CompletedProcess(argv, rc, out, err)
         if note:
             proc = subprocess.CompletedProcess(
                 proc.args, proc.returncode, proc.stdout, (proc.stderr or "") + "\n" + note)

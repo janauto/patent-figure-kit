@@ -2069,3 +2069,29 @@ produced the bogus "jsonschema missing" reading on the first pass.
   且 预期图集 == 交付(gate_pass)图集`；任何缺失/失败即作业 failed（不得 ok:true）。
 - **导出**绑定一次成功渲染的 `render_job_id`，校验同工程、kind=render、state=succeeded、manifest
   完整后只读该版本目录；清单按图号×版本×格式逐项 ok/skip/fail。
+
+#### 13.5.1 R1c 收敛：把提交点贯穿读者/取消/恢复
+
+- **读者统一经 current.json 固定版本**：REST figures、MCP、文件服务 `/files/<pid>/out/*`、
+  子应用 `/api/preview`、浏览器 `/api/export`、MCP include_images、懒生成 PNG——每次读/导出先
+  `VersionStore.current_dir()` 解析**一个**版本目录，整次操作只用它；PNG 的输入 DXF 与输出
+  PNG 都落在该版本目录（不写进 out 或别的版本）。每个版本目录封口时额外写 `result.json`
+  供读者取用。`out/` 仅为当前版本的视图（符号链接/拷贝），所有旧 `ws.out` 读者仍可用。
+- **工程级单调修订号**：冻结输入时分配 `revision`（`revision.json` 自增）；`publish(rid, rev)`
+  只在 `rev` 高于当前时切换 current，过时作业只留历史、不改 current。默认导出从 current 选版本。
+- **不可逆 committed**：提交锁内 `job.mark_committed()`；`raise_if_cancelled` 与 JobStore 终态
+  转换都尊重它——已提交作业的迟到取消无效，不得变 cancelled。取消服务取同一把 `state_lock`，
+  先查 committed 再设标志。
+- **同步入口只返回本次作业结果**：`?wait=1` / 浏览器 /api/render / MCP render_project 只等待
+  并返回**该 job** 的结果（来自其版本目录的 result.json）；超时返回该 job 运行态；失败/取消
+  保留真实状态；不回退共享 render_state。
+- **恢复事务对账**：启动时 `VersionStore.recover()` 从 current.json 重建视图；若 current 指向的
+  版本完整但其作业被标 interrupted/running，按已提交修正为 succeeded；视图刷新失败独立重试，
+  不撤销提交。作业若持久化为 committed 但状态 running，恢复为 succeeded。
+- **耐久性顺序**：封口先 fsync 全部产物与版本目录，再写并 fsync `manifest.json`（记录每文件
+  大小），最后替换 current 并 fsync 其父目录；`verify()` 按大小校验，恢复与导出据此判完整。
+- **直接 CLI** `render_patent_figure.py` 整套发布：输出目录在本次运行开始时清掉上一轮已发布
+  产物（保留 `inputs/`），reference-numerals 与图一同发布，失败重渲不留「旧图 + 新标记表」。
+- **回收**：`VersionStore.reclaim()` 保护 current、运行中作业与被引用版本，默认保留最近 N 个
+  成功版本，回收其余失败/过期版本；新建渲染作业前检查剩余磁盘空间，不足则 507 拒绝。
+- **幂等键**按 `(project_id, kind, key)` 联合索引；同键不同输入（plan ETag 变化）返回 409。
