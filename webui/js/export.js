@@ -54,10 +54,14 @@ function gatePassed() {
 function render() {
   const force = params.get('state');
   if (force === 'packing') packing = true;   // 四态截图：冻结打包中
-  if (force === 'done' && !result) {
-    result = { zip: `${state.projectId}-both-20261011.zip`, download_url: '#',
-      items: FORMATS.filter((f) => f.k !== 'dwg' || dwgOk).map((f) => ({ format: f.k, label: f.name, status: 'ok' })),
-      manifest: ['递交版_图1.pdf', '递交版_图2.pdf', '交底版_说明书附图.docx', 'fig1.dxf', 'fig2.dxf', '附图说明.txt', '核对清单.txt'] };
+  if (force === 'done' && !result) {       // 四态截图：Job 形状的演示清单（与 WP1 GET /v1/exports/{id} 同形）
+    const figs = (state.render?.figures || []).map((f) => f.id);
+    const manifest = {};
+    (figs.length ? figs : ['fig1', 'fig2']).forEach((fid) => ['交底版', '递交版'].forEach((ver) => ['pdf', 'docx', 'dxf'].forEach((fmt) => {
+      manifest[`${fid}/${ver}/${fmt}`] = fmt === 'pdf' ? 'skip' : (fmt === 'docx' && ver === '递交版' ? 'skip' : 'ok');
+    })));
+    result = { id: 'demo-export', kind: 'export', state: 'succeeded', result: { export_id: 'demo-export',
+      render_job_id: resultVersion(state.render), manifest, notes: [], download_url: '#' } };
   }
   // 展示缓存结果前再核对一次：票与当前计划 / 渲染证据不符 → 丢弃（?state=done 为截图用的演示清单，不核对）
   if (result && force !== 'done' && !ticketValid(result.ticket)) result = null;
@@ -162,37 +166,70 @@ function renderLegacyLocked() {
     </div></div>`;
 }
 
+// 导出作业（WP1：GET /v1/exports/{id} 返回 Job，清单在 result 内）→ 视图：
+//   manifest 键「图号/版本/格式」→ 逐图矩阵；按格式汇总 ok / partial / skip / fail；notes 为失败明细。
+const FMT_LABEL = { pdf: '递交版 PDF', docx: '交底版 Word', dxf: 'DXF 源文件', dwg: 'DWG 源文件', png: 'PNG 图片' };
+const SKIP_WHY = { pdf: 'PDF 主交付由新版后端（WP2）提供', docx: 'Word 只出交底版', dwg: '未检出 DWG 转换器（ODA / LibreDWG）', png: '该版本不出 PNG' };
+function exportView(job) {
+  const r = job?.result || {};
+  const rows = Object.entries(r.manifest || {}).map(([key, st]) => {
+    const [fig, ver, fmt] = key.split('/');
+    return { key, fig, ver, fmt, st };
+  });
+  const fmts = [...new Set(rows.map((x) => x.fmt))];
+  const summary = fmts.map((fmt) => {
+    const sts = rows.filter((x) => x.fmt === fmt).map((x) => x.st);
+    const status = sts.includes('fail') ? 'fail' : (sts.includes('ok') ? (sts.every((x) => x === 'ok') ? 'ok' : 'partial') : 'skip');
+    const notes = (r.notes || []).filter((n) => n.includes(`/${fmt}`) || n.toLowerCase().startsWith(fmt));
+    return { fmt, status, label: FMT_LABEL[fmt] || fmt,
+      reason: status === 'fail' ? (notes[0] || '生成失败') : (status === 'skip' ? (notes[0] || SKIP_WHY[fmt] || '已跳过')
+        : (status === 'partial' ? (SKIP_WHY[fmt] ? `部分生成：${SKIP_WHY[fmt]}` : '部分生成') : '')) };
+  });
+  const groups = [...new Set(rows.map((x) => `${x.fig}/${x.ver}`))];
+  return { exportId: r.export_id || job?.id || '', renderJobId: r.render_job_id || '', downloadUrl: r.download_url || '',
+    rows, fmts, groups, summary, notes: r.notes || [] };
+}
+const MARK = { ok: '✓', skip: '—', fail: '✕', pending: '…', partial: '◐' };
+// 后端给的下载地址可能是绝对地址（基于 public-url），也可能是相对的
+const hrefOf = (u) => (/^https?:\/\//i.test(u || '') ? u : api.previewUrl(u || '#'));
+
 function renderDone() {
-  const items = result.items || [];
+  const v = exportView(result);
+  const cell = (fig, ver, fmt) => v.rows.find((x) => x.fig === fig && x.ver === ver && x.fmt === fmt)?.st || '';
   host.innerHTML = `<div class="exp-done">
-    <p class="ok-line"><span class="stamp-pass big">完成</span>附图包已打包好。</p>
-    <div class="fmt-result">${items.map((it) => `<div class="fr-row ${it.status}">
-      <span class="fr-mark">${it.status === 'ok' ? '✓' : (it.status === 'skip' ? '—' : '✕')}</span>
+    <p class="ok-line"><span class="stamp-pass big">完成</span>附图包已打包好${v.renderJobId
+      ? `（出图版本 <span class="mono">${esc(v.renderJobId)}</span>）` : ''}。</p>
+    <div class="fmt-result">${v.summary.map((it) => `<div class="fr-row ${it.status}">
+      <span class="fr-mark">${MARK[it.status] || '?'}</span>
       <b>${esc(it.label)}</b>
-      <span class="muted">${it.status === 'ok' ? '已生成' : esc(it.reason || (it.status === 'skip' ? '已跳过' : '失败'))}</span>
+      <span class="muted">${it.status === 'ok' ? '已生成' : esc(it.reason)}</span>
     </div>`).join('')}</div>
+    ${v.groups.length ? `<table class="exp-matrix">
+      <thead><tr><th>图 / 版本</th>${v.fmts.map((f) => `<th>${esc(FMT_LABEL[f] || f)}</th>`).join('')}</tr></thead>
+      <tbody>${v.groups.map((g) => { const [fig, ver] = g.split('/'); return `<tr><th class="mono">${esc(fig)} · ${esc(ver)}</th>${
+        v.fmts.map((f) => { const st = cell(fig, ver, f); return `<td class="${esc(st)}" title="${esc(`${fig}/${ver}/${f}：${st || '无'}`)}">${MARK[st] || ''}</td>`; }).join('')}</tr>`; }).join('')}</tbody>
+    </table>` : ''}
+    ${v.notes.length ? `<ul class="exp-notes">${v.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
     <div class="exp-zip">
-      <div><b class="mono">${esc(result.zip)}</b>
-        <ul class="manifest">${(result.manifest || []).map((m) => `<li class="mono">${esc(m)}</li>`).join('')}</ul></div>
+      <div><b class="mono">附图包 · ${esc(v.exportId)}</b></div>
       <div class="exp-zip-acts">
-        <a class="btn primary" href="${api.previewUrl(result.download_url || '#')}" download>⬇ 下载附图包</a>
-        <button class="btn ghost sm" id="copy-path" title="仅本机可达">复制本机路径</button>
+        <a class="btn primary" href="${esc(hrefOf(v.downloadUrl))}" download>⬇ 下载附图包</a>
+        <button class="btn ghost sm" id="copy-link" title="仅本机可达">复制下载链接</button>
         <button class="btn ghost sm" id="pack-again">重新打包</button>
       </div>
     </div>
-    <p class="hint">包内附《核对清单.txt》，提醒人工核对说明书件号（M1 暂无对表功能）。
-      路径仅本机可达，不要贴到公开的地方。</p>
+    <p class="hint">M1 暂无说明书件号对表功能，请人工核对件号。下载链接仅本机可达，不要贴到公开的地方。</p>
   </div>`;
   host.querySelector('#pack-again')?.addEventListener('click', () => { result = null; render(); });
-  // 下载 / 复制路径前再核对一次：页面停留期间若计划或渲染结果变了，旧包不得被取走
+  // 下载 / 复制链接前再核对一次：页面停留期间若计划或渲染结果变了，旧包不得被取走
   const stillValid = () => params.get('state') === 'done' || ticketValid(result?.ticket);
   const refuse = () => { result = null; toast('计划或出图结果已变化，这个包已作废——请重新出图、过闸后再打包。', 'bad'); render(); };
   host.querySelector('.exp-zip-acts a[download]')?.addEventListener('click', (e) => {
     if (!stillValid()) { e.preventDefault(); refuse(); }
   });
-  host.querySelector('#copy-path')?.addEventListener('click', async () => {
+  host.querySelector('#copy-link')?.addEventListener('click', async () => {
     if (!stillValid()) { refuse(); return; }
-    try { await navigator.clipboard.writeText(`~/墨线数据/${state.projectId}/${result.zip}`); toast('已复制本机路径（仅本机可达）'); } catch { /* */ }
+    try { await navigator.clipboard.writeText(new URL(hrefOf(v.downloadUrl), location.href).href); toast('已复制下载链接（仅本机可达）'); } catch { /* */ }
   });
 }
 
@@ -233,13 +270,16 @@ async function doPack() {
       },
       async done() {
         if (!mine() || !ticketValid(ticket)) { late(); return; }
-        let manifest;
-        try { manifest = await api.getExport(res.export_id); } catch (err) {
+        let exportJob;
+        try { exportJob = await api.getExport(res.export_id); } catch (err) {
           if (mine()) { end(); toast('读取打包清单失败：' + (err.hint || err.message), 'bad'); render(); }
           return;
         }
         if (!mine() || !ticketValid(ticket)) { late(); return; }   // 取清单期间又变了
-        result = { ...manifest, ticket }; end(); render();
+        if (exportJob?.state && exportJob.state !== 'succeeded') {   // 作业表态不是成功：按失败处理
+          end(); toast('打包失败：' + (exportJob.error?.message || exportJob.state), 'bad'); render(); return;
+        }
+        result = { ...exportJob, ticket }; end(); render();
         toast('打包完成', 'ok');
       },
       fail(d) { if (!mine()) return; end(); toast('打包失败：' + d.message, 'bad'); render(); },

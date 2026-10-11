@@ -7,7 +7,14 @@ import { api } from './api.js';
 import { toast } from './main.js';
 
 let host; let activeFig = null; let variant = 'annotated'; let onlyFail = false;
-let rendering = false; let sub = null; const logs = [];
+let sub = null; const logs = [];
+// 渲染生命周期（Codex R3h #1/#2）：同一时刻只有一个「当前作业」令牌 active = {seq, jobId}。
+// rendering 只由它派生；每个异步回读（SSE 终态、轮询、状态回读）完成后先确认仍是当前 / 最新作业再写状态，
+// 迟到的旧作业回读一律丢弃，版本不回退。刷新 / 重进时由 resumeRender() 接上后端仍在跑的作业。
+let active = null; let renderSeq = 0; let rendering = false;
+function setActive(t) { active = t; rendering = !!t; }
+const isCurrent = (t) => active === t;
+const isLatest = (t) => renderSeq === t.seq;
 const params = new URLSearchParams(location.search);
 import { esc } from './esc.js';
 const VARIANTS = { annotated: '交底版 · 图号＋件号表', filing: '递交版 · 仅图号', raw: '原始出图' };
@@ -149,6 +156,7 @@ function bindCommon() {
 }
 
 function render() {
+  if (!host) return;                     // 还没挂载（例如刷新后在别的页签接上了在途作业）
   const r = currentRender();
   const job = currentJob();
   const force = params.get('state');
@@ -295,18 +303,22 @@ function bindEvidence(result, ev, jobInputs) {
 }
 
 // 作业成功：d 是 done 事件或 GET job 的数据；ev 是该作业的后端证据（只属于它）。
-async function applyResult(d, ev) {
+async function applyResult(d, token, ev) {
   // 读权威结果：优先作业带回的 result，否则回工程/状态取一次（那份不一定属于本作业 → 不用本作业证据）
   let result = (d && d.result && d.result.figures) ? d.result : null;
   const fromJob = !!result;
   if (!result) {
     try { result = await api.getRenderResult(state.projectId); }
-    catch (err) { rendering = false; toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return; }
+    catch (err) {
+      if (!isCurrent(token)) return;
+      setActive(null); toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return;
+    }
+    if (!isCurrent(token)) return;       // 回读期间已换了作业：丢弃
   }
   state.render = result || null;
-  state.renderJob = { id: ev?.jobId || null, state: 'succeeded', running: false, ok: true, error: null, result: null, diag: null };
+  state.renderJob = { id: ev.jobId || null, state: 'succeeded', running: false, ok: true, error: null, result: null, diag: null };
   bindEvidence(result, fromJob ? ev : null, d?.inputs);
-  rendering = false;
+  setActive(null);
   activeFig = null;
   bus.emit('rendered');
   const figs = result?.figures || [];
@@ -320,68 +332,102 @@ async function applyResult(d, ev) {
   render();
 }
 
-// 作业失败：读渲染状态——result = 已发布版本（仍是上一成功版本），job = 本次作业的诊断。
-async function applyFailure(d, ev) {
-  rendering = false;
-  toast('出图未完成：' + (d?.message || '渲染进程失败'), 'bad');
-  let st = null;
-  try { st = await api.getRenderStatus(state.projectId, ev.jobId); } catch { /* 用事件里的信息兜底 */ }
-  const pub = st ? st.result : state.render;
-  const sameVersion = pub && state.render && resultVersion(pub) && resultVersion(pub) === resultVersion(state.render);
-  if (!sameVersion) { state.render = pub || null; bindEvidence(state.render, null); }   // 另有版本被发布：只凭它自带的证据
-  state.renderJob = st?.job || { id: ev.jobId, state: 'failed', running: false, ok: false,
-    error: d?.code || d?.message ? { code: d.code, message: d.message, hint: d.hint } : null,
+// 作业失败：先按事件给出失败态并释放锁，再回读渲染状态细化（result = 已发布版本，job = 本次诊断）。
+// 回读完成时若期间已发起新作业（renderSeq 变了），这份迟到的回读不得覆盖任何状态（Codex R3h #1）。
+async function applyFailure(d, token, ev) {
+  if (!isCurrent(token)) return;
+  setActive(null);
+  state.renderJob = { id: ev.jobId, state: 'failed', running: false, ok: false,
+    error: (d?.code || d?.message) ? { code: d.code, message: d.message, hint: d.hint } : null,
     result: d?.job?.result || null, diag: d?.job?.diag || null };
+  toast('出图未完成：' + (d?.message || '渲染进程失败'), 'bad');
   bus.emit('rendered');
   render();
+  let st = null;
+  try { st = await api.getRenderStatus(state.projectId, ev.jobId); } catch { return; }
+  if (!isLatest(token) || active) return;          // 迟到：期间已有新作业 → 丢弃，版本不回退
+  const pub = st.result;
+  const sameVersion = pub && state.render && resultVersion(pub) && resultVersion(pub) === resultVersion(state.render);
+  if (!sameVersion) { state.render = pub || null; bindEvidence(state.render, null); }   // 另有版本被发布：只凭它自带的证据
+  if (st.job && (!st.job.id || st.job.id === ev.jobId || api.isLegacy)) state.renderJob = st.job;
+  bus.emit('rendered');
+  render();
+}
+
+// 订阅一个作业直到终态。token 是该作业的令牌；ev 是它的后端证据。
+function follow(token, ev) {
+  let settled = false;                   // 同一作业只采纳一次终态（done / error 与断线校准可能先后到达）
+  const finish = (d) => { if (settled) return; settled = true; applyResult(d, token, ev); };
+  const fail = (d) => { if (settled) return; settled = true; applyFailure(d, token, ev); };
+  try { sub?.close?.(); } catch { /* */ }
+  sub = api.jobEvents(token.jobId, {
+    log(d) { if (!isCurrent(token)) return; logs.push(d.line); render(); },
+    stage(d) { if (!isCurrent(token)) return; if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
+    done(d) { finish(d); },
+    fail(d) { fail(d); },
+    disconnect() {                       // 断线：用 GET job 校准终态；作业已不存在（后端重启）就收尾，不让界面卡在「渲染中」
+      api.getJob(token.jobId).then((j) => {
+        if (!isCurrent(token)) return;
+        if (j.state === 'succeeded') finish({ result: j.result, inputs: j.inputs });
+        else if (['failed', 'interrupted', 'cancelled'].includes(j.state)) fail({ ...(j.error || {}), message: j.error?.message || `出图${j.state === 'cancelled' ? '已取消' : '未完成'}` });
+      }).catch((err) => {
+        if (err.status === 404 && isCurrent(token)) fail({ code: 'E_JOB_GONE', message: '找不到这次出图作业（后端可能已重启）', hint: '请重新出图' });
+      });
+    },
+  });
 }
 
 const saveBroken = () => state.saveState === 'error' || state.saveState === 'conflict';
 
 async function startRender() {
-  if (rendering) return;                 // 重入锁：渲染在途时不再启动第二次（按钮也禁用）
+  if (active) return;                    // 重入锁：有在途作业（含刷新后接上的）时不再启动第二次（按钮也禁用）
   if (api.readOnly) { toast('静态演示站只读，不能出图', ''); return; }
-  rendering = true; render();            // 先锁，再 await（任何 await 之前就已置位）
+  const token = { seq: ++renderSeq, jobId: null };
+  setActive(token); render();            // 先锁，再 await（任何 await 之前就已置位）
   // 先把本地改动落盘成功，确保渲染用的是当前这份 plan（保存期间又有新编辑就再存一轮）
   for (let i = 0; i < 3; i += 1) {
     await flush();
     if (saveBroken() || state.editVersion <= state.savedVersion) break;
   }
+  if (!isCurrent(token)) return;
   if (saveBroken()) {
-    rendering = false; toast('计划没能保存，未渲染——请先解决保存问题（可能是与他处的冲突）。', 'bad'); render(); return;
+    setActive(null); toast('计划没能保存，未渲染——请先解决保存问题（可能是与他处的冲突）。', 'bad'); render(); return;
   }
   if (state.editVersion > state.savedVersion) {
-    rendering = false; toast('计划还在保存中，未渲染——请稍后再出图。', 'bad'); render(); return;
+    setActive(null); toast('计划还在保存中，未渲染——请稍后再出图。', 'bad'); render(); return;
   }
   let job;
   try {
     job = await api.render(state.projectId, { etag: state.planEtag, fail: params.get('rfail') });
   } catch (err) {                        // 被拒绝（409 等）：不碰任何共享证据，直接退出
-    rendering = false; toast('无法开始渲染：' + (err.hint || err.message), 'bad'); render(); return;
+    if (!isCurrent(token)) return;
+    setActive(null); toast('无法开始渲染：' + (err.hint || err.message), 'bad'); render(); return;
   }
+  if (!isCurrent(token)) return;
+  token.jobId = job.job_id;
   // 本作业的后端证据：提交时冻结的输入快照（WP1 202 的 inputs.plan_etag）+ 作业 ID（= 版本 rid）
-  const evidence = Object.freeze({ jobId: job.job_id, serverEtag: normEtag(job.inputs?.plan_etag) });
+  const ev = Object.freeze({ jobId: job.job_id, serverEtag: normEtag(job.inputs?.plan_etag) });
   state.renderJob = { id: job.job_id, state: 'running', running: true, ok: null, error: null, result: null, diag: null };
-  let settled = false;                   // 同一作业只采纳一次终态（done / error 与断线校准可能先后到达）
-  const finish = (d) => { if (settled) return; settled = true; applyResult(d, evidence); };
-  const fail = (d) => { if (settled) return; settled = true; applyFailure(d, evidence); };
   logs.length = 0; render();
-  sub = api.jobEvents(job.job_id, {
-    log(d) { logs.push(d.line); render(); },
-    stage(d) { if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
-    done(d) { finish(d); },
-    fail(d) { fail(d); },
-    disconnect() {
-      api.getJob(job.job_id).then((j) => {
-        if (j.state === 'succeeded') finish({ result: j.result, inputs: j.inputs });
-        else if (['failed', 'interrupted', 'cancelled'].includes(j.state)) fail({ ...(j.error || {}), message: j.error?.message });
-      }).catch(() => {});
-    },
-  });
+  follow(token, ev);
+}
+
+// 刷新 / 重进工程时接上后端仍在跑的渲染作业（Codex R3h #2）：boot 读到的 render_job 为 queued/running
+// 时恢复订阅（live 走 SSE 回放，兼容模式轮询），期间禁用再次渲染，终态自动呈现。幂等。
+export function resumeRender() {
+  const j = state.renderJob;
+  if (active || !j || !j.running || api.readOnly) return;
+  const token = { seq: ++renderSeq, jobId: api.isLegacy ? 'legacy:render' : j.id };
+  if (!token.jobId) return;
+  setActive(token);
+  logs.length = 0; logs.push('▶ 接上进行中的出图作业…');
+  follow(token, Object.freeze({ jobId: j.id || token.jobId, serverEtag: null }));
+  render();
 }
 
 export function mountQa(el) {
   host = el;
+  resumeRender();
   render();
   if (!host._bound) {
     bus.on('rendered', render);

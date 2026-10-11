@@ -358,8 +358,14 @@ input, select, textarea { font: inherit; color: var(--ink-1); }
 .fr-mark { font-weight: 700; } .fr-row.ok .fr-mark { color: var(--ok); } .fr-row.skip .fr-mark { color: var(--ink-faint); } .fr-row.fail .fr-mark { color: var(--seal); }
 .exp-zip { display: flex; gap: var(--s-5); flex-wrap: wrap; padding: var(--s-4); border: 1px solid var(--hair); border-radius: var(--r-2); background: var(--surface-paper); }
 .exp-zip > div:first-child { flex: 1; min-width: 220px; }
-.manifest { list-style: none; margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
-.manifest li { font: var(--t-mono); font-size: 11px; color: var(--ink-muted); }
+.fr-row.partial .fr-mark { color: var(--warn); }
+.exp-matrix { border-collapse: collapse; font: var(--t-body-sm); width: 100%; }
+.exp-matrix th, .exp-matrix td { border: 1px solid var(--hair); padding: 5px 8px; text-align: center; }
+.exp-matrix thead th { background: var(--surface-2); font-weight: 600; }
+.exp-matrix tbody th { text-align: left; font-weight: 400; color: var(--ink-muted); }
+.exp-matrix td.ok { color: var(--ok); font-weight: 700; } .exp-matrix td.fail { color: var(--seal); font-weight: 700; background: var(--seal-wash); }
+.exp-matrix td.skip { color: var(--ink-faint); }
+.exp-notes { margin: 0 0 0 1.2em; font: var(--t-body-sm); color: var(--seal-deep); }
 .exp-zip-acts { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
 
 /* ---- Toast ---- */

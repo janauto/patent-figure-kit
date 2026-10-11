@@ -269,7 +269,6 @@ GLB_BY_PROJECT = {"gearbox": "planetary-gearbox.glb", "bench-vise": "bench-vise.
 PROJECTS = {}        # id -> runtime dict
 JOBS = {}            # job_id -> job dict
 VERSIONS = {}        # 已发布（成功）渲染版本 rid -> {"project", "plan_etag"}；导出只认这里的版本
-EXPORTS = {}         # export_id -> manifest
 LOCK = threading.Lock()
 
 # AI 通道：默认已配置；demo-no-ai 场景下置 none（失败场景）
@@ -297,7 +296,8 @@ def seed():
             rid = "seed-%s" % pid
             r["render_job_id"] = r["version"] = rid
             r.setdefault("inputs", {})["plan_etag"] = d["plan_etag"]
-            VERSIONS[rid] = {"project": pid, "plan_etag": d["plan_etag"]}
+            VERSIONS[rid] = {"project": pid, "plan_etag": d["plan_etag"],
+                             "figures": [f["id"] for f in r.get("figures", [])]}
         d["data"]["render_job"] = None
         PROJECTS[pid] = d
     # 准备中 / 失败 两个占位工程，演示列表的加载态与错误态
@@ -327,9 +327,11 @@ STAGE_SETS = {
 
 def new_job(kind, project_id=None, fail_stage=None, speed=1.0, result=None):
     jid = "job_" + uuid.uuid4().hex[:10]
+    now = time.time()
     job = {"job_id": jid, "kind": kind, "project_id": project_id,
            "state": "queued", "stage": None, "progress": 0.0, "logs": [],
-           "stages": [], "inputs": {}, "result": result, "error": None, "diag": None,
+           "inputs": {}, "result": result, "error": None, "diag": None,
+           "created_at": now, "updated_at": now, "_final": None,
            "_events": [], "_cv": threading.Condition(), "_done": False}
     JOBS[jid] = job
     t = threading.Thread(target=run_job, args=(job, kind, fail_stage, speed), daemon=True)
@@ -341,7 +343,20 @@ def _emit(job, etype, data):
     with job["_cv"]:
         eid = len(job["_events"])
         job["_events"].append({"id": eid, "event": etype, "data": data})
+        job["updated_at"] = time.time()
+        if etype == "log":
+            job["logs"].append(data.get("line", ""))
         job["_cv"].notify_all()
+
+
+def job_dict(job):
+    """openapi Job（与 WP1 Job.to_dict 同字段）：作业 ID 字段名是 id。"""
+    return {"id": job["job_id"], "kind": job["kind"], "project_id": job["project_id"],
+            "state": job["state"], "stage": job["stage"], "progress": job["progress"],
+            "inputs": dict(job.get("inputs") or {}), "result": job.get("result"), "error": job.get("error"),
+            "idempotency_key": None, "committed": job["state"] == "succeeded",
+            "created_at": job["created_at"], "updated_at": job["updated_at"],
+            "logs": list(job["logs"]), "last_event_id": len(job["_events"]) - 1}
 
 
 def render_job_status(job):
@@ -350,6 +365,37 @@ def render_job_status(job):
     return {"id": job.get("job_id"), "state": st, "stage": job.get("stage"),
             "running": st in ("queued", "running"), "ok": (st == "succeeded") if st else None,
             "error": job.get("error"), "result": job.get("result"), "diag": job.get("diag")}
+
+
+EXPORT_VARIANTS = {"filing": ("filing",), "disclosure": ("annotated",), "both": ("annotated", "filing")}
+VARIANT_LABEL = {"annotated": "交底版", "filing": "递交版"}
+
+
+def export_result(jid, rid, ver, formats, variant):
+    """WP1 导出作业的 result：manifest 键为「图号/版本/格式」，值 ok|skip|fail；notes 记失败明细。"""
+    dwg_ok = LLM.get("dwg_available", True)
+    manifest, notes = {}, []
+    for fid in ver.get("figures") or []:
+        for v in EXPORT_VARIANTS[variant]:
+            label = VARIANT_LABEL[v]
+            for fmt in formats:
+                key = "%s/%s/%s" % (fid, label, fmt)
+                if fmt == "pdf":
+                    manifest[key] = "skip"                  # PDF 主交付在 WP2
+                elif fmt == "docx":
+                    manifest[key] = "ok" if label == "交底版" else "skip"   # 仅交底版有 Word
+                elif fmt == "dwg":
+                    manifest[key] = "ok" if dwg_ok else "skip"
+                elif fmt in ("dxf", "png"):
+                    manifest[key] = "ok"
+                else:
+                    manifest[key] = "skip"
+                    notes.append("%s：未知格式" % key)
+    if "dwg" in formats and not dwg_ok:
+        notes.append("DWG：本机未检出 ODA File Converter / LibreDWG，转换器不可用")
+    return {"export_id": jid, "render_job_id": rid, "render_plan_etag": ver.get("plan_etag"),
+            "manifest": manifest, "notes": notes, "dwg_log": "",
+            "download_url": "/v1/exports/%s/download" % jid}
 
 
 def norm_etag(e):
@@ -419,7 +465,10 @@ def run_job(job, kind, fail_stage, speed):
         if p and p.get("data") is not None:
             p["data"]["render"] = r
             VERSIONS[job["job_id"]] = {"project": job["project_id"],
-                                       "plan_etag": (job.get("inputs") or {}).get("plan_etag")}
+                                       "plan_etag": (job.get("inputs") or {}).get("plan_etag"),
+                                       "figures": [f["id"] for f in r.get("figures", [])]}
+    if job.get("_final") is not None:          # 导出等：结果在成功时才出现（运行中 result 为 null）
+        job["result"] = job.pop("_final")
     job["state"] = "succeeded"
     if kind == "render" and job.get("project_id"):
         p = PROJECTS.get(job["project_id"])
@@ -464,9 +513,9 @@ def legacy_ws(pid):
     return ws
 
 
-def legacy_render_job(pid, ws, jid, fail):
+def legacy_render_job(pid, ws, jid, fail, speed=1.0):
     plan = json.dumps(PROJECTS[pid]["data"]["plan"], ensure_ascii=False, sort_keys=True)
-    time.sleep(LEGACY_RENDER_SECS)
+    time.sleep(LEGACY_RENDER_SECS * speed)
     r = legacy_shape(render_payload(pid, fail))
     r["render_job_id"] = r["version"] = jid
     r["finished"] = time.strftime("%H:%M:%S")
@@ -660,14 +709,17 @@ class Handler(BaseHTTPRequestHandler):
             name = api[len("preview/"):]
             if not re.fullmatch(r"[\w\-]+\.(svg|png)", name):
                 return self._err(400, "非法文件名")
-            return self.static(f"/dev/fixtures/{pid}/{name}")
+            # mock 的渲染一律借用 gearbox 的真实出图：本工程没有该文件时回落到 gearbox 的资产
+            sub = pid if (FIX / pid / name).is_file() else "gearbox"
+            return self.static(f"/dev/fixtures/{sub}/{name}")
         if method == "GET" and api == "flowcharts":
             return self._send(200, {"flowcharts": []})
         if method == "PUT" and api == "plan":
             body = self._json_body()
-            plan = body.get("plan")
-            if not isinstance(plan, dict):
-                return self._err(400, "body.plan 必须是对象")
+            # WP1 契约：请求体就是 plan 本身（不是 {plan: …}）；包了一层多半是前端写错，直接拒绝
+            plan = body
+            if not isinstance(plan, dict) or set(plan) == {"plan"} or "terms" not in plan:
+                return self._err(400, "请求体应为 figure-plan 本身（WP1 契约），不是 {plan: …}")
             p["data"]["plan"] = plan
             p["plan_rev"] += 1                                  # live 视图同步换版本
             p["plan_etag"] = 'W/"%s-%d"' % (pid, p["plan_rev"])
@@ -675,6 +727,7 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and api == "render":
             self._json_body()
             fail = (q.get("fail") or [""])[0]                   # ""|"gate"|"validate"（开发用失败场景）
+            speed = float((q.get("speed") or ["1"])[0])         # 开发用：放慢作业（测试刷新恢复）
             with LOCK:
                 if ws["running"]:
                     return self._err(409, "已有一次渲染在进行——几何缓存不支持并发写入")
@@ -683,7 +736,7 @@ class Handler(BaseHTTPRequestHandler):
                 jid = "lr_" + uuid.uuid4().hex[:10]
                 ws["job"] = {"id": jid, "state": "running", "stage": "render", "running": True,
                              "ok": None, "error": None, "result": None, "diag": None}
-            threading.Thread(target=legacy_render_job, args=(pid, ws, jid, fail), daemon=True).start()
+            threading.Thread(target=legacy_render_job, args=(pid, ws, jid, fail, speed), daemon=True).start()
             return self._send(200, {"started": ws["started"]})
         return self._err(404, "mock 子应用未实现：%s %s" % (method, api))
 
@@ -743,11 +796,7 @@ class Handler(BaseHTTPRequestHandler):
             job = JOBS.get(m.group(1))
             if not job:
                 return self._err(404, "没有这个作业")
-            out = {k: job[k] for k in
-                   ("job_id", "kind", "project_id", "state", "stage", "progress",
-                    "logs", "stages", "inputs", "result", "error", "diag")}
-            out["id"] = job["job_id"]
-            return self._send(200, out)
+            return self._send(200, job_dict(job))
         # SSE
         m = re.fullmatch(r"/v1/jobs/([\w\-]+)/events", path)
         if m:
@@ -765,8 +814,7 @@ class Handler(BaseHTTPRequestHandler):
             p = PROJECTS.get(m.group(1))
             if not p or not p.get("data"):
                 return self._err(404, "没有这个工程")
-            return self._send(200, {"plan": p["data"]["plan"]},
-                              extra={"ETag": p["plan_etag"]})
+            return self._send(200, p["data"]["plan"], extra={"ETag": p["plan_etag"]})   # WP1：响应体即 plan
         # 模型 GLB
         m = re.fullmatch(r"/v1/projects/([\w\-]+)/model\.glb", path)
         if m:
@@ -783,21 +831,23 @@ class Handler(BaseHTTPRequestHandler):
             sub = "gearbox" if pid == "gearbox" else pid
             return self.static(f"/dev/fixtures/{sub}/{name}")
         # 导出清单
+        # 导出 = 作业（WP1：GET /v1/exports/{id} 返回 Job，清单在 result 内）
         m = re.fullmatch(r"/v1/exports/([\w\-]+)", path)
         if m:
-            exp = EXPORTS.get(m.group(1))
-            if not exp:
-                return self._err(404, "没有这个导出")
-            return self._send(200, exp)
+            job = JOBS.get(m.group(1))
+            if not job or job["kind"] != "export":
+                return self._err(404, "未找到")
+            return self._send(200, job_dict(job))
         m = re.fullmatch(r"/v1/exports/([\w\-]+)/download", path)
         if m:
-            exp = EXPORTS.get(m.group(1))
-            if not exp:
-                return self._err(404, "没有这个导出")
-            body = ("这是 mock 的占位 zip（%s）。真实后端在此返回打包好的交付件。"
-                    % exp["zip"]).encode("utf-8")
+            job = JOBS.get(m.group(1))
+            if not job or job["kind"] != "export" or job["state"] != "succeeded":
+                return self._err(404, "没有这个已完成的导出作业")
+            name = "%s-%s.zip" % (job["project_id"], job["job_id"])
+            body = ("这是 mock 的占位 zip（%s，出图版本 %s）。真实后端在此返回打包好的附图包。"
+                    % (name, (job.get("result") or {}).get("render_job_id"))).encode("utf-8")
             return self._send(200, body, "application/zip",
-                              {"Content-Disposition": f'attachment; filename="{exp["zip"]}"'})
+                              {"Content-Disposition": 'attachment; filename="%s"' % name})
         # LLM 状态
         if path in ("/v1/llm/status", "/api/llm/status"):
             return self._send(200, LLM)
@@ -864,7 +914,8 @@ class Handler(BaseHTTPRequestHandler):
             plan_raw = json.dumps((p.get("data") or {}).get("plan"), ensure_ascii=False, sort_keys=True)
             inputs = {"plan_etag": p.get("plan_etag"),
                       "plan_hash": hashlib.sha256(plan_raw.encode("utf-8")).hexdigest()}
-            job = new_job("render", project_id=m.group(1),
+            speed = float((q.get("speed") or ["1"])[0])   # 开发用：放慢作业（测试刷新恢复）
+            job = new_job("render", project_id=m.group(1), speed=speed,
                           result=render_payload(m.group(1), fail, p.get("plan_etag")))
             job["inputs"] = inputs
             job["result"]["render_job_id"] = job["result"]["version"] = job["job_id"]   # 结果 ID = 版本
@@ -889,48 +940,43 @@ class Handler(BaseHTTPRequestHandler):
             if want and norm_etag(want) != norm_etag(ver["plan_etag"]):
                 return self._err(409, "请求的 plan_etag 与被导出渲染的输入版本不一致",
                                  "计划已变更，请重新出图后再导出", "plan_changed")
-            formats = body.get("formats", ["pdf", "docx", "dxf"])
-            variant = body.get("variant", "both")
-            want_dwg = "dwg" in formats
-            dwg_ok = LLM.get("dwg_available", True)   # 默认可用；demo-dwg-missing 置 false
-            exp_id = "exp_" + uuid.uuid4().hex[:8]
-            items = []
-            matrix = {"pdf": ("递交版 PDF", "ok"), "docx": ("交底版 Word", "ok"),
-                      "dxf": ("DXF 源文件", "ok"), "dwg": ("DWG 源文件", "ok" if dwg_ok else "skip")}
-            for f in formats:
-                label, st = matrix.get(f, (f, "ok"))
-                it = {"format": f, "label": label, "status": st}
-                if f == "dwg" and not dwg_ok:
-                    it["reason"] = "本机未检出 ODA File Converter / LibreDWG，DWG 转换器不可用"
-                items.append(it)
+            formats = body.get("formats") or ["docx", "dxf"]
+            variant = body.get("variant") or "both"
+            if variant not in EXPORT_VARIANTS:
+                return self._err(400, "variant 只能是 filing / disclosure / both", ecode="bad_request")
             job = new_job("export", project_id=m.group(1))
-            EXPORTS[exp_id] = {
-                "export_id": exp_id, "job_id": job["job_id"], "variant": variant,
-                "items": items, "zip": f"{m.group(1)}-{variant}-20261011.zip",
-                "download_url": f"/v1/exports/{exp_id}/download",
-                "manifest": ["递交版_图1.pdf", "递交版_图2.pdf", "交底版_说明书附图.docx",
-                             "fig1.dxf", "fig2.dxf", "附图说明.txt", "核对清单.txt"],
-            }
-            return self._send(202, {"export_id": exp_id, "job_id": job["job_id"], "render_job_id": rid})
-        # AI 起名（F9）：按工程的空白术语给中文名建议（前端只写入选中且空白的）
-        if path in ("/v1/ai/draft-terms", "/api/llm/draft-terms"):
+            job["inputs"] = {"formats": formats, "variant": variant, "dpi": int(body.get("dpi") or 300),
+                             "render_job_id": rid}
+            job["_final"] = export_result(job["job_id"], rid, ver, formats, variant)
+            # WP1：export_id 就是导出作业的 id
+            return self._send(202, {"export_id": job["job_id"], "job_id": job["job_id"], "render_job_id": rid})
+        # AI 起名（F9）：WP1 契约 POST /v1/projects/{pid}/ai/draft-terms（无请求体）——服务端起草并只填
+        # 空白术语（人填过的不动），返回 {suggestions, filled:[selector], plan_valid, issues}；失败 422 {detail}
+        m = re.fullmatch(r"/v1/projects/([\w\-]+)/ai/draft-terms", path)
+        if m:
+            p = PROJECTS.get(m.group(1))
+            if not p or not p.get("data"):
+                return self._err(404, "没有这个工程")
             if not LLM["configured"]:
-                return self._err(409, "AI 通道未配置", "到设置里填 DeepSeek 密钥，或改用本机 MCP 客户端。",
-                                 "ai_not_configured")
+                return self._send(422, {"detail": "大模型调用失败：AI 通道未配置（演示）"})
             names = {**GEARBOX_NAMES, **VISE_NAMES, **VALVE_NAMES}
-            pid = (body or {}).get("project") or "gearbox"
-            plan = (PROJECTS.get(pid, {}).get("data") or {}).get("plan") or {}
-            sugg = []
+            plan = p["data"]["plan"]
             low = {"PGB-PLANET-PIN", "VISE-THRUST-COLLAR", "BV-PACKING"}
+            sugg, filled = [], []
             for t in plan.get("terms", []):
                 sel = t.get("selector", "")
                 if (t.get("term") or "").strip():
                     continue
                 term = names.get(sel) or (sel.split("-")[-1].title() + " 件")
-                sugg.append({"selector": sel, "term": term,
+                sugg.append({"selector": sel, "term": term, "label": "once",
                              "confidence": "low" if sel in low else "high",
                              "reason": "命名多义，建议人工复核" if sel in low else ""})
-            return self._send(200, {"suggestions": sugg, "filled": len(sugg)})
+                t["term"] = term
+                filled.append(sel)
+            if filled:                                   # 服务端写了 plan → 换版本（前端须重读 plan 与 ETag）
+                p["plan_rev"] += 1
+                p["plan_etag"] = 'W/"%s-%d"' % (p["id"], p["plan_rev"])
+            return self._send(200, {"suggestions": sugg, "filled": filled, "plan_valid": True, "issues": []})
         return self._err(404, "未实现的 POST：%s" % path)
 
     # ---- PUT ----
@@ -944,9 +990,10 @@ class Handler(BaseHTTPRequestHandler):
             if if_match and if_match != p["plan_etag"]:
                 return self._err(409, "plan 已被另一处修改（ETag 不匹配）",
                                  "请重新载入最新 plan 后再改。", "etag_conflict")
-            plan = body.get("plan")
-            if not isinstance(plan, dict):
-                return self._err(400, "body.plan 必须是对象")
+            # WP1 契约：请求体就是 plan 本身（不是 {plan: …}）；包了一层多半是前端写错，直接拒绝
+            plan = body
+            if not isinstance(plan, dict) or set(plan) == {"plan"} or "terms" not in plan:
+                return self._err(400, "请求体应为 figure-plan 本身（WP1 契约），不是 {plan: …}")
             p["data"]["plan"] = plan
             p["plan_rev"] += 1
             p["plan_etag"] = 'W/"%s-%d"' % (p["id"], p["plan_rev"])

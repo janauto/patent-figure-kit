@@ -151,7 +151,7 @@ export const api = {
     }
     if (MODE === 'legacy') { const s = await legacyState(); return { plan: s.plan, etag: null }; }
     const { body, etag } = await call('GET', `${base}v1/projects/${id}/plan`);
-    return { plan: body.plan, etag };
+    return { plan: body, etag };                     // WP1：响应体就是 plan 本身，版本在 ETag 头
   },
 
   async putPlan(id, plan, etag) {
@@ -161,7 +161,8 @@ export const api = {
       if (_legacyState) _legacyState.plan = plan;
       return { validate: res.validate, etag: null };
     }
-    const { body, etag: newEtag } = await call('PUT', `${base}v1/projects/${id}/plan`, { plan }, etag ? { 'If-Match': etag } : {});
+    // WP1：请求体就是 plan 本身（不是 {plan}），If-Match 带当前 ETag；200 {ok} + 新 ETag / 409
+    const { body, etag: newEtag } = await call('PUT', `${base}v1/projects/${id}/plan`, plan, etag ? { 'If-Match': etag } : {});
     return { ...body, etag: newEtag };
   },
 
@@ -220,9 +221,11 @@ export const api = {
 
   async getJob(jobId) {
     if (MODE === 'legacy') {
-      if (jobId === 'legacy:render') {
+      if (jobId === 'legacy:render') {           // 新版子应用给出本次作业；旧后端没有则按 running/result 判
         const st = (await call('GET', `${base}api/render/status`)).body;
-        return { state: st.running ? 'running' : 'succeeded', result: st.result };
+        const job = normJob(st.job);
+        if (st.running || job?.running) return { state: 'running', result: null };
+        return { state: job?.state || 'succeeded', result: job?.result || st.result, error: job?.error || null };
       }
       return { state: 'succeeded' };
     }
@@ -265,7 +268,13 @@ export const api = {
         filled: (r.applied?.filled?.length || 0) + (r.applied?.added?.length || 0),
         kept_human: r.applied?.kept_human?.length || 0, server_applied: true };
     }
-    return (await call('POST', `${base}v1/ai/draft-terms`, { project: id })).body;
+    // WP1 契约：POST /v1/projects/{pid}/ai/draft-terms（无请求体）——服务端起草并只填空白术语、直接写 plan，
+    // 返回 {suggestions, filled:[selector], plan_valid, issues}。plan 已在服务端换版本 → 重读 plan 与 ETag。
+    const r = (await call('POST', `${base}v1/projects/${encodeURIComponent(id)}/ai/draft-terms`)).body;
+    const fresh = await this.getPlan(id);
+    const filled = Array.isArray(r.filled) ? r.filled : [];
+    return { suggestions: r.suggestions || [], filled: filled.length, filled_selectors: filled,
+      plan_valid: r.plan_valid, issues: r.issues || [], plan: fresh.plan, etag: fresh.etag, server_applied: true };
   },
 
   async analyzeStructure(id) {

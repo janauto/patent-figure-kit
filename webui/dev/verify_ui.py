@@ -19,6 +19,12 @@
   * live 409 冲突提示：导出带 render_job_id + plan_etag，后端原子核对不符 409 →「计划已变更，请重新出图」并锁定
   * status.job 失败态：本次作业失败时显示其诊断，预览与导出属于上一成功版本（live 与兼容模式各一）
 
+修复轮 8（Codex R3h）新增：
+  * 渲染生命周期：A 失败的状态回读晚于 B 成功到达 → 丢弃，版本 / 作业 / 证据都不回退
+  * 刷新恢复：后端有 running 作业且无发布结果 → 打开页面自动接上、期间禁用再次渲染、终态自动呈现（live 与兼容模式）
+  * 契约：AI 起名走 POST /v1/projects/{pid}/ai/draft-terms，服务端写 plan 后前端重读 plan 与 ETag、随后保存不冲突；
+    导出完成页按 Job.result 的「图号/版本/格式」清单逐图展示，下载 200
+
 起 mock：python3 webui/dev/mock_server.py --port 8803
 起静态：python3 webui/dev/build_static.py && (cd webui/dev/static-site && python3 -m http.server 8808)
 跑：    python3 webui/dev/verify_ui.py        # 全过退出 0，任一失败退出 1
@@ -86,7 +92,7 @@ def test_save_race(pg):
         await f1; await st.flush();                  // 确保最新版（B）落盘
         const res = await fetch('/v1/projects/gearbox/plan');
         const j = await res.json();
-        return j.plan.terms[0].term;
+        return j.terms[0].term;
     }""")
     check("保存竞态：慢保存期间连续编辑，服务端最终收到 B", final == "RACE-BBB", f"server term={final}")
 
@@ -185,7 +191,7 @@ def test_concurrent_flush(pg):
         await st.flush();
         const sameLoop = f1 === f2;                  // 共享同一个保存循环 Promise
         const res = await (await fetch('/v1/projects/gearbox/plan')).json();
-        return { term: res.plan.terms[0].term, sameLoop, saved: st.state.savedVersion, edit: st.state.editVersion };
+        return { term: res.terms[0].term, sameLoop, saved: st.state.savedVersion, edit: st.state.editVersion };
     }""")
     check("并发 flush：共享单循环、服务端最终为最新版、版本号自洽",
           r["term"] == "CF-2" and r["sameLoop"] and r["saved"] >= r["edit"],
@@ -205,7 +211,7 @@ def test_flush_noop_then_edit(pg):
         const f = st.flush();
         await Promise.race([f, sleep(5000)]);
         const res = await (await fetch('/v1/projects/gearbox/plan')).json();
-        return { server: res.plan.terms[0].term, term, fresh: f !== noop,
+        return { server: res.terms[0].term, term, fresh: f !== noop,
                  saved: st.state.savedVersion, edit: st.state.editVersion, ss: st.state.saveState };
     }""")
     check("空循环 flush：无改动 flush 后再编辑，照常保存到服务端",
@@ -240,7 +246,7 @@ def test_flush_after_failure(pg):
           st.mutate((p) => { p.terms[0].term = term; });
           await Promise.race([st.flush(), sleep(5000)]);
           const res = await (await realFetch('/v1/projects/gearbox/plan')).json();
-          return { afterFail, server: res.plan.terms[0].term, term, puts,
+          return { afterFail, server: res.terms[0].term, term, puts,
                    ss: st.state.saveState, saved: st.state.savedVersion, edit: st.state.editVersion };
         } finally { window.fetch = realFetch; }
     }""")
@@ -450,6 +456,9 @@ def test_live_export_conflict(pg):
           document.querySelector('#do-pack').click();                       // ① 正常打包
           out.packed = await waitFor(() => !!document.querySelector('.exp-done'), 10000);
           out.okBody = bodies[0] || null; out.okStatus = statuses[0];
+          out.matrix = (document.querySelector('.exp-matrix')?.textContent || '').replace(/\s+/g, ' ');
+          const a = document.querySelector('.exp-zip-acts a[download]');
+          if (a) { const res = await realFetch(a.href); out.dl = res.status; out.dlBody = await res.text(); }
           // ② 本地证据与后端不一致（例如证据来自别处）：本地门禁会放行，后端原子核对必须拒绝
           document.querySelector('#pack-again').click(); await sleep(200);
           st.state.planEtag = 'W/"本地以为的版本"';
@@ -466,6 +475,9 @@ def test_live_export_conflict(pg):
         return out;
     }""")
     ob = r.get("okBody") or {}
+    ok_view = ("fig1 · 交底版" in (r.get("matrix") or "") and r.get("dl") == 200 and (r.get("version") or "?") in (r.get("dlBody") or ""))
+    check("导出完成页按 Job.result 清单：逐图「图号/版本/格式」矩阵 + 下载 200（包属本出图版本）", ok_view,
+          f"matrix={(r.get('matrix') or '')[:50]!r} dl={r.get('dl')}")
     ok = (r.get("rendered") and r.get("packed") and r.get("okStatus") == 202
           and ob.get("render_job_id") == r.get("version") and ob.get("plan_etag") == r.get("etag") and "sheet_preset" not in ob
           and r.get("conflictStatus") == 409 and "计划已变更，请重新出图" in (r.get("toast") or "")
@@ -520,6 +532,126 @@ def test_render_job_failure(pg):
               and "上一成功版本" in leg.get("panel", "") and leg.get("exportLocked"))
     check("status.job 失败态（兼容模式 /api/render/status）：job 失败显示校验问题，已发布版本不变，导出仍锁定", ok_leg,
           f"job={leg.get('jobState')} kept={leg.get('keptPublished')} panel={leg.get('panel', '')[:60]!r} locked={leg.get('exportLocked')}")
+
+
+
+def test_render_late_failure_read(pg):
+    """R3h #1：A 失败 → 扣住 A 的状态回读 → 发起 B → B 成功 → 放行 A 的回读：
+    迟到的 A 回读必须丢弃——已发布版本、本次作业、导出证据都停在 B，不回退。"""
+    pg.goto(f"{B}/index.html?project=gearbox&stage=qa", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + JS_STUDIO.replace("./js/", "/js/") + """
+        const realFetch = window.fetch; const ids = [];
+        let failNext = false; let holdId = null; let held = false; let release; const gate = new Promise((r) => { release = r; });
+        window.fetch = async (url, init) => {
+          let u = String(url); const m = (init && init.method) || 'GET';
+          if (m === 'POST' && /\\/render$/.test(u.split('?')[0])) {
+            if (failNext) { failNext = false; u += (u.includes('?') ? '&' : '?') + 'fail=gate'; }
+            const res = await realFetch(u, init); const j = await res.clone().json(); ids.push(j.job_id); return res;
+          }
+          if (m === 'GET' && holdId && u.endsWith('/v1/jobs/' + holdId)) { held = true; const res = await realFetch(u, init); await gate; return res; }
+          return realFetch(u, init);
+        };
+        const ver = () => st.state.render && (st.state.render.render_job_id || st.state.render.version);
+        const out = {};
+        try {
+          out.ok1 = await rerender(); out.v1 = ver();
+          failNext = true;
+          const j0 = st.state.renderJob;
+          document.querySelector('#rerender').click();                         // A：失败
+          await waitFor(() => ids.length === 2, 5000);
+          holdId = ids[1];                                                     // 扣住 A 的状态回读
+          await waitFor(() => st.state.renderJob !== j0 && st.state.renderJob.state === 'failed' && !document.querySelector('#rerender[disabled]'), 15000);
+          out.aHeld = await waitFor(() => held, 4000);
+          out.bOk = await rerender();                                          // B：成功
+          out.vB = ver(); out.bId = ids[2];
+          release(); await sleep(800);                                         // 放行 A 的迟到回读
+          out.vAfter = ver(); out.jobAfter = st.state.renderJob && st.state.renderJob.id;
+          out.jobStateAfter = st.state.renderJob && st.state.renderJob.state;
+          out.evAfter = st.state.renderInputs.version;
+          out.panel = !!document.querySelector('.job-fail');
+        } finally { release(); window.fetch = realFetch; }
+        return out;
+    }""")
+    ok = (r.get("ok1") and r.get("aHeld") and r.get("bOk") and r.get("vB") and r.get("vB") != r.get("v1")
+          and r.get("vAfter") == r.get("vB") and r.get("jobAfter") == r.get("bId") and r.get("jobStateAfter") == "succeeded"
+          and r.get("evAfter") == r.get("vB") and not r.get("panel"))
+    check("渲染生命周期：A 失败的状态回读晚于 B 成功 → 丢弃，版本/作业/证据停在 B", ok,
+          f"v1={r.get('v1')} vB={r.get('vB')} after={r.get('vAfter')} job={r.get('jobAfter')}/{r.get('jobStateAfter')} "
+          f"ev={r.get('evAfter')} held={r.get('aHeld')} panel={r.get('panel')}")
+
+
+def _post_json(url):
+    import json as _j, urllib.request as _u
+    req = _u.Request(url, data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+    return _j.loads(_u.urlopen(req).read() or b"{}")
+
+
+def test_render_resume(ctx):
+    """R3h #2：后端已有 running 渲染作业（且无发布结果）→ 打开 / 刷新页面：自动接上作业，期间禁用再次渲染，
+    终态自动呈现。live 停在出图与 QA 页（SSE 回放）；兼容模式停在规划台（轮询，切到 QA 看到结果、导出仍锁定）。"""
+    pg = ctx.new_page()
+    job = _post_json(f"{B}/v1/projects/bench-vise/render?speed=2")            # 约 8 s
+    pg.goto(f"{B}/index.html?project=bench-vise&stage=qa", wait_until="domcontentloaded"); pg.wait_for_timeout(2200)
+    mid = pg.evaluate("""async () => { const st = await import('/js/state.js');
+        return { job: st.state.renderJob && st.state.renderJob.state, running: !!document.querySelector('.stamp-run .spin, #rerender[disabled]'),
+                 enabledBtn: !!document.querySelector('#qa-render, #rerender:not([disabled]), #qa-retry') }; }""")
+    end = pg.evaluate("""async () => {""" + JS_HELPERS + """ const st = await import('/js/state.js');
+        await waitFor(() => st.state.renderJob && st.state.renderJob.state === 'succeeded', 15000); await sleep(300);
+        return { job: st.state.renderJob.state, ver: st.state.render && (st.state.render.render_job_id || st.state.render.version),
+                 tabs: document.querySelectorAll('.qa-tab').length }; }""")
+    pg.close()
+    ok_live = (mid["job"] == "running" and mid["running"] and not mid["enabledBtn"]
+               and end["job"] == "succeeded" and end["ver"] == job.get("job_id") and end["tabs"] > 0)
+    check("刷新恢复（live）：后端 running → 打开页面接上作业、禁用再次渲染、终态自动呈现", ok_live,
+          f"mid={mid} end={end} job={job.get('job_id')}")
+    pg = ctx.new_page()
+    _post_json(f"{B}/p/ball-valve/api/render?speed=4")                         # 约 6.4 s
+    pg.goto(f"{B}/p/ball-valve/?stage=plan", wait_until="domcontentloaded"); pg.wait_for_timeout(2000)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + """ const st = await import('./js/state.js');
+        const midJob = st.state.renderJob && st.state.renderJob.state;
+        const hadRender = !!st.state.render;
+        await waitFor(() => st.state.renderJob && !st.state.renderJob.running, 15000); await sleep(300);
+        const endJob = st.state.renderJob.state; const figs = (st.state.render && st.state.render.figures || []).length;
+        await stage('qa');
+        const tabs = document.querySelectorAll('.qa-tab').length; const compat = !!document.querySelector('.compat-bar');
+        await stage('export');
+        return { midJob, hadRender, endJob, figs, tabs, compat, locked: !!document.querySelector('.exp-blank') && !document.querySelector('#do-pack') };
+    }""")
+    pg.close()
+    ok_leg = (r["midJob"] == "running" and r["endJob"] == "succeeded" and r["figs"] > 0 and r["tabs"] > 0
+              and r["compat"] and r["locked"])
+    check("刷新恢复（兼容模式，停在规划台）：接上轮询、终态自动呈现、导出仍锁定", ok_leg, f"{r}")
+
+
+def test_ai_draft_contract(pg):
+    """契约对齐：AI 起名走 POST /v1/projects/{pid}/ai/draft-terms（服务端只填空白并写 plan）。
+    前端完成后以服务端 plan 与新 ETag 为准——随后的编辑保存不冲突（不带旧 ETag 去 409）。"""
+    pg.goto(f"{B}/index.html?project=ball-valve&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + """
+        const st = await import('/js/state.js');
+        // 先把前三个术语清空并保存（用例可在同一个 mock 上重复跑）
+        st.mutate((p) => { p.terms.slice(0, 3).forEach((t) => { t.term = ''; }); }); await st.flush();
+        const blanksBefore = st.state.plan.terms.filter((t) => !(t.term || '').trim()).length;
+        st.setSelection([st.state.plan.terms[0].selector]); await sleep(300);
+        const btn = document.querySelector('#afb-name');
+        if (!btn) return { noBtn: true, blanksBefore };
+        btn.click();
+        await waitFor(() => (document.querySelector('#toast')?.textContent || '').includes('AI'), 6000);
+        const toast = document.querySelector('#toast')?.textContent || '';
+        const res = await fetch('/v1/projects/ball-valve/plan'); const srv = await res.json(); const srvEtag = res.headers.get('ETag');
+        const sameEtag = st.state.planEtag === srvEtag;
+        const samePlan = JSON.stringify(st.state.plan.terms) === JSON.stringify(srv.terms);
+        const blanksAfter = st.state.plan.terms.filter((t) => !(t.term || '').trim()).length;
+        const edit = uniq('起名后再改');
+        st.mutate((p) => { p.terms[0].term = edit; }); await st.flush();
+        const srv2 = await (await fetch('/v1/projects/ball-valve/plan')).json();
+        return { blanksBefore, blanksAfter, toast, sameEtag, samePlan, save: st.state.saveState, saved: srv2.terms[0].term === edit };
+    }""")
+    ok = (not r.get("noBtn") and r.get("blanksBefore", 0) > 0 and r.get("blanksAfter") == 0 and "AI 起草完成" in r.get("toast", "")
+          and r.get("sameEtag") and r.get("samePlan") and r.get("save") == "saved" and r.get("saved"))
+    check("AI 起名（WP1 路径）：服务端写 plan 后前端重读 plan 与 ETag，随后编辑保存不冲突", ok, f"{r}")
 
 
 def test_unsaved_lock(pg):
@@ -597,7 +729,8 @@ def main():
         ctx = b.new_context(viewport={"width": 1440, "height": 900})
         for fn in (test_xss, test_save_race, test_concurrent_flush, test_flush_noop_then_edit,
                    test_flush_after_failure, test_unsaved_lock, test_render_evidence_race, test_export_late_callback,
-                   test_live_export_conflict, test_render_job_failure,
+                   test_live_export_conflict, test_render_job_failure, test_render_late_failure_read,
+                   test_ai_draft_contract,
                    test_candidate_resolve, test_candidate_bad_member, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:
@@ -613,6 +746,10 @@ def main():
             test_legacy_export_locked(ctx)
         except Exception as exc:
             check("test_legacy_export_locked", False, f"异常 {exc!r}"[:400])
+        try:
+            test_render_resume(ctx)
+        except Exception as exc:
+            check("test_render_resume", False, f"异常 {exc!r}"[:400])
         test_static_write_guard(ctx)
         test_static_no_write(ctx)
         b.close()

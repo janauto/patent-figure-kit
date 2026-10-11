@@ -199,7 +199,7 @@ async function doSave() {
     state.savedVersion = Math.max(state.savedVersion, v);
     state.saveState = (state.editVersion === v) ? 'saved' : 'dirty';
   } catch (err) {
-    state.saveState = err.code === 'etag_conflict' ? 'conflict' : 'error';
+    state.saveState = (err.status === 409 || err.code === 'etag_conflict') ? 'conflict' : 'error';
     console.error('保存失败', err);
   }
   bus.emit('save-state');
@@ -270,7 +270,9 @@ export async function boot(projectId) {
     state.renderInputs.etag = resultEtag(state.render);
     state.renderInputs.version = resultVersion(state.render);
   }
-  state.renderJob = data.render_job ? normJob(data.render_job) : null;
+  // 本次（最近一次）渲染作业：新版后端给 render_job；旧后端只有 rendering 标志 → 视作一个在跑的作业
+  state.renderJob = data.render_job ? normJob(data.render_job)
+    : (data.rendering ? { id: 'legacy:render', state: 'running', running: true, ok: null, error: null, result: null, diag: null } : null);
   // 修复轮 5–6 的 legacy 本地证明已作废（裁决：兼容模式不再凭本地记录解锁），顺手清掉残留
   try { localStorage.removeItem(`inkline-render-proof-${projectId}`); localStorage.removeItem(`inkline-render-digest-${projectId}`); } catch { /* */ }
   indexStructure();

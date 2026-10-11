@@ -1,6 +1,6 @@
 // 规划台装配入口：顶栏、三屏切换（规划 / 出图与 QA / 导出）、键盘金路径、AI 起名浮条。
 // three.js 只在进入「规划台」时动态 import()，首页零 three.js（硬约束）。
-import { boot, bus, state, setSelection, flush, setView, displayName, mutate } from './state.js';
+import { boot, bus, state, setSelection, flush, setView, displayName } from './state.js';
 import { api, readOnly } from './api.js';
 import { applyBrand } from './brand.js';
 import { esc } from './esc.js';
@@ -204,7 +204,7 @@ function updateFloatbar() {
   bar.innerHTML = `
     <span class="afb-mark">AI</span>
     <span class="afb-text">已选 <b>${sel.length}</b> 件${blanks.length ? ` · <b>${blanks.length}</b> 件待起名` : '，均已命名'}</span>
-    ${blanks.length && llmOk && !readOnly ? `<button class="btn primary sm" id="afb-name">为 ${blanks.length} 个空白件起名</button>`
+    ${blanks.length && llmOk && !readOnly ? `<button class="btn primary sm" id="afb-name" title="后端起名只填空白件、不动人工填过的；范围是整个工程">AI 为空白件起名</button>`
       : (!llmOk ? '<span class="hint">AI 未接入，可在术语页手填</span>' : '')}
     <button class="btn ghost sm" id="afb-clear">清空选择</button>`;
   $('#afb-clear')?.addEventListener('click', () => setSelection([]));
@@ -213,37 +213,31 @@ function updateFloatbar() {
 async function aiNameSelection() {
   const bar = $('#ai-floatbar');
   bar.querySelector('#afb-name').outerHTML = '<span class="hint"><i class="spin"></i> 正在读代号、起中文名…</span>';
-  const selected = new Set(state.selection);
   try {
-    const res = await api.draftTerms(projectId);
+    await flush();                                   // 先落盘本地改动：后端会在服务端直接写 plan
+    const v0 = state.editVersion;
+    const res = await api.draftTerms(projectId);     // 新旧后端都是服务端起名、只填空白、写入 plan（不分选中）
     const sugg = {};
     (res.suggestions || []).forEach((s) => { sugg[s.selector] = s; });
     state.aiSuggestions = { ...state.aiSuggestions, ...sugg };
-    let filled = 0;
-    if (res.server_applied && res.plan) {
-      // 旧后端已把名称写进 plan 并保存：以服务端 plan 为准
+    bus.emit('ai-suggestions');
+    const filled = res.filled || 0;
+    if (state.editVersion !== v0) {
+      // 等待期间本地又改了计划：不拿服务端 plan 覆盖本地编辑（下次保存会按 ETag 冲突提示）
+      toast('AI 已在服务端起名，但等待期间本地计划又有改动——为不覆盖你的编辑，请刷新后查看 AI 名称。', 'bad');
+      updateFloatbar();
+      return;
+    }
+    if (res.plan) {                                  // 以服务端 plan 与新 ETag 为准
       state.plan = res.plan;
-      filled = res.filled || 0;
+      if (res.etag !== undefined) state.planEtag = res.etag || null;
       if (state.render) bus.emit('render-stale');   // plan 变了 → 旧渲染结果过期
       bus.emit('plan'); bus.emit('validate');
-    } else {
-      // 新后端只返回建议：前端把建议写入「选中且空白」的术语行（人工填过的不动）
-      mutate((plan) => {
-        (res.suggestions || []).forEach((s) => {
-          const row = (plan.terms || []).find((t) => t.selector === s.selector);
-          const hitSelected = selected.has(s.selector)
-            || [...selected].some((n) => n === s.selector);
-          if (row && !(row.term || '').trim() && (hitSelected || !selected.size)) {
-            row.term = s.term; filled += 1;
-          }
-        });
-      });
     }
-    bus.emit('ai-suggestions');
     const low = (res.suggestions || []).filter((s) => s.confidence === 'low').length;
     toast(filled ? `AI 起草完成：填了 ${filled} 个零件名`
         + (low ? `（${low} 个把握低，已标黄，请核对）` : '') + '。人工填过的未改动。'
-      : 'AI 没有可填的空白件（选中的都已命名）。', filled ? 'ok' : '');
+      : 'AI 没有可填的空白件（都已命名）。', filled ? 'ok' : '');
     updateFloatbar();
   } catch (err) {
     toast('AI 起草失败：' + (err.hint || err.message), 'bad');
@@ -303,5 +297,7 @@ async function start() {
   ['save-state', 'booted'].forEach((evt) => bus.on(evt, renderToolbar));
   const stage = params.get('stage') || 'plan';
   showStage(stage);
+  // 刷新 / 重进时后端仍有在跑的渲染作业：无论停在哪个页签都接上它，终态自动呈现、期间禁用再次渲染
+  if (state.renderJob?.running) import('./qa.js').then((m) => m.resumeRender());
 }
 start();
