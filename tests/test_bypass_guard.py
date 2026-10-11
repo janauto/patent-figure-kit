@@ -93,3 +93,32 @@ def test_no_result_cache_and_no_shared_out_reader():
         for t in _tokens(p):
             if t.type == tokenize.STRING:
                 assert t.string.strip("\"'") != "last_render.json", _rel(p)
+
+
+#: CLIs that predate WP2 and write a user-named report path. render_patent_figure has its own
+#: side-path guard (R1g–R1j); the rest are read-only checkers / generators whose outputs are not
+#: delivery paths. Any NEW CLI with an output-path flag must go through patent_figure.pathguard.
+_LEGACY_OUTPUT_CLIS = {"annotate_figure_sheet.py", "bench.py", "render_flowchart.py",
+                       "doctor.py", "validate_clean_dxf.py", "qa_patent_figure.py",
+                       "render_patent_figure.py", "validate_figure_plan.py"}
+
+
+def test_new_clis_with_output_paths_go_through_the_path_guard():
+    """WP2 R2 #2: every CLI that takes an output path (--json / --zip / --instances / -o work
+    dir) and is not on the legacy list checks it with ``pathguard.check_outputs`` before writing;
+    the long-running ones check again right before writing (defence in depth)."""
+    flags = ('add_argument("--json"', 'add_argument("--zip"', '"--json", dest',
+             'add_argument("--instances"')
+    users = {}
+    for p in _files():
+        src = p.read_text(encoding="utf-8")
+        if any(f in src for f in flags):
+            users[_rel(p)] = src
+    unguarded = [rel for rel, src in users.items()
+                 if Path(rel).name not in _LEGACY_OUTPUT_CLIS
+                 and not _code_uses(_SCRIPTS / rel, "pathguard.check_outputs")]
+    assert not unguarded, unguarded
+    for rel in ("suggest_figure_plan.py", "export_figure_package.py"):
+        src = (_SCRIPTS / rel).read_text(encoding="utf-8")
+        assert src.count("_guard(") >= 3, rel          # definition + pre-check + late re-check
+        assert _code_uses(_SCRIPTS / rel, "pathguard.claim_workdir"), rel

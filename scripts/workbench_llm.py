@@ -241,14 +241,20 @@ def draft_terms(assembly: dict, plan: dict, *, glossary: Optional[Dict[str, str]
                 cfg: Optional[dict] = None) -> List[dict]:
     parts = [p for p in assembly.get("parts", []) if not p.get("degenerate")]
     have = {t.get("selector"): (t.get("term") or "").strip() for t in plan.get("terms", [])}
-    todo = [p for p in parts if not (only_empty and have.get(p["name"]))]
+    todo = [p for p in parts if not (only_empty and have.get(p["name"]))][:160]
     if not todo:
         return []
+    # Outbound scope (WP2 R2 #1, F9 冻结语义): the request carries ONLY entries of the parts being
+    # named — never other parts' names / part codes from the plan, the glossary or the BOM. The
+    # scope is enforced HERE, at the serialisation boundary, so every caller (REST, MCP, the
+    # browser sub-app) gets it whatever it passes in.
+    scope = {p["name"] for p in todo}
     user = {
-        "产品零件（STEP 零件名、包围盒、装配路径）": [_part_brief(p) for p in todo][:160],
-        "已定名的零件（参考，不要改）": {k: v for k, v in have.items() if v},
-        "术语库（已递交专利用过的名字）": glossary or {},
-        "BOM 匹配到的物料名称": bom or {},
+        "产品零件（STEP 零件名、包围盒、装配路径）": [_part_brief(p) for p in todo],
+        "已定名的零件（参考，不要改）": {k: v for k, v in have.items() if v and k in scope},
+        "术语库（已递交专利用过的名字）": {k: v for k, v in (glossary or {}).items()
+                                     if k in scope},
+        "BOM 匹配到的物料名称": {k: v for k, v in (bom or {}).items() if k in scope},
     }
     out = chat_json(TERMS_SYSTEM, json.dumps(user, ensure_ascii=False), max_tokens=16000, cfg=cfg)
     rows = out.get("terms", []) if isinstance(out, dict) else []

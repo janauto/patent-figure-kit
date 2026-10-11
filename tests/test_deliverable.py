@@ -257,6 +257,59 @@ def test_docx_margins_page_breaks_and_stray_text_are_checked(two):
     assert not rep["ok"] and any("图片以外的文字" in e for e in rep["errors"])
 
 
+def _first_para_open(x: str) -> int:
+    return x.index("<w:p>") if "<w:p>" in x else x.index("<w:p ")
+
+
+@pytest.mark.parametrize("inject, expect", [
+    # a blank page in front: an empty paragraph ending in a page break
+    (lambda x: x[:_first_para_open(x)] + '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+     + x[_first_para_open(x):], "换行/分页符"),
+    # 200 mm left indent on the first picture paragraph
+    (lambda x: x.replace('<w:ind w:left="0"', '<w:ind w:left="11339"', 1), "缩进"),
+    # an extra page break inside the first picture paragraph (after the picture)
+    (lambda x: x.replace("</w:drawing></w:r>", '</w:drawing></w:r><w:r><w:br w:type="page"/></w:r>',
+                         1), "换行/分页符"),
+    # an empty extra page between the pictures
+    (lambda x: x.replace("<w:p><w:pPr><w:pageBreakBefore/>",
+                         "<w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p><w:p><w:pPr><w:pageBreakBefore/>",
+                         1), "行内图片"),
+    # template line spacing (1.15) instead of explicit single spacing
+    (lambda x: x.replace('w:line="240"', 'w:line="276"', 1), "单倍行距"),
+    # a paragraph style (could carry indents / frames)
+    (lambda x: x.replace("<w:pPr>", '<w:pPr><w:pStyle w:val="Heading1"/>', 1), "段落属性"),
+])
+def test_word_structure_is_strict_any_layout_deviation_fails(two, inject, expect):
+    """R2 #3: pictures are not pages and positions are not assumed — a blank page in front, a
+    200 mm indent, an extra page break, an extra empty page, non-single spacing or a paragraph
+    style must each FAIL (they change the real Word layout)."""
+    pytest.importorskip("docx")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    ok = _check(good, rows, sp)
+    assert ok["ok"] and ok["layout_verified"] == "structural"
+    assert ok["layout_note"] == "Word 按文档结构核验，实际排版以 Word 打开为准"
+    bad = tmp / "bad.docx"
+    _rewrite_docx(good, bad, inject)
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"], rep
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert expect in msgs, msgs
+
+
+def test_written_word_sets_every_layout_property_explicitly(two):
+    pytest.importorskip("docx")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    _build(rows, sp, tmp / "w.docx", "docx")
+    with zipfile.ZipFile(str(tmp / "w.docx")) as zf:
+        xml = zf.read("word/document.xml").decode("utf-8")
+    assert xml.count('w:line="240"') == 2 and xml.count('<w:jc w:val="center"/>') == 2
+    assert xml.count("<w:pageBreakBefore/>") == 1 and xml.count("<w:sectPr") == 1
+
+
 # --------------------------------------------------------------------------- export service
 
 
@@ -313,3 +366,32 @@ def test_export_service_builds_checks_and_quarantines(tmp_path):
     assert item["status"] == "fail" and item["file"].startswith("_未通过核验/")
     assert "不要递交" in (tmp_path / "low" / "核对清单.txt").read_text(encoding="utf-8")
     assert store.referenced() == set()
+
+
+def test_a_checker_that_raises_quarantines_the_written_document(tmp_path, monkeypatch):
+    """R2 #4: written OK, then the checker throws → the document is NOT verified, so it is a
+    failed one: moved to _未通过核验/, item fail with the reason, nothing left at the package root
+    or at the root of the archive."""
+    pytest.importorskip("docx")
+    store = V.VersionStore(tmp_path / "ws")
+    _publish(store, "r1", tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("checker exploded")
+    monkeypatch.setattr(C, "check_document", boom)
+    with EX.acquire(store.root) as pin:
+        out = EX.build_bundle(pin, tmp_path / "b", variants=("filing",),
+                              formats=("pdf", "docx", "dxf"), dpi=150, checklist_txt=True)
+    assert out["ok"] is False
+    for fmt in ("pdf", "docx"):
+        name = "说明书附图_递交版.%s" % fmt
+        assert out["manifest"]["fig1/递交版/%s" % fmt] == "fail"
+        assert "核验程序异常" in out["reasons"]["fig1/递交版/%s" % fmt]
+        assert not (tmp_path / "b" / name).exists()
+        assert (tmp_path / "b" / "_未通过核验" / name).is_file()
+        assert out["documents"][name]["path"] == "_未通过核验/" + name
+    EX.zip_dir(tmp_path / "b", tmp_path / "b.zip")
+    names = zipfile.ZipFile(str(tmp_path / "b.zip")).namelist()
+    assert not any(n.startswith("说明书附图_") for n in names), names
+    assert "_未通过核验/说明书附图_递交版.pdf" in names
+    assert out["manifest"]["fig1/递交版/dxf"] == "ok"

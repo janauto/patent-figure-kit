@@ -29,9 +29,26 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 
+from patent_figure import pathguard  # noqa: E402
 from patent_figure import suggest_plan as SP  # noqa: E402
 
 EXIT_OK, EXIT_EMPTY, EXIT_USAGE = 0, 1, 2
+#: Marker that makes a work dir "ours" (pathguard.claim_workdir).
+WORKDIR_MARKER = ".suggest-workdir"
+
+
+def _guard(args, workdir, step):
+    """Every path this run writes, checked BEFORE anything is written (and again right before
+    the report): not in any version store's reserved area, not an input, not overlapping."""
+    outs = [("--json", args.json_out), ("--cache", args.cache)]
+    if workdir is not None:
+        outs += [("-o(candidates)", workdir / "candidates"), ("-o(analyze)", workdir / "analyze")]
+        if not args.cache:
+            outs.append(("-o(cache)", workdir / "cache"))
+    return pathguard.check_outputs(
+        outs, inputs=[args.assembly, args.plan, args.instances, step],
+        disjoint=[("--json", "-o(candidates)"), ("--json", "-o(analyze)"),
+                  ("--json", "-o(cache)"), ("--json", "--cache")])
 
 
 def _blank_plan(assembly: dict, step: str) -> dict:
@@ -94,8 +111,12 @@ def main(argv=None) -> int:
     if render and (workdir is None or not step or not Path(step).is_file()):
         print("用法错误：试渲染需要 -o WORKDIR 与存在的 --step（或加 --no-render）", file=sys.stderr)
         return EXIT_USAGE
-    if workdir is not None:
-        workdir.mkdir(parents=True, exist_ok=True)
+    problem = _guard(args, workdir, step)
+    if problem is None and workdir is not None:
+        problem = pathguard.claim_workdir(workdir, WORKDIR_MARKER)
+    if problem:
+        print("用法错误：%s" % problem, file=sys.stderr)
+        return EXIT_USAGE
 
     from patent_figure.worker import run_cli_via_worker as run_cli
     inst_path = Path(args.instances) if args.instances else None
@@ -145,6 +166,10 @@ def main(argv=None) -> int:
     for w in out.get("warnings", []):
         print("警告：%s" % w)
     if args.json_out:
+        late = _guard(args, workdir, step)              # defence in depth, right before writing
+        if late:
+            print("拒绝写报告：%s" % late, file=sys.stderr)
+            return EXIT_USAGE
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json_out).write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n",
                                        encoding="utf-8")

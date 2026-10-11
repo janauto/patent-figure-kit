@@ -541,23 +541,44 @@ def run_candidates(doc: dict, *, ws_root: Path, cache: Path, job_id: str, assemb
     cancel_check = cancel_check or (lambda: None)
     cands = doc.get("candidates", [])
     n = max(len(cands), 1)
-    for i, c in enumerate(cands):
-        cancel_check()
-        emit("试渲染候选 %d/%d：%s" % (i + 1, n, c["caption"]), 0.1 + 0.85 * i / n)
-        if c.get("plan_errors"):
-            c["status"] = "fail"
-            c["reason"] = "计划校验未通过：%s" % plain_error(c["plan_errors"][0]["code"], "")
-            c["detail"] = "；".join(e["message"] for e in c["plan_errors"][:3])
-            c["suggestion"] = _ERROR_ADVICE.get(c["plan_errors"][0]["code"],
-                                                "改用分组更小的候选，或在 3D 里框选分组。")
-            continue
-        rid = "%s-%s" % (job_id, c["id"])
-        out = _pub.render_candidate(ws_root, cache, rid, c["_trial_plan"], assembly_path,
-                                    run_cli, svg_of)
-        verdict(c, out.get("report"))
-        c["version"] = rid
-        if c["status"] == "pass" and out.get("svg"):
-            c["preview"] = {"svg": out["svg"]}
+    store = _pub.candidate_store(ws_root)
+    rids = ["%s-%s" % (job_id, c["id"]) for c in cands]
+    # WP2 R2 #5: lease EVERY candidate id of this job for the whole run (WP1 cross-process
+    # leases), so a concurrent job's — or another process's — reclaim can never delete a
+    # version this job is about to write, is writing, or has just sealed.
+    for rid in rids:
+        store.ref(rid)
+    current = None
+    try:
+        for i, c in enumerate(cands):
+            cancel_check()
+            emit("试渲染候选 %d/%d：%s" % (i + 1, n, c["caption"]), 0.1 + 0.85 * i / n)
+            if c.get("plan_errors"):
+                c["status"] = "fail"
+                c["reason"] = "计划校验未通过：%s" % plain_error(c["plan_errors"][0]["code"], "")
+                c["detail"] = "；".join(e["message"] for e in c["plan_errors"][:3])
+                c["suggestion"] = _ERROR_ADVICE.get(c["plan_errors"][0]["code"],
+                                                    "改用分组更小的候选，或在 3D 里框选分组。")
+                continue
+            current = rids[i]
+            out = _pub.render_candidate(ws_root, cache, current, c["_trial_plan"],
+                                        assembly_path, run_cli, svg_of)
+            current = None
+            verdict(c, out.get("report"))
+            c["version"] = rids[i]
+            if c["status"] == "pass" and out.get("svg"):
+                c["preview"] = {"svg": out["svg"]}
+    except BaseException:
+        # cancelled / crashed mid-render: the half-written version is marked cancelled so the
+        # reclaim may take it once this job's leases are gone (an unmarked unsealed dir is
+        # never reclaimed — it could be another job's work in progress).
+        if current is not None and store.version_dir(current).is_dir() \
+                and not store.is_complete(current):
+            store.mark_cancelled(current)
+        raise
+    finally:
+        for rid in rids:
+            store.unref(rid)
     finalize(doc)
     return doc
 

@@ -249,7 +249,10 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
         px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
         pages.append(_page_check(k, src, sp, (x0, ph - y1, x1 - x0, y1 - y0), px, gray,
                                  (pw, ph), extra))
-    return _report(path, "pdf", sources, pages, [], len(pdf_pages))
+    rep = _report(path, "pdf", sources, pages, [], len(pdf_pages))
+    rep.update(layout_verified="file-geometry",
+               layout_note="PDF 的页幅与图片位置取自文件里的绘制指令（CTM）与图片像素")
+    return rep
 
 
 # --------------------------------------------------------------------------- Word
@@ -259,86 +262,224 @@ def _q(ns: str, tag: str) -> str:
     return "{%s}%s" % (ns, tag)
 
 
+#: Paragraph properties a page paragraph may carry (all others — styles, numbering, frames,
+#: borders, tabs, section breaks … — can move or resize the picture and are refused).
+_PPR_ALLOWED = {"pageBreakBefore", "spacing", "jc", "ind", "rPr"}
+_RUN_FORBIDDEN = ("t", "br", "cr", "tab", "fldChar", "instrText", "sym", "ptab",
+                  "lastRenderedPageBreak", "object", "pict")
+_SETTINGS_FORBIDDEN = ("mirrorMargins", "gutterAtTop", "bookFoldPrinting", "bookFoldRevPrinting",
+                       "printTwoOnOne")
+WORD_LAYOUT_NOTE = "Word 按文档结构核验，实际排版以 Word 打开为准"
+
+
+def _local(el) -> str:
+    return el.tag.rsplit("}", 1)[-1]
+
+
+def _wattr(el, name: str, default=None):
+    return el.get(_q(_W, name), default) if el is not None else default
+
+
+def _twip_mm(v) -> float:
+    return float(v) / TWIP_PER_MM
+
+
+def _on(el) -> bool:
+    """A WordprocessingML on/off element: present and not val=0/false/off."""
+    return el is not None and str(_wattr(el, "val", "1")).lower() not in ("0", "false", "off")
+
+
+def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[str], dict, list]:
+    """STRICT structural equivalence with what ``deliverable.write_docx`` writes (WP2 R2 #3).
+    A Word file is only accepted when its layout is fully determined by its structure: one
+    section with exactly the specified A4 page and margins, no headers/footers/columns/gutter,
+    and a body of page paragraphs only — each with explicit single spacing (0 before/after,
+    line 240 auto), zero indentation, centred, ``pageBreakBefore`` on every paragraph but the
+    first, and exactly ONE inline picture with no effect extent / distance. Any deviation (an
+    extra paragraph or page break, an indent, a style, a frame, a stray run …) → error. Returns
+    ``(errors, geometry, pictures)``; position is COMPUTED from these properties, never assumed."""
+    errors: List[str] = []
+    body = root.find(_q(_W, "body"))
+    if body is None:
+        return ["Word 缺少正文（body）"], {}, []
+    if len(list(root.iter(_q(_W, "sectPr")))) != 1:
+        errors.append("Word 必须是单节文档（发现 %d 个节属性）" % len(list(root.iter(_q(_W, "sectPr")))))
+    kids = list(body)
+    sect = kids[-1] if kids and _local(kids[-1]) == "sectPr" else None
+    if sect is None:
+        return errors + ["Word 缺少节属性（sectPr）"], {}, []
+    for el in kids[:-1]:
+        if _local(el) != "p":
+            errors.append("正文里出现图片段落以外的元素 <%s>" % _local(el))
+    # ---- section: page, margins, no headers/footers/columns/gutter/grid snapping -------------
+    sz, mar = sect.find(_q(_W, "pgSz")), sect.find(_q(_W, "pgMar"))
+    if sz is None or mar is None:
+        return errors + ["节属性缺少页幅或页边"], {}, []
+    pw, ph = _twip_mm(_wattr(sz, "w", 0)), _twip_mm(_wattr(sz, "h", 0))
+    if abs(pw - _D.PAGE_MM[0]) > TOL_MM or abs(ph - _D.PAGE_MM[1]) > TOL_MM \
+            or str(_wattr(sz, "orient", "portrait")) != "portrait":
+        errors.append("页幅 %.1f×%.1f mm 不是 A4 竖放" % (pw, ph))
+    margins = {k: _twip_mm(_wattr(mar, k, 0)) for k in ("top", "left", "bottom", "right")}
+    for k, need in sp["margins_mm"].items():
+        if abs(margins[k] - need) > 0.2:
+            errors.append("页边「%s」%.1f mm 与规范 %g mm 不一致" % (k, margins[k], need))
+    if abs(_twip_mm(_wattr(mar, "gutter", 0))) > 0.05:
+        errors.append("页边有装订线（gutter），实际左页边会变")
+    for tag in ("headerReference", "footerReference"):
+        if sect.find(_q(_W, tag)) is not None:
+            errors.append("节里有页眉/页脚引用，可能挤压版心")
+    cols = sect.find(_q(_W, "cols"))
+    if cols is not None and int(_wattr(cols, "num", 1) or 1) != 1:
+        errors.append("节被分栏")
+    grid = sect.find(_q(_W, "docGrid"))
+    if grid is not None and str(_wattr(grid, "type", "default")) != "default":
+        errors.append("节启用了文档网格（会改变行高）")
+    allowed_sect = {"pgSz", "pgMar", "cols", "docGrid"}
+    for el in sect:
+        if _local(el) not in allowed_sect:
+            errors.append("节属性里有额外设置 <%s>" % _local(el))
+    if settings is not None:
+        for tag in _SETTINGS_FORBIDDEN:
+            if settings.find(_q(_W, tag)) is not None and _on(settings.find(_q(_W, tag))):
+                errors.append("文档设置启用了 %s（改变页面布局）" % tag)
+    if styles is not None:                         # the default paragraph style (no pStyle used)
+        for st in styles.iter(_q(_W, "style")):
+            if _wattr(st, "type") == "paragraph" and str(_wattr(st, "default", "0")) in ("1", "true"):
+                ppr = st.find(_q(_W, "pPr"))
+                for tag in ("framePr", "numPr", "pBdr", "sectPr"):
+                    if ppr is not None and ppr.find(_q(_W, tag)) is not None:
+                        errors.append("默认段落样式带 %s（会移动图片）" % tag)
+    # ---- page paragraphs ---------------------------------------------------------------------
+    paras = [el for el in kids[:-1] if _local(el) == "p"]
+    pictures = []
+    for i, p in enumerate(paras):
+        where = "第 %d 段" % (i + 1)
+        ppr = p.find(_q(_W, "pPr"))
+        props = {_local(c): c for c in (list(ppr) if ppr is not None else [])}
+        extra = sorted(set(props) - _PPR_ALLOWED)
+        if extra:
+            errors.append("%s带不允许的段落属性 %s（样式/编号/框架/边框会移动图片）" % (where, extra))
+        sp_el = props.get("spacing")
+        if sp_el is None or any(str(_wattr(sp_el, a, d)) != v for a, d, v in (
+                ("before", "0", "0"), ("after", "0", "0"), ("line", "", "240"),
+                ("lineRule", "", "auto"))) or _on(sp_el.find(_q(_W, "x"))) \
+                or str(_wattr(sp_el, "beforeAutospacing", "0")) not in ("0", "false") \
+                or str(_wattr(sp_el, "afterAutospacing", "0")) not in ("0", "false"):
+            errors.append("%s的段落间距不是「段前 0、段后 0、单倍行距」" % where)
+        ind = props.get("ind")
+        if ind is None or any(float(_wattr(ind, a, 0) or 0) != 0 for a in (
+                "left", "right", "start", "end", "firstLine", "hanging")):
+            errors.append("%s有缩进（或未显式置零），图片位置会偏移" % where)
+        jc = props.get("jc")
+        if jc is None or str(_wattr(jc, "val")) != "center":
+            errors.append("%s不是居中对齐" % where)
+        pbb = props.get("pageBreakBefore")
+        if i == 0 and _on(pbb):
+            errors.append("第 1 段带「段前分页」，会多出一页空白")
+        if i > 0 and not _on(pbb):
+            errors.append("第 %d 张图片前没有分页（段前分页），两张图会落在同一页" % (i + 1))
+        for el in p:
+            if _local(el) not in ("pPr", "r"):
+                errors.append("%s里有额外元素 <%s>" % (where, _local(el)))
+        for tag in _RUN_FORBIDDEN:
+            hits = list(p.iter(_q(_W, tag)))
+            if hits:
+                if tag == "t" and "".join(h.text or "" for h in hits).strip():
+                    errors.append("出现图片以外的文字段落（「%s」），会多出页面或挤动图片"
+                                  % "".join(h.text or "" for h in hits).strip()[:20])
+                elif tag == "br":
+                    errors.append("%s里有换行/分页符，会多出页面" % where)
+                elif tag not in ("t", "lastRenderedPageBreak"):
+                    errors.append("%s里有额外内容 <%s>" % (where, tag))
+        drawings = [r for r in p.findall(_q(_W, "r")) if r.find(_q(_W, "drawing")) is not None]
+        inl = p.findall(".//" + _q(_WP, "inline"))
+        if p.findall(".//" + _q(_WP, "anchor")):
+            errors.append("%s的图片是浮动版式（无法确定页面位置），应为嵌入式" % where)
+        if len(inl) != 1 or len(drawings) != 1:
+            errors.append("%s应恰好含一张行内图片，实有 %d 张" % (where, len(inl)))
+            continue
+        run = drawings[0]
+        for el in run:
+            if _local(el) == "rPr" and len(list(el)):
+                errors.append("%s图片所在文字段带字符格式（可能升降或缩放）" % where)
+            elif _local(el) not in ("rPr", "drawing"):
+                errors.append("%s图片所在文字段有额外内容 <%s>" % (where, _local(el)))
+        for r in p.findall(_q(_W, "r")):
+            if r is not run and any(_local(c) != "rPr" for c in r):
+                errors.append("%s有额外的文字段" % where)
+        el = inl[0]
+        if any(float(el.get(a, 0) or 0) != 0 for a in ("distT", "distB", "distL", "distR")):
+            errors.append("%s图片带环绕距离" % where)
+        eff = el.find(_q(_WP, "effectExtent"))
+        if eff is not None and any(float(eff.get(a, 0) or 0) != 0 for a in ("l", "t", "r", "b")):
+            errors.append("%s图片带效果外扩（effectExtent），实际占位变大" % where)
+        pictures.append((i, p, el))
+    geo = {"page_mm": (pw, ph), "margins": margins,
+           "body_mm": (pw - margins["left"] - margins["right"],
+                       ph - margins["top"] - margins["bottom"])}
+    return errors, geo, pictures
+
+
 def check_docx(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict[str, Any]:
+    """Word：严格结构等价核验（见 ``_docx_structure``）+ 逐页像素/字高/图号检查。页数 = 结构上
+    每段一页（只有在结构完全受控时这一推断才成立，否则直接判不通过）；图片位置由页边 + 居中 +
+    零缩进 + 段前 0 计算得出。``layout_verified = "structural"``：没有用 Word 排版引擎实测。"""
     import numpy as np
     from PIL import Image
     path = Path(path)
     try:
         with zipfile.ZipFile(str(path)) as zf:          # read-only; everything read up front
-            parts = {n: zf.read(n) for n in zf.namelist()
-                     if n in ("word/document.xml", "word/_rels/document.xml.rels")
+            names = set(zf.namelist())
+            parts = {n: zf.read(n) for n in names
+                     if n in ("word/document.xml", "word/_rels/document.xml.rels",
+                              "word/settings.xml", "word/styles.xml")
                      or n.startswith("word/media/")}
         root = ET.fromstring(parts["word/document.xml"])
         rels = ET.fromstring(parts["word/_rels/document.xml.rels"])
+        settings = ET.fromstring(parts["word/settings.xml"]) if "word/settings.xml" in parts \
+            else None
+        styles = ET.fromstring(parts["word/styles.xml"]) if "word/styles.xml" in parts else None
     except Exception as exc:
-        return _report(path, "docx", sources, [], ["Word 读不了：%s" % exc], -1)
+        rep = _report(path, "docx", sources, [], ["Word 读不了：%s" % exc], -1)
+        rep.update(layout_verified="structural", layout_note=WORD_LAYOUT_NOTE)
+        return rep
     rel_target = {r.get("Id"): r.get("Target") for r in rels.iter(_q(_PKG_REL, "Relationship"))}
-    body = root.find(_q(_W, "body"))
-    errors: List[str] = []
-    sect = body.find(_q(_W, "sectPr")) if body is not None else None
-    if sect is None:
-        return _report(path, "docx", sources, [], ["Word 缺少节属性（sectPr）"], -1)
-    sz, mar = sect.find(_q(_W, "pgSz")), sect.find(_q(_W, "pgMar"))
-    pw = float(sz.get(_q(_W, "w"))) / TWIP_PER_MM
-    ph = float(sz.get(_q(_W, "h"))) / TWIP_PER_MM
-    margins = {k: float(mar.get(_q(_W, k))) / TWIP_PER_MM for k in ("top", "left", "bottom", "right")}
-    for k, need in sp["margins_mm"].items():
-        if margins[k] < need - TOL_MM:
-            errors.append("页边「%s」%.1f mm 小于要求 %g mm" % (k, margins[k], need))
-    body_w = pw - margins["left"] - margins["right"]
-    body_h = ph - margins["top"] - margins["bottom"]
-
-    pictures = []          # (paragraph index, inline element)
-    paras = [p for p in body if p.tag == _q(_W, "p")]
-    for i, p in enumerate(paras):
-        inl = p.findall(".//" + _q(_WP, "inline"))
-        anc = p.findall(".//" + _q(_WP, "anchor"))
-        if anc:
-            errors.append("第 %d 段的图片是浮动版式（无法确定页面位置），应为嵌入式" % (i + 1))
-        text = "".join(t.text or "" for t in p.iter(_q(_W, "t"))).strip()
-        if text:
-            errors.append("出现图片以外的文字段落（「%s」），会多出页面或挤动图片" % text[:20])
-        for el in inl:
-            pictures.append((i, p, el))
-    for n, (i, p, _el) in enumerate(pictures):
-        if n == 0:
-            continue
-        ppr = p.find(_q(_W, "pPr"))
-        breaks = ppr is not None and ppr.find(_q(_W, "pageBreakBefore")) is not None
-        prev_br = any(br.get(_q(_W, "type")) == "page"
-                      for q in paras[pictures[n - 1][0]:i] for br in q.iter(_q(_W, "br")))
-        if not (breaks or prev_br):
-            errors.append("第 %d 张图片前没有分页，两张图会落在同一页" % (n + 1))
-        if len(p.findall(".//" + _q(_WP, "inline"))) > 1:
-            errors.append("同一段里有多张图片")
+    errors, geo, pictures = _docx_structure(root, settings, styles, sp)
     pages = []
-    for k, ((i, p, inl), src) in enumerate(zip(pictures, sources), start=1):
-        ext = inl.find(_q(_WP, "extent"))
-        w = float(ext.get("cx")) / EMU_PER_MM
-        h = float(ext.get("cy")) / EMU_PER_MM
-        blip = inl.find(".//" + _q(_A, "blip"))
-        rid = blip.get(_q(_R, "embed")) if blip is not None else None
-        target = rel_target.get(rid or "")
-        gray = None
-        extra = []
-        if not target:
-            extra.append("第 %d 页图片引用缺失" % k)
-        else:
-            name = target if target.startswith("word/") else "word/" + target.lstrip("/")
-            try:
-                with Image.open(io.BytesIO(parts[name])) as im:
-                    gray = np.asarray(im.convert("L"))
-            except Exception as exc:
-                extra.append("第 %d 页图片解不开：%s" % (k, exc))
-        if w > body_w + TOL_MM or h > body_h + TOL_MM:
-            extra.append("图片 %.1f×%.1f mm 大于版心 %.1f×%.1f mm（会被挤到下一页或裁切）"
-                         % (w, h, body_w, body_h))
-        # inline pictures sit at the top of the body, centred horizontally (paragraph centre)
-        left = margins["left"] + (body_w - w) / 2.0
-        px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
-        pages.append(_page_check(k, src, sp, (left, margins["top"], w, h), px, gray,
-                                 (pw, ph), extra))
-    return _report(path, "docx", sources, pages, errors, len(pictures))
+    if geo:
+        (pw, ph), margins, (body_w, body_h) = geo["page_mm"], geo["margins"], geo["body_mm"]
+        for k, ((i, p, inl), src) in enumerate(zip(pictures, sources), start=1):
+            ext = inl.find(_q(_WP, "extent"))
+            w = float(ext.get("cx")) / EMU_PER_MM
+            h = float(ext.get("cy")) / EMU_PER_MM
+            blip = inl.find(".//" + _q(_A, "blip"))
+            rid = blip.get(_q(_R, "embed")) if blip is not None else None
+            target = rel_target.get(rid or "")
+            gray = None
+            extra = []
+            if not target:
+                extra.append("第 %d 页图片引用缺失" % k)
+            else:
+                name = target if target.startswith("word/") else "word/" + target.lstrip("/")
+                try:
+                    with Image.open(io.BytesIO(parts[name])) as im:
+                        gray = np.asarray(im.convert("L"))
+                except Exception as exc:
+                    extra.append("第 %d 页图片解不开：%s" % (k, exc))
+            if w > body_w + TOL_MM or h > body_h + TOL_MM:
+                extra.append("图片 %.1f×%.1f mm 大于版心 %.1f×%.1f mm（会被挤到下一页或裁切）"
+                             % (w, h, body_w, body_h))
+            # computed, not assumed: centred (jc=center) with zero indents → horizontally centred
+            # in the body; zero space before on a page-initial paragraph → top of the body.
+            left = margins["left"] + (body_w - w) / 2.0
+            px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
+            pages.append(_page_check(k, src, sp, (left, margins["top"], w, h), px, gray,
+                                     (pw, ph), extra))
+    # One page per page-paragraph holds ONLY because the structure above is fully controlled; any
+    # structural deviation is already an error, so this count is never trusted on its own.
+    rep = _report(path, "docx", sources, pages, errors, len(pictures))
+    rep.update(layout_verified="structural", layout_note=WORD_LAYOUT_NOTE)
+    return rep
 
 
 # --------------------------------------------------------------------------- bundle
@@ -383,6 +524,12 @@ def main(argv=None) -> int:
     ap.add_argument("--min-text-px", type=float, default=_D.MIN_TEXT_PX)
     ap.add_argument("--json", dest="json_out", default=None)
     args = ap.parse_args(argv)
+    from patent_figure import pathguard
+    problem = pathguard.check_outputs([("--json", args.json_out)],
+                                      inputs=[args.document] + list(args.sources))
+    if problem:
+        print("用法错误：%s" % problem)
+        return 2
     sp = _D.spec(args.preset, args.dpi)
     sp["min_text_mm"], sp["min_text_px"] = args.min_text_mm, args.min_text_px
     srcs = [Source(Path(p).stem, i, Path(p), sp["area_mm"])

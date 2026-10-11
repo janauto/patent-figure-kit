@@ -34,10 +34,25 @@ sys.path.insert(0, str(SCRIPTS))
 
 from patent_figure import deliverable as _D  # noqa: E402
 from patent_figure import export as _EX  # noqa: E402
+from patent_figure import pathguard  # noqa: E402
 from patent_figure import project_io as _PIO  # noqa: E402
 from patent_figure import publish as _PUB  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
+#: Marker that makes a render work dir "ours" (pathguard.claim_workdir).
+WORKDIR_MARKER = ".export-workdir"
+
+
+def _guard(args, out: Path, work: Path, inputs):
+    """Every path this run writes — the package dir, the render work dir (a version store), the
+    cache, the report, the archive — checked BEFORE anything is written and again right before
+    the report / archive: not in any version store's reserved area (symlink / case aliases
+    included), not an input, and the declared pairs never overlap."""
+    return pathguard.check_outputs(
+        [("-o", out), ("--workdir", work), ("--cache", args.cache), ("--json", args.json_out),
+         ("--zip", args.zip)], inputs=inputs,
+        disjoint=[("-o", "--workdir"), ("--json", "-o"), ("--zip", "-o"), ("--json", "--zip"),
+                  ("--cache", "-o"), ("--json", "--workdir"), ("--zip", "--workdir")])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,7 +106,11 @@ def main(argv=None) -> int:
     plan.setdefault("source", {})["step"] = str(step.resolve())
 
     work = Path(args.workdir).resolve() if args.workdir else out.with_name(out.name + ".work")
-    work.mkdir(parents=True, exist_ok=True)
+    inputs = [plan_path, asm_path, step]
+    problem = _guard(args, out, work, inputs) or pathguard.claim_workdir(work, WORKDIR_MARKER)
+    if problem:
+        print("用法错误：%s" % problem, file=sys.stderr)
+        return EXIT_USAGE
     ws = SimpleNamespace(root=work, plan=work / "plan.json", cache=Path(args.cache).resolve()
                          if args.cache else work / "cache")
     _PIO.atomic_write_json(ws.plan, plan)
@@ -116,11 +135,19 @@ def main(argv=None) -> int:
         return EXIT_FAIL
 
     print("· 生成导出包并逐页核验…", flush=True)
+    late = _guard(args, out, work, inputs)
+    if late:
+        print("拒绝写导出包：%s" % late, file=sys.stderr)
+        return EXIT_USAGE
     with _EX.acquire(ws.root, rid) as pin:
         bundle = _EX.build_bundle(pin, out, variants=_EX.REST_VARIANTS[args.variant],
                                   formats=formats, dpi=args.dpi, run_cli=run_cli,
                                   sheet_preset=args.preset, description_txt=True,
                                   checklist_txt=True)
+    late = _guard(args, out, work, inputs)               # defence in depth before zip / report
+    if late:
+        print("拒绝写归档/报告：%s" % late, file=sys.stderr)
+        return EXIT_USAGE
     if args.zip:
         _EX.zip_dir(out, Path(args.zip).resolve())
     for it in bundle["items"]:

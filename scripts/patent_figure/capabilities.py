@@ -65,6 +65,8 @@ def export_capabilities() -> Dict[str, Any]:
         "min_text_mm": _D.MIN_TEXT_MM,
         "min_text_px": _D.MIN_TEXT_PX,
         "note": _D.CNIPA_NOTE,
+        "layout_verification": {"pdf": "file-geometry", "docx": "structural",
+                                "docx_note": _C.WORD_LAYOUT_NOTE},
         "files": ["说明书附图_递交版.pdf", "说明书附图_递交版.docx", "说明书附图_交底版.pdf",
                   "说明书附图_交底版.docx", "附图说明.txt", "核对清单.txt", "核验报告.json"],
     }

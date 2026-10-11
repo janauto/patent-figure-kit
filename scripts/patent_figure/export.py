@@ -176,37 +176,47 @@ def _fig_rows(figs: Sequence[dict], vdir: Path, suf: str) -> List[Dict[str, Any]
 def _build_document(variant: str, fmt: str, rows: List[Dict[str, Any]], sp: Dict[str, Any],
                     dest: Path, pages_cache: Dict[str, list]) -> Dict[str, Any]:
     """Write ONE final document (PDF or Word) for a variant, then check it page by page from the
-    written file (``deliverable_check``). A failing document is moved to ``_未通过核验/`` so the
-    deliverable folder only ever holds verified documents. Returns the check report + ``path``."""
+    written file (``deliverable_check``). EVERY non-ok outcome — a failed check, a checker that
+    raised, a write that raised after leaving a file behind — ends in the same place: the file
+    (if any) is moved to ``_未通过核验/`` and ``path`` records where it really is. Only a passing
+    document stays at the package root (WP2 R2 #4). Returns the check report + ``path``."""
     from patent_figure import deliverable as _D
     from patent_figure import deliverable_check as _C
     name = DOC_BASENAME % (VARIANT_LABEL[variant], fmt)
     title = "说明书附图（%s）" % VARIANT_LABEL[variant]
+    out = dest / name
+    layout = {"layout_verified": "structural" if fmt == "docx" else "file-geometry"}
+
+    def failed(errors: List[str]) -> Dict[str, Any]:
+        return dict({"file": name, "format": fmt, "ok": False, "pages": 0,
+                     "expected_pages": len(rows), "page_checks": [], "errors": errors}, **layout)
+
     missing = [r for r in rows if not _nonempty(Path(r["dxf"]))]
     if missing:
-        return {"file": name, "format": fmt, "ok": False, "pages": 0,
-                "expected_pages": len(rows), "page_checks": [],
-                "errors": ["版本内源图缺失或为空：%s" % "、".join(
-                    Path(r["dxf"]).name for r in missing)], "path": None}
-    try:
-        if variant not in pages_cache:
-            pages_cache[variant] = [_D.rasterize(Path(r["dxf"]), sp, r["figure"], r["number"])
-                                    for r in rows]
-        pages = pages_cache[variant]
-        out = dest / name
-        if fmt == "pdf":
-            _D.write_pdf(pages, out, title)
-        else:
-            _D.write_docx(pages, out, title)
-        report = _C.check_document(out, _C.sources_from(rows, sp["area_mm"]), sp)
-    except Exception as exc:
-        return {"file": name, "format": fmt, "ok": False, "pages": 0,
-                "expected_pages": len(rows), "page_checks": [],
-                "errors": ["生成失败：%s" % exc], "path": None}
-    report["path"] = name
-    if not report["ok"] and (dest / name).is_file():
+        report = failed(["版本内源图缺失或为空：%s" % "、".join(
+            Path(r["dxf"]).name for r in missing)])
+    else:
+        report = None
+        try:
+            if variant not in pages_cache:
+                pages_cache[variant] = [_D.rasterize(Path(r["dxf"]), sp, r["figure"],
+                                                     r["number"]) for r in rows]
+            if fmt == "pdf":
+                _D.write_pdf(pages_cache[variant], out, title)
+            else:
+                _D.write_docx(pages_cache[variant], out, title)
+        except Exception as exc:
+            report = failed(["生成失败：%s" % exc])
+        if report is None:
+            try:
+                report = _C.check_document(out, _C.sources_from(rows, sp["area_mm"]), sp)
+            except Exception as exc:                # an unverifiable document is a failed one
+                report = failed(["核验程序异常，无法确认这份文件合格：%s: %s"
+                                 % (type(exc).__name__, exc)])
+    report["path"] = name if report.get("ok") else None
+    if not report.get("ok") and out.exists():
         (dest / FAILED_DIR).mkdir(parents=True, exist_ok=True)
-        os.replace(str(dest / name), str(dest / FAILED_DIR / name))
+        os.replace(str(out), str(dest / FAILED_DIR / name))
         report["path"] = "%s/%s" % (FAILED_DIR, name)
     return report
 
@@ -236,6 +246,8 @@ def checklist_text(result: Dict[str, Any], bundle: Dict[str, Any], sp: Optional[
     docs = bundle.get("documents") or {}
     if not docs:
         lines.append("  （本次未生成 PDF / Word）")
+    if any(r.get("layout_verified") == "structural" for r in docs.values()):
+        lines.append("  注：Word 按文档结构核验，实际排版以 Word 打开为准（PDF 按文件里的页面几何核验）。")
     for name, rep in sorted(docs.items()):
         lines.append("  %s %s：%d/%d 页%s" % (
             "[通过]" if rep.get("ok") else "[不通过]", name, max(rep.get("pages", 0), 0),

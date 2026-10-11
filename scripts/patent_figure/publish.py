@@ -199,27 +199,43 @@ def render_candidate(ws_root, cache, rid: str, plan: Dict[str, Any], assembly_pa
 
 def prune_candidates(ws_root, keep_jobs: int = CANDIDATE_KEEP_JOBS,
                      protect: Optional[set] = None) -> list:
-    """Remove candidate versions of all but the ``keep_jobs`` most recent suggestion jobs
-    (a candidate version id is ``<job id>-c<k>``). Under the candidate store's own lock."""
+    """Reclaim candidate versions (a version id is ``<job id>-c<k>``) — under the candidate
+    store's OWN cross-process lock, the lock leases are registered under (WP2 R2 #5):
+
+    * never a version with a LIVE lease (a running suggestion job leases all its candidate ids
+      for its whole run; a preview read leases the version it serves) — leases are the WP1
+      cross-process ones, so another process's job/reader is protected too;
+    * never an UNSEALED version that is not marked cancelled (it may be mid-render);
+    * never a job in ``protect`` or among the ``keep_jobs`` most recently finished jobs;
+    everything else (sealed, or cancelled, of an older job, not leased) is removed."""
     vs = candidate_store(ws_root)
     if not vs.results.is_dir():
         return []
     protect = set(protect or set())
     with _V.state_lock(vs.root):
-        newest: Dict[str, float] = {}
+        leased = vs.referenced()                     # also sweeps stale (dead-pid) leases
         dirs = [d for d in vs.results.iterdir() if d.is_dir()]
+        newest: Dict[str, float] = {}
         for d in dirs:
+            if not vs.is_complete(d.name):
+                continue
             job = d.name.rsplit("-c", 1)[0]
             try:
                 newest[job] = max(newest.get(job, 0.0), d.stat().st_mtime)
             except OSError:
                 pass
-        keep = set(sorted(newest, key=lambda j: newest[j])[-keep_jobs:]) | protect
+        ranked = sorted(newest, key=lambda j: newest[j])
+        # (``[-0:]`` would be the WHOLE list — keep_jobs=0 must keep none, as in reclaim.)
+        keep = set(ranked[-keep_jobs:] if keep_jobs > 0 else []) | protect
         removed = []
         for d in dirs:
-            if d.name.rsplit("-c", 1)[0] not in keep:
-                shutil.rmtree(d, ignore_errors=True)
-                removed.append(d.name)
+            rid = d.name
+            if rid in leased or rid.rsplit("-c", 1)[0] in keep:
+                continue
+            if not vs.is_complete(rid) and not vs.is_cancelled(rid):
+                continue                             # possibly mid-render in another job/process
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(rid)
         return removed
 
 

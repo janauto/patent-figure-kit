@@ -267,9 +267,16 @@ def write_docx(pages: Sequence[Page], path: Path, title: str = "说明书附图"
     for i, page in enumerate(pages):
         para = doc.paragraphs[0] if (i == 0 and doc.paragraphs) else doc.add_paragraph()
         pf = para.paragraph_format
+        # Every layout-relevant property is set EXPLICITLY (direct formatting beats the template's
+        # docDefaults, which carry 1.15 line spacing + 10 pt after): centred, no indent, 0 before /
+        # after, single line spacing — the exact structure deliverable_check accepts.
         pf.alignment = WD_ALIGN_PARAGRAPH.CENTER
         pf.space_before = Pt(0)
         pf.space_after = Pt(0)
+        pf.line_spacing = 1.0
+        pf.left_indent = Mm(0)
+        pf.right_indent = Mm(0)
+        pf.first_line_indent = Mm(0)
         if i > 0:
             pf.page_break_before = True
         run = para.add_run()

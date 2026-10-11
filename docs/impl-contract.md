@@ -2381,3 +2381,29 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   `current.json` 字面量仍只在 `versions.py`；`--in-place` 仍只由 `studio_ext.render_version` 传。
 - `dxf_to_svg` 移到 `patent_figure/svg_preview.py`（纯 ezdxf），`plan_studio.dxf_to_svg` 是同一函数对象。
 - 导出包 CLI 与工作台走同一对服务（`publish` 渲染提交、`export` 钉住 + 打包），不另起打包或发布代码。
+
+### 14.8 修复轮 1（Codex R2）收敛
+
+- **AI 外发范围在序列化边界限定**（R2 #1）：`workbench_llm.draft_terms` 组装请求时，零件清单、
+  「已定名」参考、术语库、BOM 一律只保留**本次要起名的零件**（选中且空白）的条目；REST、MCP、浏览器子应用
+  共用这一处。测试在 `chat_json` 处截获真实载荷，断言未选零件名、其他零件的术语、术语库与 BOM 条目都不出现。
+- **新 CLI 的写入守卫**（R2 #2）：`patent_figure/pathguard.py` 复用 WP1 的 `fsid` 与
+  `versions.protected_path_reason`：每个输出（报告、归档、工作目录、缓存、`--instances`）在写入前、且长任务在
+  真正写之前再查一次——不得落进任何版本库保留区（符号链接 / 大小写别名一并识别）、不得是或包含输入文件、声明互斥的
+  输出不得重叠；工作目录必须是新的 / 空的或带本工具标记（`.suggest-workdir` / `.export-workdir`）。
+  `suggest_figure_plan.py`、`export_figure_package.py`、`analyze_assembly.py`（`-o`/`--instances`）、
+  `deliverable_check.py` 全部接入；`test_bypass_guard` 静态钉住「新的带输出路径的 CLI 必须走 pathguard」，
+  `tests/test_cli_paths.py` 对渲染 CLI 的版本库与工作台工程做跨入口碰撞。
+- **Word 严格结构等价核验**（R2 #3）：页数不再由图片数推断后直接采信——只有当结构完全受控时（单节；sectPr 页幅
+  A4 竖放、页边与规范相等、无装订线 / 页眉页脚 / 分栏 / 文档网格；正文只有页段落；每段显式「段前 0、段后 0、单倍
+  行距」、零缩进、居中、第 2 段起段前分页、第 1 段没有；每段恰一张行内图片、无效果外扩 / 环绕距离 / 字符格式；
+  无文字、换行、分页符、样式、编号、框架、边框）才按「一段一页」计页，图片位置由页边 + 居中 + 零缩进计算；任一偏离
+  → 不通过。`documents{}` 与核对清单标注 `layout_verified: "structural"` 与「Word 按文档结构核验，实际排版以 Word
+  打开为准」；PDF 标 `file-geometry`。写出端同步把这些属性全部显式写出（模板默认 1.15 倍行距不再生效）。
+- **核验异常即不通过并隔离**（R2 #4）：生成失败、检查器抛异常、核验不通过三种情形统一走隔离——文件移到
+  `_未通过核验/`，`path` 记录真实位置，包根目录与归档根都不残留。
+- **候选回收受租约保护**（R2 #5）：候选作业开跑即对自己全部候选 id 登记 WP1 跨进程租约，结束（含取消 / 异常）
+  释放；取消时半成品版本标 cancelled；预览读取在租约内读出字节再返回。`prune_candidates` 在候选库锁内排除全部活动
+  租约与未封口未取消的目录，只回收已封口或已取消、且不在最近 N 次作业里的版本（顺带修了 `keep_jobs=0` 时
+  `[-0:]` 切片保留全部的问题）。`tests/test_candidate_gc.py`：四作业交错、作业运行中被并发回收、中途取消、
+  预览读取期间回收、另一进程持租约直到其退出。

@@ -899,11 +899,20 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         elif area == "cand":
             # WP2 candidate trial renders: only a SEALED candidate version named by ?v= (white-
             # listed id) of the project's own candidate store — never the project's current.
+            # The read holds a lease on that version (R2 #5) and returns the bytes it read, so
+            # a concurrent reclaim can neither delete it mid-read nor between check and read.
             store = PUB.candidate_store(reg.need(pid).root / "studio")
-            vdir = store.sealed_dir(v) if v else None
-            if vdir is None:
+            if not v or not VS.RID_RE.match(v):
                 raise HTTPException(404, "没有这个已封口的候选版本")
-            path = vdir / name
+            store.ref(v)
+            try:
+                vdir = store.sealed_dir(v)
+                if vdir is None or not (vdir / name).is_file():
+                    raise HTTPException(404, "没有这个已封口的候选版本")
+                data = (vdir / name).read_bytes()
+            finally:
+                store.unref(v)
+            return Response(data, media_type=MEDIA[name.rsplit(".", 1)[1]])
         elif area == "snap":
             path = reg.need(pid).root / "studio" / "snapshots" / name
         elif area == "model":

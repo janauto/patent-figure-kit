@@ -198,7 +198,10 @@ top 25 / left 25 / bottom 15 / right 15 mm, drawing area `standard` 170×257 or 
 enlarged**. Every written document is then checked **page by page from the file itself**
 (`scripts/patent_figure/deliverable_check.py`): page size, margins, scaled minimum text height
 ≥ 3.5 mm and ≥ 24 px at the effective dpi, the 「图N」 caption actually inked on page N, page count =
-figure count, files complete. A document that fails is moved to `_未通过核验/` and its items are
+figure count, files complete (Word is verified **structurally** — one section, the exact page and
+margins, one centred inline picture per paragraph, explicit single spacing, page breaks only where
+expected — and the report says so: actual Word pagination is not measured). A document that fails
+— or whose check could not run — is moved to `_未通过核验/` and its items are
 `fail` with the reason — never reported ok (e.g. `--dpi 72` fails every page: 3.5 mm ≈ 9.9 px).
 DXF/DWG are source files for re-editing; DWG is `skip` with a reason when no converter is installed.
 The package also holds `附图说明.txt`, `核对清单.txt` (what a person must still check by hand —
@@ -206,7 +209,10 @@ there is no automatic comparison against the specification in M1) and `核验报
 only if every requested item passed. Re-check a document yourself with
 `python3 scripts/deliverable_check.py 说明书附图_递交版.pdf --sources 递交版_仅图号/fig1_filing.dxf …`.
 Exact image parameters follow the current 《电子申请文件格式要求说明》; the PDF check needs the optional
-package `pypdf` (`doctor.py` reports it).
+package `pypdf` (`doctor.py` reports it). Every output path of these CLIs (`-o`, `--workdir`,
+`--json`, `--zip`, `--cache`, analyze's `--instances`) is checked before writing: it may not be an
+input file, may not land in any version store's reserved area (symlink and letter-case aliases
+included), and a work directory must be new, empty or one the same tool created — otherwise exit `2`.
 
 ### Method flowcharts (方法流程图)
 

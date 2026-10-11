@@ -332,7 +332,15 @@ components:
         expected_pages: {type: integer, description: = 本版本结构附图数（流程图不进 PDF/Word）}
         errors: {type: array, items: {type: string}}
         page_checks: {type: array, items: {$ref: '#/components/schemas/PageCheck'}}
-        path: {type: string, nullable: true, description: 包内相对路径；不通过的在 _未通过核验/ 下}
+        path: {type: string, nullable: true, description: 包内相对路径；不通过（含核验程序异常）的在 _未通过核验/ 下}
+        layout_verified:
+          type: string
+          enum: [file-geometry, structural]
+          description: >
+            file-geometry = PDF 的页幅与图片位置取自文件里的绘制指令与像素；structural = Word 按文档结构
+            严格等价核验（单节、规范页幅页边、每段恰一张行内图片、零缩进单倍行距居中、第 2 段起段前分页、
+            无额外段落/分页/样式），没有用 Word 排版引擎实测
+        layout_note: {type: string, example: "Word 按文档结构核验，实际排版以 Word 打开为准"}
     ExportItem:
       description: 导出屏的逐「版本 × 格式」汇总行。
       type: object
@@ -395,6 +403,13 @@ components:
             min_text_mm: {type: number}
             min_text_px: {type: number}
             note: {type: string, description: 界面/README 旁注原文}
+            layout_verification:
+              type: object
+              description: 各格式的版面核验方式（pdf=file-geometry、docx=structural）与 Word 旁注
+              properties:
+                pdf: {type: string}
+                docx: {type: string}
+                docx_note: {type: string}
             files: {type: array, items: {type: string}}
         ai:
           type: object
@@ -570,6 +585,8 @@ paths:
       summary: AI 起名接力（语义冻结，契约 §14.4）
       description: >
         输入选中的 selectors；**只对空白术语**返回建议（confidence + reason），人填过的进 skipped；
+        外发载荷在序列化边界限定为「选中且空白」的零件——其他零件的名称、计划里的术语、术语库与 BOM
+        条目一律不外发（修复轮 1）；
         **默认不写 plan**——前端经 PUT /plan（If-Match）落盘；apply=true 时服务端经
         project_io.update_plan 只填空白并返回新 ETag（If-Match / plan_etag 不符 409）。
         没有大模型通道 → 200 + status=ai_not_configured（不发任何外部请求）。每次都返回

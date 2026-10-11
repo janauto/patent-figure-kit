@@ -49,6 +49,8 @@ def test_capabilities_announce_dwg_docx_presets_and_the_cnipa_note(tmp_path):
     assert ex["sheet_presets"]["conservative"]["area_mm"] == [165.0, 245.0]
     assert ex["page"]["margins_mm"] == {"top": 25.0, "left": 25.0, "bottom": 15.0, "right": 15.0}
     assert ex["dpi"]["default"] == 300 and ex["primary_formats"] == ["pdf", "docx"]
+    assert ex["layout_verification"] == {"pdf": "file-geometry", "docx": "structural",
+                                         "docx_note": "Word 按文档结构核验，实际排版以 Word 打开为准"}
     if not ex["dwg_available"]:
         assert ex["unavailable_reasons"]["dwg"]
     assert cap["ai"]["outbound_fields"] == ["part_names", "part_codes"]
@@ -128,6 +130,8 @@ def test_export_package_is_checked_page_by_page(live, export_job):
                  "说明书附图_交底版.docx"):
         doc = res["documents"][name]
         assert doc["ok"] and doc["pages"] == doc["expected_pages"] == 2, doc
+        assert doc["layout_verified"] == ("structural" if name.endswith(".docx")
+                                          else "file-geometry")
         for pg in doc["page_checks"]:
             assert pg["caption"] == "图%d" % pg["page"] and pg["caption_ink"] > 0
             assert pg["min_text_mm"] >= 3.5 and pg["min_text_px"] >= 24
@@ -363,3 +367,50 @@ def test_draft_terms_suggests_only_blank_terms_and_writes_only_with_apply(live, 
     assert out["plan_etag"] == r.headers["etag"] != etag
     plan = c.get("/v1/projects/%s/plan" % PID, headers=BEARER).json()
     assert next(t for t in plan["terms"] if t["selector"] == "SYN-A01")["term"] == "测试底座"
+
+
+def test_ai_outbound_payload_carries_only_the_selected_blank_parts(live, monkeypatch):
+    """R2 #1: intercept the REAL request body at ``chat_json`` (the serialisation boundary) —
+    with one part selected, nothing about other parts goes out: not their STEP names, not their
+    terms from the plan, not their glossary or BOM entries. REST and MCP alike."""
+    W, reg, c = live
+    _fresh_plan_with_blank(c)                                  # SYN-A01 blank, others named
+    studio = reg.get(PID).root / "studio"
+    (studio / "glossary.json").write_text(json.dumps({"terms": {
+        "SYN-A01": "术语甲", "SYN-B02": "术语乙机密", "SYN-C03": "术语丙机密"}},
+        ensure_ascii=False), encoding="utf-8")
+    (studio / "bom.json").write_text(json.dumps({"matched": {
+        "SYN-A01": {"name": "物料甲", "code": "SYN-A01"},
+        "SYN-D04": {"name": "物料丁机密", "code": "SYN-D04"}}}, ensure_ascii=False),
+        encoding="utf-8")
+    monkeypatch.setattr(W.LLM, "public_settings",
+                        lambda: {"provider": "deepseek", "provider_label": "测试通道"})
+    sent = []
+
+    def fake_chat_json(system, user, **kw):
+        sent.append(user)
+        return {"terms": [{"selector": "SYN-A01", "term": "底座", "confidence": "high",
+                           "reason": "测"}]}
+    monkeypatch.setattr(W.LLM, "chat_json", fake_chat_json)
+    others = ["SYN-B02", "SYN-C03", "SYN-D04", "SYN-E05", "SYN-F06", "SYN-G07", "SYN-H08",
+              "回转座", "术语乙机密", "术语丙机密", "物料丁机密"]
+    r = c.post("/v1/projects/%s/ai/draft-terms" % PID, headers=BEARER,
+               json={"selectors": ["SYN-A01"]})
+    assert r.status_code == 200 and r.json()["suggestions"], r.text
+    m = c.post("/mcp", headers=BEARER, json={
+        "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        "params": {"name": "ai_draft_terms",
+                   "arguments": {"project_id": PID, "selectors": ["SYN-A01"], "apply": False}}})
+    assert m.status_code == 200 and not m.json()["result"]["isError"], m.text
+    assert len(sent) == 2
+    for body in sent:
+        payload = json.loads(body)
+        assert "SYN-A01" in body and "术语甲" in body and "物料甲" in body
+        leaked = [o for o in others if o in body]
+        assert not leaked, leaked
+        parts = payload["产品零件（STEP 零件名、包围盒、装配路径）"]
+        assert [p["name"] for p in parts] == ["SYN-A01"]
+    # without selectors = every BLANK part — still never the named ones
+    sent.clear()
+    c.post("/v1/projects/%s/ai/draft-terms" % PID, headers=BEARER, json={})
+    assert sent and not [o for o in others if o in sent[0]]

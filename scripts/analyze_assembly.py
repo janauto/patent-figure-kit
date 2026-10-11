@@ -75,6 +75,15 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return EXIT_USAGE
 
+    # WP2 R2 #2: the outputs (-o, the new --instances sidecar) are checked before anything is
+    # written — never onto the STEP, never into a version store's reserved area, never the same
+    # file twice (patent_figure.pathguard, identity-based: symlink / case aliases included).
+    from patent_figure import pathguard
+    problem = pathguard.check_outputs([("-o", args.out), ("--instances", args.instances)],
+                                      inputs=[step], disjoint=[("-o", "--instances")])
+    if problem:
+        print("用法错误：%s" % problem, file=sys.stderr)
+        return EXIT_USAGE
     rows = [] if args.instances else None
     try:
         doc = build_assembly(step, include=args.include, exclude=args.exclude,
