@@ -220,6 +220,7 @@ async function aiNameSelection() {
       // 旧后端已把名称写进 plan 并保存：以服务端 plan 为准
       state.plan = res.plan;
       filled = res.filled || 0;
+      if (state.render) bus.emit('render-stale');   // plan 变了 → 旧渲染结果过期
       bus.emit('plan'); bus.emit('validate');
     } else {
       // 新后端只返回建议：前端把建议写入「选中且空白」的术语行（人工填过的不动）

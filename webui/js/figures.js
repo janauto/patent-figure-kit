@@ -4,6 +4,7 @@ import {
   bus, state, mutate, resolveMembers, labelCount, figureColor,
   setActiveFigure, setSelection, displayName,
 } from './state.js';
+import { esc } from './esc.js';
 
 let root;
 
@@ -27,14 +28,14 @@ function render() {
     const chips = (fig.members || []).map((m, i) => {
       const isGlob = /[*?\[]/.test(m);
       const cn = isGlob ? '' : displayName(m);
-      const n = isGlob ? `<i>${m}</i>` : (cn || m);
-      return `<span class="chip${cn ? ' chip-cn' : ' mono'}${isGlob ? ' chip-glob' : ''}" title="${m}">${n}
-        <button data-fig="${fig.id}" data-rm="${i}" title="移除">×</button></span>`;
+      const n = isGlob ? `<i>${esc(m)}</i>` : esc(cn || m);
+      return `<span class="chip${cn ? ' chip-cn' : ' mono'}${isGlob ? ' chip-glob' : ''}" title="${esc(m)}">${n}
+        <button data-fig="${esc(fig.id)}" data-rm="${i}" title="移除">×</button></span>`;
     }).join('');
-    return `<article class="fig-card${active}" data-fig="${fig.id}" style="--fig:${color}">
+    return `<article class="fig-card${active}" data-fig="${esc(fig.id)}" style="--fig:${color}">
       <header>
         <span class="fig-swatch"></span>
-        <input class="fig-caption" data-fig="${fig.id}" value="${fig.caption || ''}"
+        <input class="fig-caption" data-fig="${esc(fig.id)}" value="${esc(fig.caption || '')}"
                placeholder="图题，如：整体结构示意图">
         <button class="icon-btn" data-del="${fig.id}" title="删除本图">✕</button>
       </header>

@@ -9,7 +9,10 @@
 const params = new URLSearchParams(location.search);
 const path = location.pathname;
 const flatEntry = /(^|\/)(home|index)\.html$/.test(path);   // mock / 开发 / Pages 入口
-const forcedStatic = params.has('static') || location.protocol === 'file:';
+// 静态发布：build_static.py 会注入 <meta name="inkline-mode" content="static">，
+// 这样部署到任意静态目录/子路径（无 ?static）也能进只读静态模式。
+const metaStatic = !!document.querySelector('meta[name="inkline-mode"][content="static"]');
+const forcedStatic = params.has('static') || location.protocol === 'file:' || metaStatic;
 
 const fromUrl = params.get('token');
 if (fromUrl) { try { sessionStorage.setItem('studio-token', fromUrl); } catch { /* 隐私模式 */ } }
@@ -174,7 +177,8 @@ export const api = {
       if ((opts.formats || []).includes('pdf')) items.push({ format: 'pdf', label: '递交版 PDF', status: 'skip', reason: '现有后端不产出 PDF，接线后由新版提供' });
       api._lastExport = {
         export_id: 'legacy:export', job_id: 'legacy:export', variant: opts.variant || 'both',
-        zip: bundle.zip, download_url: `${base}api/export-file/${bundle.zip}`,
+        // 相对路径（不含 base）：下游统一用 previewUrl 只解析一次挂载前缀，避免 /p/{id}/p/{id}/… 重复
+        zip: bundle.zip, download_url: `api/export-file/${encodeURIComponent(bundle.zip)}`,
         items, manifest: files, notes: bundle.notes || [],
       };
       return { export_id: 'legacy:export', job_id: 'legacy:export' };
@@ -244,11 +248,33 @@ export const api = {
     if (MODE === 'legacy') return (await call('GET', `${base}api/structure`)).body;
     return null;
   },
+  async renameGroups(id, groups) {
+    if (MODE === 'static') throw new ApiError('静态演示站只读，改名不保存', 0, 'read_only');
+    if (MODE === 'legacy') return (await call('PUT', `${base}api/structure`, { groups })).body;
+    return (await call('PUT', `${base}v1/projects/${id}/structure`, { groups })).body;
+  },
 
   async llmStatus() {
     if (MODE === 'static') return (await manifest()).llm;
     if (MODE === 'legacy') { const s = await legacyState(); return legacyLlm(s.llm); }
     return (await call('GET', `${base}v1/llm/status`)).body;
+  },
+
+  // ---- AI 通道设置：legacy 接真实 /api/wb/settings；mock/static 为演示（不落盘）----
+  settingsSupported() { return MODE === 'legacy'; },
+  async getSettings() {
+    if (MODE === 'legacy') return (await call('GET', `${base}api/wb/settings`)).body;
+    const llm = await this.llmStatus();
+    return { llm: { configured_provider: 'auto', api_key_set: !!llm.configured, api_key_hint: '',
+      base_url: '', model: '', provider_label: llm.provider_label, key_source: '演示' }, demo: true };
+  },
+  async saveSettings(body) {
+    if (MODE === 'legacy') return (await call('PUT', `${base}api/wb/settings`, body)).body;
+    throw new ApiError('mock / 静态模式不保存设置（仅演示）', 0, 'demo');
+  },
+  async testConnection() {
+    if (MODE === 'legacy') return (await call('POST', `${base}api/wb/settings/test`)).body;
+    throw new ApiError('mock / 静态模式无法测试真实连接', 0, 'demo');
   },
 
   // ---- 流程图（方法专利）：legacy 走旧 /api/flowcharts*；live/static 无此后端，优雅降级 ----

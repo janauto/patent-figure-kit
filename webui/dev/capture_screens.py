@@ -37,6 +37,7 @@ SHOTS = [
     ("04-qa-loading",    f"{B}/index.html?project=gearbox&stage=qa&state=loading",    900),
     ("04-qa-success",    f"{B}/index.html?project=gearbox&stage=qa",             1400),
     ("04-qa-fail",       f"{B}/index.html?project=gearbox&stage=qa&state=fail",       1400),
+    ("04-qa-novalidate", f"{B}/index.html?project=gearbox&stage=qa&state=novalidate",  900),
     # 屏⑤ 导出
     ("05-export-locked", f"{B}/index.html?project=gearbox&stage=export&state=empty",  900),
     ("05-export-ready",  f"{B}/index.html?project=gearbox&stage=export",         1000),

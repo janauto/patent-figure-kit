@@ -12,7 +12,7 @@ import { toast } from './main.js';
 let root; let query = '';
 let pollTimer = null;
 
-const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+import { esc } from './esc.js';
 
 function sizeText(p) {
   const [w, d, h] = p.bbox_size || [];
@@ -33,11 +33,26 @@ function partRow(p, missing) {
   const warn = missing.has(p.name) ? '<span class="tag-warn">未入图</span>' : '';
   const degen = p.degenerate ? '<span class="tag-warn">退化</span>' : '';
   const cn = displayName(p.name);
-  return `<li class="part-row${sel}" data-name="${esc(p.name)}" title="${esc(p.name)}">
+  return `<li class="part-row${sel}" data-name="${esc(p.name)}" title="${esc(p.name)}"
+      role="option" aria-selected="${state.selection.has(p.name)}" tabindex="-1">
     <span class="part-name${cn ? '' : ' unnamed'}">${cn ? esc(cn) : '未命名'}</span>
     <span class="part-meta"><span class="mono">${esc(p.name)}</span> · ×${p.instances} · ${sizeText(p)}</span>
     <span class="part-flags">${dots}${warn}${degen}</span>
   </li>`;
+}
+
+let activePart = null;   // 键盘焦点所在的零件（listbox roving tabindex）
+function partRows() { return [...root.querySelectorAll('.part-row')]; }
+function setActivePart(name, focus) {
+  activePart = name;
+  partRows().forEach((li) => { li.tabIndex = li.dataset.name === name ? 0 : -1; });
+  if (focus) { const el = root.querySelector(`.part-row[data-name="${CSS.escape(name)}"]`); el?.focus(); }
+}
+function moveActive(dir) {
+  const rows = partRows(); if (!rows.length) return;
+  let idx = rows.findIndex((r) => r.dataset.name === activePart);
+  idx = idx < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, idx + dir));
+  setActivePart(rows[idx].dataset.name, true);
 }
 
 function structureHead() {
@@ -81,7 +96,7 @@ function groupBlock(g, partsByName, missing) {
       <button class="gbtn${hidden ? ' on' : ''}" data-hide="${g.id}" title="在 3D 中隐藏这一组">${hidden ? '显示' : '隐藏'}</button>
       <button class="gbtn" data-newfig="${g.id}" title="用这一组的零件新建一张分解图">＋建图</button>
     </div>
-    ${open ? `<ul class="part-list">${members.map((p) => partRow(p, missing)).join('')}</ul>` : ''}
+    ${open ? `<ul class="part-list" role="listbox" aria-multiselectable="true" aria-label="零件列表">${members.map((p) => partRow(p, missing)).join('')}</ul>` : ''}
   </section>`;
 }
 
@@ -100,7 +115,7 @@ function render() {
 
   const body = mode === 'structure' && groups.length
     ? `${structureHead()}<div class="sgroups">${groups.map((g) => groupBlock(g, partsByName, missing)).join('')}</div>`
-    : `<ul class="part-list">${parts.filter(matches).map((p) => partRow(p, missing)).join('')}</ul>`;
+    : `<ul class="part-list" role="listbox" aria-multiselectable="true" aria-label="零件列表">${parts.filter(matches).map((p) => partRow(p, missing)).join('')}</ul>`;
 
   root.innerHTML = `
     <div class="panel-head"><span class="stamp">01</span>零件
@@ -142,8 +157,22 @@ function bind() {
     state.partsMode = b.dataset.mode; render();
   }));
   root.querySelectorAll('.part-row').forEach((li) => {
-    li.addEventListener('click', () => toggleSelect(li.dataset.name));
+    li.addEventListener('click', () => { setActivePart(li.dataset.name); toggleSelect(li.dataset.name); });
+    li.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveActive(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); moveActive(-1); }
+      else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleSelect(li.dataset.name); }
+      else if (e.key === 'Home') { e.preventDefault(); const r = partRows(); if (r[0]) setActivePart(r[0].dataset.name, true); }
+      else if (e.key === 'End') { e.preventDefault(); const r = partRows(); if (r.length) setActivePart(r[r.length - 1].dataset.name, true); }
+    });
   });
+  // roving tabindex：让列表第一个可达项（或上次焦点项）可 Tab 进入；重渲后恢复焦点
+  const rows = partRows();
+  if (rows.length) {
+    const keep = rows.some((r) => r.dataset.name === activePart) ? activePart : rows[0].dataset.name;
+    const hadFocus = root.contains(document.activeElement) && document.activeElement.classList?.contains('part-row');
+    setActivePart(keep, hadFocus);
+  }
   root.querySelectorAll('[data-caret]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.caret;
     if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id);
@@ -157,11 +186,20 @@ function bind() {
       flashParts(g.parts);
     });
     if (b.classList.contains('gname')) b.addEventListener('dblclick', async () => {
+      if (api.readOnly) { toast('静态演示站只读，不能改结构组名', ''); return; }
       const g = groupById(b.dataset.gsel);
       const name = window.prompt('结构组名称', g.name);
       if (!name || name.trim() === g.name) return;
-      g.name = name.trim();                 // 本地改名（plan 不含结构名，随 plan 自然持久）
+      const old = g.name;
+      g.name = name.trim();                 // 乐观更新
       indexStructure(); render(); bus.emit('structure');
+      try {
+        const res = await api.renameGroups(state.projectId, [{ id: g.id, name: g.name }]);
+        if (res?.structure) { state.structure = res.structure; indexStructure(); render(); bus.emit('structure'); }
+      } catch (err) {                       // 保存失败：回滚 + 报错
+        g.name = old; indexStructure(); render(); bus.emit('structure');
+        toast('改名没保存：' + (err.hint || err.message), 'bad');
+      }
     });
   });
   root.querySelectorAll('[data-solo]').forEach((b) => b.addEventListener('click', () => {

@@ -84,14 +84,16 @@
       <p class="muted">AI 只做两件事：给零件起中文名、把方法描述整理成流程图语义。
         编号与版面一律由程序完成。</p>
       <fieldset class="radio">
-        <label><input type="radio" name="provider" value="auto" checked> 自动（有密钥用 API，否则用本机 MCP 客户端）</label>
+        <label><input type="radio" name="provider" value="auto" checked> 自动（有密钥用 API，否则用本机 CodeBuddy）</label>
         <label><input type="radio" name="provider" value="deepseek"> DeepSeek API</label>
-        <label><input type="radio" name="provider" value="mcp"> 本机 MCP 客户端（如 Claude Code、Codex，无需密钥）</label>
+        <label><input type="radio" name="provider" value="codebuddy"> 本机 CodeBuddy（无需密钥）</label>
       </fieldset>
       <label class="field">DeepSeek API 密钥
         <input type="password" name="api_key" autocomplete="off" placeholder="sk-…（留空则不修改）"></label>
-      <p class="muted">密钥保存在本机，仅本人可读，不写进任何工程文件或日志，页面上只显示末 4 位。</p>
+      <p class="muted" id="key-state"></p>
       <div class="dlg-actions">
+        <button type="button" class="btn" data-test>测试连接</button>
+        <span class="hint" id="test-result"></span>
         <button value="close" class="btn">关闭</button>
         <button type="button" class="btn primary" data-save>保存</button>
       </div>

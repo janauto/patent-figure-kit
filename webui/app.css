@@ -258,6 +258,11 @@ input, select, textarea { font: inherit; color: var(--ink-1); }
 .qa-blank .muted { max-width: 46ch; margin: 0 auto var(--s-5); }
 .qa-log { text-align: left; font: var(--t-mono); font-size: 11px; color: var(--ink-muted); background: var(--surface-2);
   border: 1px solid var(--hair); border-radius: var(--r-1); padding: 10px; margin-top: var(--s-4); max-height: 180px; overflow: auto; white-space: pre-wrap; }
+.qa-error { max-width: 640px; }
+.qa-issues { list-style: none; text-align: left; margin: var(--s-3) 0; display: flex; flex-direction: column; gap: 6px; }
+.qa-issues li { padding: 8px 10px; border-radius: var(--r-1); background: var(--seal-wash); border-left: 3px solid var(--seal); font: var(--t-body-sm); }
+.qa-issues li b { color: var(--seal-deep); margin-right: 6px; }
+.qa-issues .hint { color: var(--ink-muted); }
 .qa-top { display: flex; align-items: center; gap: var(--s-3); padding: 10px 16px; border-bottom: 1px solid var(--hair); background: var(--surface-1); flex-wrap: wrap; }
 .qa-tabs { display: flex; gap: 4px; }
 .qa-tab { font: var(--t-body-sm); padding: 5px 12px; border: 1px solid var(--hair-strong); border-radius: var(--r-1); background: var(--surface-2); color: var(--ink-muted); cursor: pointer; }
@@ -318,6 +323,8 @@ input, select, textarea { font: inherit; color: var(--ink-1); }
 .fmt-tag.src { border-color: var(--ink-faint); color: var(--ink-muted); }
 .fmt-what { font: var(--t-caption); }
 .fmt-why { font: var(--t-caption); color: var(--seal); margin-top: 6px; }
+.legacy-note { font: var(--t-body-sm); color: var(--ink-muted); padding: 10px 12px; border: 1px dashed var(--hair-strong); border-radius: var(--r-2); background: var(--surface-2); }
+.legacy-note b { color: var(--ink-1); }
 .reco { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: var(--s-4); padding: 12px 14px;
   border: 1px dashed var(--ok); border-radius: var(--r-2); background: var(--ok-wash); }
 .reco-mark { font: var(--t-caption); color: var(--ok); border: 1px solid var(--ok); border-radius: var(--r-1); padding: 1px 6px; }

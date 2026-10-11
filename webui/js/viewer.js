@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { api } from './api.js';
+import { esc } from './esc.js';
 import {
   bus, state, figureColor, figuresContaining, resolveMembers, toggleSelect, partNames,
   setSelection, groupOf, groupColor, displayName, globToRegExp,
@@ -254,7 +255,7 @@ function showTip(e, name) {
   if (!name || boxMode) { tip.hidden = true; return; }
   const g = groupOf(name);
   const cn = displayName(name);
-  tip.innerHTML = `<b>${cn || '未命名零件'}</b>${g ? `<span class="tip-g" style="--g:${groupColor(g.id)}">${g.name}</span>` : ''}<span class="tip-code">${name}</span>`;
+  tip.innerHTML = `<b>${esc(cn || '未命名零件')}</b>${g ? `<span class="tip-g" style="--g:${groupColor(g.id)}">${esc(g.name)}</span>` : ''}<span class="tip-code">${esc(name)}</span>`;
   const r = renderer.domElement.getBoundingClientRect();
   tip.style.left = `${e.clientX - r.left + 14}px`;
   tip.style.top = `${e.clientY - r.top + 12}px`;

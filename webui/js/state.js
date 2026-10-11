@@ -16,7 +16,7 @@ export const state = {
   plan: null,
   validate: null,       // 服务器 validate 结果 {ok, issues}
   render: null,         // 最近一次渲染结果
-  renderStale: false,   // plan/术语改过、当前结果已过期（需重新出图、锁定导出）
+  renderDigest: null,   // 该结果所绑定的 plan 摘要；与当前 plan 摘要不一致即过期
   rendering: false,
   candidates: [],       // F2-lite 候选分图
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
@@ -139,30 +139,67 @@ export function labelCount(fig) {
 
 // ---- 变更与持久化 ----
 let saveTimer = null;
+// plan 规范化摘要：绑定渲染结果与导出，证明「这张图对应的就是当前这份 plan」。
+// legacy 无 ETag 也能算；键排序后哈希，任何实质改动都会变。
+function canon(v) {
+  if (Array.isArray(v)) return `[${v.map(canon).join(',')}]`;
+  if (v && typeof v === 'object') {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+export function planDigest(plan = state.plan) {
+  if (!plan) return '';
+  const s = canon(plan);
+  let h = 5381;
+  for (let i = 0; i < s.length; i += 1) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+// 渲染摘要跨刷新持久化（每工程一条）
+const digestKey = (pid) => `inkline-render-digest-${pid}`;
+export function digestStoreGet(pid) { try { return sessionStorage.getItem(digestKey(pid)) || null; } catch { return null; } }
+export function digestStoreSet(pid, d) { try { if (d) sessionStorage.setItem(digestKey(pid), d); else sessionStorage.removeItem(digestKey(pid)); } catch { /* 隐私模式 */ } }
+
+// 当前渲染结果是否已过期：有结果、且其绑定摘要与当前 plan 摘要不一致（或无法证明一致）。
+export function renderStale() {
+  if (!state.render) return false;
+  if (!state.renderDigest) return true;        // 无法证明一致 → 视为过期（锁定导出）
+  return state.renderDigest !== planDigest();
+}
+
 export function mutate(fn) {
   fn(state.plan);
   state.saveState = 'dirty';
-  if (state.render) { state.renderStale = true; bus.emit('render-stale'); }   // 改计划即标旧结果过期
+  if (state.render) bus.emit('render-stale');   // 改计划 → 旧结果与缓存 ZIP 失效
   bus.emit('plan');
   bus.emit('save-state');
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flush, 600);
 }
 
-export async function flush() {
-  if (state.saveState !== 'dirty') return;
+let savingPromise = null;     // 在途保存；flush 会等它，避免渲染用到「保存前的计划」
+async function doSave() {
   if (api.readOnly) { state.saveState = 'readonly'; bus.emit('save-state'); return; }
   state.saveState = 'saving';
   bus.emit('save-state');
   try {
     const res = await api.putPlan(state.projectId, state.plan, state.planEtag);
     if (res.etag) state.planEtag = res.etag;
+    if (res.validate) { state.validate = res.validate; bus.emit('validate'); }   // 恢复校验反馈（术语错误）
     state.saveState = 'saved';
   } catch (err) {
     state.saveState = err.code === 'etag_conflict' ? 'conflict' : 'error';
     console.error('保存失败', err);
   }
   bus.emit('save-state');
+}
+export async function flush() {
+  clearTimeout(saveTimer);
+  if (savingPromise) await savingPromise;      // 先等在途保存落定
+  // 等完后若又有新改动（或本来就是脏的），再存一轮，确保保存的是最新 plan
+  if (state.saveState !== 'dirty') return;
+  savingPromise = doSave();
+  try { await savingPromise; } finally { savingPromise = null; }
 }
 
 export function setSelection(names) {
@@ -192,9 +229,19 @@ export async function boot(projectId) {
   state.homeUrl = data.home_url || null;
   state.llm = data.llm || null;
   state.structure = data.structure || null;
+  state.validate = data.validate || { ok: true, issues: [] };
   const planRes = await api.getPlan(projectId);
   state.plan = planRes.plan;
   state.planEtag = planRes.etag || null;
+  // 版本绑定要扛住「改完刷新」：摘要持久化到 sessionStorage，优先用存下的那份，
+  // 而不是刷新后无脑把「旧结果 + 新 plan」重新认定为一致（Codex #2 的刷新旁路）。
+  if (state.render) {
+    const stored = digestStoreGet(projectId);
+    if (stored) state.renderDigest = stored;                 // 用渲染时存下的摘要（可能已与当前 plan 不符 → 过期）
+    else { state.renderDigest = planDigest(state.plan); digestStoreSet(projectId, state.renderDigest); }
+  } else {
+    state.renderDigest = null;
+  }
   indexStructure();
   if (state.structure?.source === 'ai') state.view.colorBy = 'structure';
   const groups = state.structure?.groups || [];

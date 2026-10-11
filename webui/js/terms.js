@@ -3,6 +3,7 @@
 import { bus, state, mutate, partByName, setSelection, flush } from './state.js';
 import { api } from './api.js';
 import { aiName } from './state.js';
+import { esc } from './esc.js';
 
 let root;
 // 与服务器 FORBIDDEN_TEXT_PATTERNS 同源的前端预警（权威判定在服务器）。
@@ -36,10 +37,11 @@ function renderTerms() {
     return `<tr draggable="true" data-idx="${i}" class="${cls}">
       <td class="drag" title="拖动改发号顺序">⋮⋮</td>
       <td class="num${isNone ? ' num-off' : ''}">${i + 1}</td>
-      <td class="mono sel" title="点击在 3D 中选中">${t.selector}${qty > 1 ? `<em>×${qty}</em>` : ''}</td>
-      <td><input class="term-input${ai ? ` ai-${ai.confidence}` : ''}" data-idx="${i}" value="${t.term || ''}"
-                 placeholder="${aiName(t.selector) ? `AI：${aiName(t.selector)}` : '中文术语，如：底座'}"
-                 title="${issue ? issue.message : (ai ? `AI 起草（把握：${({ high: '高', medium: '中', low: '低' })[ai.confidence] || ai.confidence}）${ai.reason ? '：' + ai.reason : ''}` : '')}">${ai ? `<i class="ai-mark ai-${ai.confidence}" title="AI 起草">AI</i>` : ''}</td>
+      <td class="mono sel" title="选中在 3D 中高亮（Enter / Space）" tabindex="0" role="button"
+          aria-label="选中 ${esc(t.selector)}">${esc(t.selector)}${qty > 1 ? `<em>×${qty}</em>` : ''}</td>
+      <td><input class="term-input${ai ? ` ai-${esc(ai.confidence)}` : ''}" data-idx="${i}" value="${esc(t.term || '')}"
+                 placeholder="${esc(aiName(t.selector) ? `AI：${aiName(t.selector)}` : '中文术语，如：底座')}"
+                 title="${esc(issue ? issue.message : (ai ? `AI 起草（把握：${({ high: '高', medium: '中', low: '低' })[ai.confidence] || ai.confidence}）${ai.reason ? '：' + ai.reason : ''}` : ''))}">${ai ? `<i class="ai-mark ai-${esc(ai.confidence)}" title="AI 起草">AI</i>` : ''}</td>
       <td><select class="label-sel" data-idx="${i}">
         <option value="once"${t.label !== 'all' && t.label !== 'none' ? ' selected' : ''}>标一次</option>
         <option value="all"${t.label === 'all' ? ' selected' : ''}>逐实例</option>
@@ -72,10 +74,12 @@ function renderTerms() {
     }));
   });
   root.querySelectorAll('.sel').forEach((td) => {
-    td.addEventListener('click', () => {
+    const pick = () => {
       const idx = Number(td.parentElement.dataset.idx);
       setSelection([state.plan.terms[idx].selector].filter((s) => !/[*?\[]/.test(s)));
-    });
+    };
+    td.addEventListener('click', pick);
+    td.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
   });
   root.querySelectorAll('.row-del').forEach((btn) => {
     btn.addEventListener('click', () => mutate((plan) => {

@@ -1,14 +1,17 @@
 // 屏⑤ 导出：版本段控 + 格式矩阵 + 推荐组合 + 打包进度与清单。
 // 递交版 = PDF / Word；DXF / DWG 标「源文件，供再编辑」，不暗示能递交；DWG 不可用时禁选。
 // 四态：QA 未全过（禁用 + 指向 QA）/ 就绪 / 打包中 / 完成清单。
-import { state } from './state.js';
+import { state, renderStale, bus } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
+import { esc } from './esc.js';
 
 let host; let variant = 'both'; const picked = new Set(['pdf', 'docx', 'dxf']);
 let dwgOk = true; let packing = false; let result = null;
 const params = new URLSearchParams(location.search);
-const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+// 计划一改 → 作废已打好的 ZIP 与完成清单（Codex #2）：缓存不得跨 plan 版本复用
+bus.on('render-stale', () => { result = null; if (host) render(); });
 
 const FORMATS = [
   { k: 'pdf', name: '递交版 PDF', what: '每图一页 PDF，按形式要求排版的说明书附图文档（最终以受理为准）', tag: '递交' },
@@ -19,7 +22,7 @@ const FORMATS = [
 
 function gatePassed() {
   if (params.get('state') === 'empty') return false;
-  if (state.renderStale) return false;      // 计划改过、结果过期 → 锁定导出直到重渲
+  if (renderStale()) return false;          // 计划改过 / 无法证明版本一致 → 锁定导出直到重渲
   const r = state.render;
   return !!(r && r.ok && r.figures?.length && r.figures.every((f) => f.pass));
 }
@@ -33,7 +36,7 @@ function render() {
       manifest: ['递交版_图1.pdf', '递交版_图2.pdf', '交底版_说明书附图.docx', 'fig1.dxf', 'fig2.dxf', '附图说明.txt', '核对清单.txt'] };
   }
   if (!gatePassed() && force !== 'done') {
-    const stale = state.renderStale && state.render;
+    const stale = renderStale() && state.render;
     host.innerHTML = `<div class="exp-blank">
       <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
       <p class="stamp-fail">导出锁定</p>
@@ -45,38 +48,45 @@ function render() {
   }
   if (result) { renderDone(); return; }
 
+  const legacy = api.isLegacy;
   host.innerHTML = `
     <div class="exp-wrap">
       <section class="exp-sec">
         <h3>① 版本</h3>
-        <div class="seg big">
+        ${legacy ? `<div class="legacy-note">现有后端固定打包<b>递交版（仅图号）、交底版（图号+件号表）、原始出图</b>三版，
+          无法按版本筛选——接线新版后可选。</div>`
+        : `<div class="seg big">
           <button class="seg-btn ${variant === 'filing' ? 'on' : ''}" data-v="filing">递交版<span>仅图号</span></button>
           <button class="seg-btn ${variant === 'disclosure' ? 'on' : ''}" data-v="disclosure">交底版<span>图号 + 件号表</span></button>
           <button class="seg-btn ${variant === 'both' ? 'on' : ''}" data-v="both">两版都要<span>推荐</span></button>
-        </div>
+        </div>`}
       </section>
 
       <section class="exp-sec">
         <h3>② 格式</h3>
+        ${legacy ? '<p class="hint" style="margin-bottom:8px">现有后端固定产出 交底版 Word + DXF（各版）+ 附图说明；DWG 可选，PDF 暂不支持。</p>' : ''}
         <div class="fmt-grid">${FORMATS.map((f) => {
-          const noPdf = f.k === 'pdf' && api.isLegacy;        // 旧后端不产出 PDF（F1 属后续工作包）
+          const noPdf = f.k === 'pdf' && legacy;              // 旧后端不产出 PDF（F1 属后续工作包）
           const noDwg = f.k === 'dwg' && !dwgOk;
-          const disabled = noPdf || noDwg;
-          const on = picked.has(f.k) && !disabled;
+          const fixed = legacy && (f.k === 'docx' || f.k === 'dxf');   // 旧后端固定包含，不可取消
+          const disabled = noPdf || noDwg || fixed;
+          const on = fixed ? true : (picked.has(f.k) && !disabled);
           const why = noPdf ? '现有后端不产出 PDF——接线后由新版提供'
-            : (noDwg ? '本机未检出 DWG 转换器（ODA / LibreDWG），不可用' : '');
+            : (noDwg ? '本机未检出 DWG 转换器（ODA / LibreDWG），不可用'
+              : (fixed ? '现有后端固定包含，无法取消' : ''));
           return `<label class="fmt-card ${on ? 'on' : ''} ${disabled ? 'disabled' : ''}">
             <input type="checkbox" data-fmt="${f.k}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
-            <div class="fmt-head"><b>${f.name}</b><span class="fmt-tag ${f.tag === '源文件' ? 'src' : ''}">${f.tag}</span></div>
-            <p class="fmt-what">${f.what}</p>
-            ${why ? `<p class="fmt-why">${why}</p>` : ''}
+            <div class="fmt-head"><b>${esc(f.name)}</b><span class="fmt-tag ${f.tag === '源文件' ? 'src' : ''}">${esc(f.tag)}</span></div>
+            <p class="fmt-what">${esc(f.what)}</p>
+            ${why ? `<p class="fmt-why">${esc(why)}</p>` : ''}
           </label>`;
         }).join('')}</div>
         <div class="reco">
           <span class="reco-mark">推荐组合</span>
-          <b>递交版 PDF + 交底版 Word</b>
-          <span class="muted">递交版只放图号，按形式要求排版，供代理所用于递交稿（最终以受理为准）；交底版带件号表，给代理所核对。
-            DXF/DWG 是给要再编辑的人的源文件，不用于递交。</span>
+          <b>${legacy ? '交底版 Word + DXF' : '递交版 PDF + 交底版 Word'}</b>
+          <span class="muted">${legacy
+            ? '现有后端出交底版 Word（带件号表，给代理所核对）与 DXF 源文件；递交版 PDF 待接线新版后提供。'
+            : '递交版只放图号，按形式要求排版，供代理所用于递交稿（最终以受理为准）；交底版带件号表，给代理所核对。DXF/DWG 是给要再编辑的人的源文件，不用于递交。'}</span>
         </div>
       </section>
 

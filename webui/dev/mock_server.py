@@ -397,6 +397,7 @@ def project_detail(p):
     out.update(assembly=d.get("assembly"), structure=d.get("structure"),
                candidates=d.get("candidates", []), render=d.get("render"),
                plan=d.get("plan"),                      # 静态只读站要能读到 plan（S2-16）
+               validate=d.get("validate") or {"ok": True, "issues": []},
                model_url=f"/v1/projects/{p['id']}/model.glb")
     return out
 
@@ -404,11 +405,20 @@ def project_detail(p):
 def render_payload(pid, fail):
     """渲染作业的权威结果：gearbox 用真实出图；其它工程借用 gearbox 演示闭环。
     fail=True 时把图1 的三项 QA 翻成失败（渲染进程完成，但 QA 未过闸）。"""
+    if fail == "validate":                   # 计划未过校验：无图 + validate.issues + log（Codex #4）
+        return {"ok": False, "figures": [], "numerals": None, "figure_descriptions": [],
+                "validate": {"ok": False, "issues": [
+                    {"code": "E_TERM_FORBIDDEN", "severity": "error", "pointer": "/terms/3",
+                     "message": "术语 3 看起来像内部件号（PGB-0012-A），不是中文技术名词",
+                     "hint": "把 terms[].term 改成中文技术名词，如「行星销」"},
+                    {"code": "E_FIGURE_EMPTY", "severity": "error", "pointer": "/figures/1",
+                     "message": "图 fig2 没有任何成员零件", "hint": "在 3D 里框选零件后加入该图，或删掉这张空图"}]},
+                "log": "校验未通过，未渲染。\nE_TERM_FORBIDDEN /terms/3\nE_FIGURE_EMPTY /figures/1"}
     src = (PROJECTS.get("gearbox", {}).get("data") or {}).get("render")
     r = copy.deepcopy(src)
     if not r:
         return {"ok": True, "figures": [], "numerals": None, "figure_descriptions": []}
-    if fail:
+    if fail == "gate":
         f = r["figures"][0]
         rows = f.get("annotation", {}).get("table", {}).get("rows", [])
         f["qa"] = failing_qa(rows)
@@ -644,8 +654,8 @@ class Handler(BaseHTTPRequestHandler):
             p = PROJECTS.get(m.group(1))
             if not p:
                 return self._err(404, "没有这个工程")
-            fail = (q.get("fail") or [""])[0] == "gate"
-            # 渲染进程照常跑完（4 阶段都成功）；QA 的过/不过体现在 result 里，而不是作业失败
+            fail = (q.get("fail") or [""])[0]   # ""|"gate"|"validate"
+            # 渲染进程照常跑完（4 阶段都成功）；QA 的过/不过与校验失败体现在 result 里，而不是作业失败
             job = new_job("render", project_id=m.group(1),
                           result=render_payload(m.group(1), fail))
             return self._send(202, {"job_id": job["job_id"]})
@@ -714,7 +724,29 @@ class Handler(BaseHTTPRequestHandler):
             p["data"]["plan"] = plan
             p["plan_rev"] += 1
             p["plan_etag"] = 'W/"%s-%d"' % (p["id"], p["plan_rev"])
-            return self._send(200, {"ok": True}, extra={"ETag": p["plan_etag"]})
+            # 轻量校验：术语里出现件号形状的串报错（与真实后端 FORBIDDEN_TEXT 同源的演示）
+            issues = []
+            for i, t in enumerate(plan.get("terms", [])):
+                term = (t.get("term") or "").strip()
+                if term and re.search(r"[A-Za-z]{2,}[-_]?\d{3,}", term):
+                    issues.append({"code": "E_TERM_FORBIDDEN", "severity": "error",
+                                   "pointer": "/terms/%d" % i,
+                                   "message": "术语「%s」像内部件号，不是中文技术名词" % term,
+                                   "hint": "改成中文技术名词"})
+            validate = {"ok": not issues, "issues": issues}
+            p["data"]["validate"] = validate
+            return self._send(200, {"ok": True, "validate": validate}, extra={"ETag": p["plan_etag"]})
+        # 结构组改名（Codex #9）：更新内存结构，回读可见
+        m = re.fullmatch(r"/v1/projects/([\w\-]+)/structure", path)
+        if m:
+            p = PROJECTS.get(m.group(1))
+            if not p or not p.get("data") or not p["data"].get("structure"):
+                return self._err(404, "没有这个工程的结构")
+            for g in (body.get("groups") or []):
+                for grp in p["data"]["structure"].get("groups", []):
+                    if grp["id"] == g.get("id") and g.get("name"):
+                        grp["name"] = g["name"]
+            return self._send(200, {"structure": p["data"]["structure"]})
         return self._err(404, "未实现的 PUT：%s" % path)
 
     def api_delete(self, path, q):

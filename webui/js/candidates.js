@@ -5,7 +5,7 @@ import { api } from './api.js';
 import { toast } from './main.js';
 
 let root;
-const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+import { esc } from './esc.js';
 
 function candCard(c) {
   const pass = c.status === 'pass';

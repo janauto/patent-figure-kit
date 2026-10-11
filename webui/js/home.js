@@ -3,7 +3,7 @@ import { api, readOnly, isLegacy, token } from './api.js';
 import { applyBrand, DISPLAY_NAME } from './brand.js';
 
 const $ = (s, el = document) => el.querySelector(s);
-const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+import { esc } from './esc.js';
 const params = new URLSearchParams(location.search);
 const scene = params.get('scene') || '';          // empty | loading | error | ''
 const keepStatic = params.has('static');
@@ -299,12 +299,14 @@ function validateStep(file) {
   return '';
 }
 
+let pendingTitle = ''; let pendingAi = true;   // 完整上传上下文：重试不丢文件/标题/开关
 async function startUpload(file, titleOverride) {
   const err0 = validateStep(file);
   if (err0) { toast(err0, 'bad'); return; }
   pendingFile = file;
   const title = (titleOverride || $('#up-title')?.value?.trim() || file.name.replace(/\.(stp|step)$/i, ''));
-  const ai = $('#up-ai') ? $('#up-ai').checked : true;
+  const ai = $('#up-ai') ? $('#up-ai').checked : pendingAi;
+  pendingTitle = title; pendingAi = ai;
   try {
     const res = await api.createProject({ file, title, ai }, params.get('fail'));
     if (isLegacy) {                 // 旧后端：后台解析，回列表轮询到就绪
@@ -314,12 +316,12 @@ async function startUpload(file, titleOverride) {
       return;
     }
     runImportJob(res.job_id, res.project_id, title);
-  } catch (err) {
+  } catch (err) {                   // 不引用 try 内局部；用保存的上下文让重试可点
     openUpload();
     $('#upload-body').innerHTML = `<div class="up-progress"><h2 class="up-title">${esc(title)}</h2>
       <div class="banner error"><div><b>上传失败</b><p class="hint">${esc(err.hint || err.message)}</p></div>
       <button class="btn" id="up-retry">重试（保留原文件）</button></div></div>`;
-    bindUploadRun(res?.project_id, title);
+    $('#up-retry')?.addEventListener('click', () => { if (pendingFile) startUpload(pendingFile, pendingTitle); });
   }
 }
 
@@ -395,6 +397,41 @@ function paintCmdk(q) {
 }
 
 // ---------------------------------------------------------------- 对话框与全局键
+// ---------------------------------------------------------------- 设置 · AI 通道（legacy 接真实后端）
+async function openSettings() {
+  const f = $('#form-settings');
+  $('#test-result').textContent = ''; f.api_key.value = '';
+  try {
+    const s = await api.getSettings();
+    const llm = s.llm || {};
+    if (llm.configured_provider) f.provider.value = llm.configured_provider;
+    $('#key-state').textContent = llm.api_key_set
+      ? `已配置密钥（${llm.key_source || '本机'}，末 4 位 ${llm.api_key_hint || '····'}）`
+      : '尚未配置 DeepSeek 密钥';
+    $('#key-state').textContent += api.settingsSupported() ? '' : '（mock 演示，不落盘）';
+  } catch (e) { $('#key-state').textContent = '读取设置失败：' + (e.hint || e.message); }
+  $('#dlg-settings').showModal();
+}
+async function saveSettings() {
+  const f = $('#form-settings');
+  if (!api.settingsSupported()) { $('#dlg-settings').close(); toast('mock 模式不保存设置（仅演示）', ''); return; }
+  try {
+    const res = await api.saveSettings({ provider: f.provider.value,
+      deepseek: { api_key: f.api_key.value.trim() } });
+    f.api_key.value = '';
+    renderAiBadge(res.llm ? { configured: res.llm.provider !== 'none', provider_label: res.llm.provider_label } : null);
+    $('#key-state').textContent = res.llm?.api_key_set
+      ? `已配置密钥（末 4 位 ${res.llm.api_key_hint || '····'}）` : '尚未配置密钥';
+    toast('已保存 AI 通道设置', 'ok');
+  } catch (e) { toast('保存失败：' + (e.hint || e.message), 'bad'); }
+}
+async function testSettings() {
+  $('#test-result').textContent = '测试中…';
+  if (!api.settingsSupported()) { $('#test-result').textContent = 'mock 模式无法测试真实连接'; return; }
+  try { const r = await api.testConnection(); $('#test-result').textContent = `✓ ${r.provider || ''} 连接正常（${r.seconds ?? '?'}s）`; }
+  catch (e) { $('#test-result').textContent = '✗ ' + (e.hint || e.message); }
+}
+
 function initDialogs() {
   // 全局兜底：任何地方拖放文件都 preventDefault，避免浏览器把 .stp 当页面打开（导致整站被冲掉）
   ['dragover', 'drop'].forEach((t) => document.addEventListener(t, (e) => {
@@ -407,11 +444,13 @@ function initDialogs() {
     }
   }));
   document.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => {
-    $(`#dlg-${b.dataset.open}`).showModal();
+    if (b.dataset.open === 'settings') openSettings();
+    else $(`#dlg-${b.dataset.open}`).showModal();
   }));
   $('#no-step').addEventListener('click', () => $('#dlg-nostep').showModal());
   $('#nostep-example').addEventListener('click', () => { $('#dlg-nostep').close(); startExample('gearbox'); });
-  $('#form-settings [data-save]')?.addEventListener('click', () => { $('#dlg-settings').close(); toast('已保存 AI 通道设置（演示）', 'ok'); });
+  $('#form-settings [data-save]')?.addEventListener('click', saveSettings);
+  $('#form-settings [data-test]')?.addEventListener('click', testSettings);
   $('#upload-close').addEventListener('click', closeUpload);
   $('#cmd-open').addEventListener('click', openCmdk);
   document.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
@@ -435,11 +474,26 @@ function initDialogs() {
   $('#upload').addEventListener('click', (e) => { if (e.target.id === 'upload') closeUpload(); });
 }
 
+// 首页减少 token 泄露：legacy 下若 Cookie 会话可用，就把地址栏里的长期 token 去掉。
+// （子应用 /p/{id}/ 目前仍需 URL token——那由 WP1 的子应用 Cookie 鉴权合并后统一去除。）
+async function tidyToken() {
+  if (!isLegacy || !token || !params.has('token')) return;
+  try { document.cookie = `wb_token=${encodeURIComponent(token)}; path=/; SameSite=Strict`; } catch { /* */ }
+  try {
+    const r = await fetch('api/wb/state', { credentials: 'same-origin' });   // 不带 token 头，靠 Cookie
+    if (r.ok) {
+      const u = new URL(location.href); u.searchParams.delete('token');
+      history.replaceState(null, '', u.pathname + (u.search ? u.search : '') + u.hash);
+    }
+  } catch { /* Cookie 不可用就保留地址栏 token */ }
+}
+
 // ---------------------------------------------------------------- 启动
 async function start() {
   initDialogs();
   if (readOnly) document.body.classList.add('is-static');
   await loadList();
+  tidyToken();
   const up = params.get('upload');
   if (up) forceUpload(up);
 }

@@ -10,7 +10,7 @@ let showJson = false;
 let busy = '';
 
 const KIND = { start: '开始', process: '处理', decision: '判断', io: '输入/输出', end: '结束' };
-const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+import { esc } from './esc.js';
 
 async function refresh(select) {
   const res = await api.flowcharts();

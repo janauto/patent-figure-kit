@@ -1290,6 +1290,10 @@
       "max_labels_per_figure": 20
      }
     },
+    "validate": {
+     "ok": true,
+     "issues": []
+    },
     "model_url": "dev/fixtures/models/planetary-gearbox.glb"
    }
   },
@@ -2046,6 +2050,10 @@
       "max_labels_per_figure": 20
      }
     },
+    "validate": {
+     "ok": true,
+     "issues": []
+    },
     "model_url": "dev/fixtures/models/bench-vise.glb"
    }
   },
@@ -2510,6 +2518,10 @@
      "layout": {
       "max_labels_per_figure": 20
      }
+    },
+    "validate": {
+     "ok": true,
+     "issues": []
     },
     "model_url": "dev/fixtures/models/ball-valve.glb"
    }

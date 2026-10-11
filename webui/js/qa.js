@@ -1,14 +1,14 @@
 // 屏④ 出图结果与 QA：盖章总览 + 13 格点阵 + 每项「原因 / 建议 / 直达入口」。
 // 四态：未渲染 / 渲染中（SSE 日志）/ 全过（导出解锁）/ 有失败（导出禁用 + 修复引导）。
 // 预览里点 text[data-numeral] → 联动高亮对应零件（数据契约不变）。
-import { bus, state, setSelection } from './state.js';
+import { bus, state, setSelection, renderStale, planDigest, flush, digestStoreSet } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 
 let host; let activeFig = null; let variant = 'annotated'; let onlyFail = false;
 let rendering = false; let sub = null; const logs = [];
 const params = new URLSearchParams(location.search);
-const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+import { esc } from './esc.js';
 const VARIANTS = { annotated: '交底版 · 图号＋件号表', filing: '递交版 · 仅图号', raw: '原始出图' };
 
 // 13 项 QA 的前端静态映射：中文名 + 白话建议（面向不碰 JSON 的用户）+ 直达入口。
@@ -55,6 +55,13 @@ function currentRender() {
   const force = params.get('state');
   const r = state.render;
   if (force === 'empty') return null;
+  if (force === 'novalidate') {          // 四态截图：计划未过校验、无图
+    return { ok: false, figures: [],
+      validate: { ok: false, issues: [
+        { code: 'E_TERM_FORBIDDEN', severity: 'error', message: '术语 3「PGB-0012-A」像内部件号，不是中文技术名词', hint: '改成中文技术名词，如「行星销」' },
+        { code: 'E_FIGURE_EMPTY', severity: 'error', message: '图 fig2 没有任何成员零件', hint: '在 3D 里框选零件后加入该图，或删掉这张空图' }] },
+      log: '校验未通过，未渲染。\nE_TERM_FORBIDDEN /terms/3\nE_FIGURE_EMPTY /figures/1' };
+  }
   if (force === 'fail' && r?.figures?.length) {
     return { ...r, ok: false, figures: [applyFailOverride(r.figures[0]), ...r.figures.slice(1)] };
   }
@@ -107,6 +114,22 @@ function render() {
     host.querySelector('#qa-render')?.addEventListener('click', () => startRender());
     return;
   }
+  // --- 渲染返回了结果但没有图：计划未过校验或渲染异常（plan_studio 返回 {ok:false,figures:[],validate,log}）---
+  if (!(r.figures || []).length) {
+    const issues = (r.validate?.issues || []);
+    host.innerHTML = `<div class="qa-blank qa-error">
+      <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
+      <p class="stamp-fail">未出图</p>
+      <h2>这份计划没能渲染出图</h2>
+      <p class="muted">${issues.length ? '服务器校验没通过，先按下面的问题改计划：' : '渲染没有产出任何图。下面是服务器返回的信息：'}</p>
+      ${issues.length ? `<ul class="qa-issues">${issues.map((it) => `<li class="${esc(it.severity || '')}">
+        <b class="mono">${esc(it.code || '')}</b> ${esc(it.message || '')}${it.hint ? `<span class="hint"> ↳ ${esc(it.hint)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+      ${r.log ? `<pre class="qa-log">${esc(String(r.log).slice(-2000))}</pre>` : ''}
+      <button class="btn big" id="qa-retry">改完计划 · 重新出图</button>
+    </div>`;
+    host.querySelector('#qa-retry')?.addEventListener('click', () => startRender());
+    return;
+  }
   // --- 全过 / 有失败 ---
   const figs = (r.figures || []).slice().sort((a, b) => (a.number || 99) - (b.number || 99));
   if (!activeFig || !figs.find((f) => f.id === activeFig)) activeFig = figs[0]?.id;
@@ -119,7 +142,7 @@ function render() {
   const seg = vlist.length > 1 ? `<div class="seg">${vlist.map((v) =>
     `<button class="seg-btn ${v === variant ? 'on' : ''}" data-variant="${v}">${VARIANTS[v]}</button>`).join('')}</div>` : '';
 
-  const stale = state.renderStale;
+  const stale = renderStale();
   host.innerHTML = `
     ${stale ? `<div class="stale-bar">计划已修改，下面的预览可能过期——请重新出图后再导出。
       <button class="btn sm" id="rerender-stale">重新出图</button></div>` : ''}
@@ -198,22 +221,35 @@ async function applyResult(d) {
     catch (err) { rendering = false; toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return; }
   }
   state.render = result || null;
-  state.renderStale = false;
+  // 把结果绑定到「渲染时的那份 plan」的摘要——之后任何 plan 变更都会使它过期；并持久化扛刷新
+  state.renderDigest = result ? (result.plan_digest || renderDigestAtRender) : null;
+  digestStoreSet(state.projectId, (result && (result.figures || []).length) ? state.renderDigest : null);
   rendering = false;
   activeFig = null;
   bus.emit('rendered');
   const figs = result?.figures || [];
   const allPass = result?.ok && figs.length && figs.every((f) => f.pass);
-  toast(allPass ? `渲染完成，${figs.length} 张图 13 项 QA 全过`
-    : `渲染完成，但有 ${figs.filter((f) => !f.pass).length} 张未过闸——按提示修改后重渲`,
-    allPass ? 'ok' : 'bad');
+  let msg;
+  if (!figs.length) msg = (result?.validate && result.validate.ok === false)
+    ? '计划未过校验，未出图——按页面提示改计划后重渲' : '渲染没有产出任何图';
+  else if (allPass) msg = `渲染完成，${figs.length} 张图 13 项 QA 全过`;
+  else msg = `渲染完成，但有 ${figs.filter((f) => !f.pass).length} 张未过闸——按提示修改后重渲`;
+  toast(msg, allPass ? 'ok' : 'bad');
   render();
 }
 
+let renderDigestAtRender = null;
 async function startRender() {
+  // 先把本地改动落盘成功，确保渲染用的是当前这份 plan（Codex #2）
+  await flush();
+  if (state.saveState === 'error' || state.saveState === 'conflict') {
+    toast('计划没能保存，未渲染——请先解决保存问题（可能是与他处的冲突）。', 'bad');
+    return;
+  }
+  renderDigestAtRender = planDigest();   // 记下这次渲染绑定的 plan 摘要
   rendering = true; logs.length = 0; render();
   try {
-    const { job_id } = await api.render(state.projectId, { etag: state.planEtag });
+    const { job_id } = await api.render(state.projectId, { etag: state.planEtag, fail: params.get('rfail') });
     sub = api.jobEvents(job_id, {
       log(d) { logs.push(d.line); render(); },
       stage(d) { if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },

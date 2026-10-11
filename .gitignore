@@ -12,3 +12,6 @@ examples/planetary-gearbox/out/
 
 # WP3 mock 依赖的合成装配体（仅演示，需随仓库分发，供干净检出启动 mock）
 !webui/dev/fixtures/**/assembly.json
+
+# WP3 静态发布产物（由 build_static.py 生成，不入库）
+webui/dev/static-site/
