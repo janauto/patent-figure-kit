@@ -25,6 +25,9 @@
   * 契约：AI 起名走 POST /v1/projects/{pid}/ai/draft-terms，服务端写 plan 后前端重读 plan 与 ETag、随后保存不冲突；
     导出完成页按 Job.result 的「图号/版本/格式」清单逐图展示，下载 200
 
+修复轮 9（Codex R3i）新增：
+  * AI 起名前保存失败（409 冲突 / 500）：不发 AI 请求、本地人工修改不变、不提示「AI 起草完成」
+
 起 mock：python3 webui/dev/mock_server.py --port 8803
 起静态：python3 webui/dev/build_static.py && (cd webui/dev/static-site && python3 -m http.server 8808)
 跑：    python3 webui/dev/verify_ui.py        # 全过退出 0，任一失败退出 1
@@ -654,6 +657,48 @@ def test_ai_draft_contract(pg):
     check("AI 起名（WP1 路径）：服务端写 plan 后前端重读 plan 与 ETag，随后编辑保存不冲突", ok, f"{r}")
 
 
+
+def test_ai_blocked_on_failed_save(pg):
+    """R3i：AI 起名先 flush；保存返回 409（冲突）或 500（出错）时，必须终止——不发 AI 请求、保留本地人工修改、
+    不提示成功（旧实现照发 AI 请求，再用服务端 plan 覆盖本地，吞掉未保存的修改）。"""
+    out = {}
+    for code in (409, 500):
+        pg.goto(f"{B}/index.html?project=ball-valve&stage=plan", wait_until="networkidle")
+        pg.wait_for_timeout(2500)
+        out[code] = pg.evaluate("""async (code) => {""" + JS_HELPERS + """
+            const st = await import('/js/state.js');
+            st.mutate((p) => { p.terms.slice(0, 2).forEach((t) => { t.term = ''; }); }); await st.flush();   // 准备空白件
+            const realFetch = window.fetch; const aiPosts = [];
+            window.fetch = (url, init) => {
+              const m = (init && init.method) || 'GET'; const u = String(url);
+              if (m === 'PUT' && /\\/plan$/.test(u)) {
+                return Promise.resolve(new Response(JSON.stringify({ detail: code === 409 ? 'plan 已被他人修改' : '服务器出错' }),
+                  { status: code, headers: { 'Content-Type': 'application/json' } }));
+              }
+              if (m === 'POST' && /ai\\/draft-terms/.test(u)) aiPosts.push(u);
+              return realFetch(url, init);
+            };
+            try {
+              const edit = uniq('人工改名');
+              st.mutate((p) => { p.terms[1].term = edit; });                  // 未落盘的人工修改
+              st.setSelection([st.state.plan.terms[0].selector]); await sleep(250);
+              const btn = document.querySelector('#afb-name');
+              if (!btn) return { noBtn: true };
+              btn.click();
+              await waitFor(() => (document.querySelector('#toast')?.textContent || '').length > 0
+                && !document.querySelector('#ai-floatbar .spin'), 5000);
+              await sleep(300);
+              return { aiPosts: aiPosts.length, kept: st.state.plan.terms[1].term === edit,
+                       toast: document.querySelector('#toast')?.textContent || '', saveState: st.state.saveState };
+            } finally { window.fetch = realFetch; }
+        }""", code)
+    def good(r):
+        return (not r.get("noBtn") and r.get("aiPosts") == 0 and r.get("kept")
+                and "AI 起草完成" not in r.get("toast", "") and "保存未成功" in r.get("toast", ""))
+    check("AI 起名前保存失败（409 / 500）：不发 AI 请求、本地人工修改保留、不提示成功", good(out[409]) and good(out[500]),
+          f"409={out[409]} 500={out[500]}")
+
+
 def test_unsaved_lock(pg):
     pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2500)
@@ -730,7 +775,7 @@ def main():
         for fn in (test_xss, test_save_race, test_concurrent_flush, test_flush_noop_then_edit,
                    test_flush_after_failure, test_unsaved_lock, test_render_evidence_race, test_export_late_callback,
                    test_live_export_conflict, test_render_job_failure, test_render_late_failure_read,
-                   test_ai_draft_contract,
+                   test_ai_draft_contract, test_ai_blocked_on_failed_save,
                    test_candidate_resolve, test_candidate_bad_member, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:

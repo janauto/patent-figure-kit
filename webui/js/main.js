@@ -215,14 +215,26 @@ async function aiNameSelection() {
   bar.querySelector('#afb-name').outerHTML = '<span class="hint"><i class="spin"></i> 正在读代号、起中文名…</span>';
   try {
     await flush();                                   // 先落盘本地改动：后端会在服务端直接写 plan
-    const v0 = state.editVersion;
+    // 保存没成功（409 冲突 / 500 等）或还有未落盘的编辑：绝不发 AI 请求——服务端起名基于的是旧 plan，
+    // 回来再用服务端 plan 替换本地就会吞掉这些人工修改（Codex R3i）。保留本地计划，让用户先解决保存问题。
+    if (state.saveState === 'error' || state.saveState === 'conflict' || state.editVersion > state.savedVersion) {
+      toast(state.saveState === 'conflict'
+        ? '保存未成功（计划已在别处被修改），请先解决冲突再让 AI 起名——本地改动已保留。'
+        : '保存未成功，请先解决保存问题再让 AI 起名——本地改动已保留。', 'bad');
+      updateFloatbar();
+      return;
+    }
+    const v0 = state.editVersion; const e0 = state.planEtag;
     const res = await api.draftTerms(projectId);     // 新旧后端都是服务端起名、只填空白、写入 plan（不分选中）
     const sugg = {};
     (res.suggestions || []).forEach((s) => { sugg[s.selector] = s; });
     state.aiSuggestions = { ...state.aiSuggestions, ...sugg };
     bus.emit('ai-suggestions');
     const filled = res.filled || 0;
-    if (state.editVersion !== v0) {
+    // 用服务端 plan 替换本地前再核一次：等待期间没有新编辑、没有保存失败、本地版本没被别的保存推进
+    const unchanged = state.editVersion === v0 && state.savedVersion >= v0 && state.planEtag === e0
+      && state.saveState !== 'error' && state.saveState !== 'conflict';
+    if (!unchanged) {
       // 等待期间本地又改了计划：不拿服务端 plan 覆盖本地编辑（下次保存会按 ETag 冲突提示）
       toast('AI 已在服务端起名，但等待期间本地计划又有改动——为不覆盖你的编辑，请刷新后查看 AI 名称。', 'bad');
       updateFloatbar();
