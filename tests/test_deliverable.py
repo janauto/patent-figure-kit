@@ -358,6 +358,50 @@ def test_word_picture_and_inherited_formatting_are_whitelisted(two, part, inject
     assert expect in msgs, msgs
 
 
+@pytest.mark.parametrize("where", ["docPr", "cNvPr"])
+@pytest.mark.parametrize("value", ["1", "true"])
+def test_word_hidden_picture_is_refused(two, where, value):
+    """R2c: a picture marked hidden (on wp:docPr or pic:nvPicPr/pic:cNvPr) is not displayed by
+    Word — the full check_docx must refuse it, by name."""
+    pytest.importorskip("docx")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    tag = '<wp:docPr id="1"' if where == "docPr" else '<pic:cNvPr id="0"'
+    bad = tmp / "hidden.docx"
+    _rewrite_docx(good, bad, lambda x: x.replace(tag, tag + ' hidden="%s"' % value, 1))
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    assert any("隐藏" in e for e in rep["errors"]), rep["errors"]
+
+
+@pytest.mark.parametrize("inject", [
+    lambda x: x.replace('<wp:docPr id="1"', '<wp:docPr id="1" title="x"', 1),           # attribute
+    lambda x: x.replace("<pic:cNvPicPr/>", '<pic:cNvPicPr preferRelativeResize="0"/>', 1),
+    lambda x: x.replace('<a:prstGeom prst="rect"/>',
+                        '<a:prstGeom prst="rect"/><a:ln w="9525"/>', 1),             # element
+    lambda x: x.replace('<wp:extent ', '<wp:extent foo="1" ', 1),
+    lambda x: x.replace("<w:r><w:drawing>", '<w:r w:rsidR="00A1"><w:drawing>', 1),
+    lambda x: x.replace('<w:jc w:val="center"/>', '<w:jc w:val="center" w:extra="1"/>', 1),
+])
+def test_word_unknown_attribute_or_element_is_refused(two, inject):
+    """R2c: the whitelist is closed — any attribute or child the writer does not produce, anywhere
+    in the picture or on the page paragraph, fails the check (no more one-off blind spots)."""
+    pytest.importorskip("docx")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    bad = tmp / "unk.docx"
+    _rewrite_docx(good, bad, inject)
+    with zipfile.ZipFile(str(good)) as a, zipfile.ZipFile(str(bad)) as b:
+        assert a.read("word/document.xml") != b.read("word/document.xml"), "注入没有生效"
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    assert any("未知" in e for e in rep["errors"]), rep["errors"]
+
+
 def test_written_word_sets_every_layout_property_explicitly(two):
     pytest.importorskip("docx")
     tmp, rows = two

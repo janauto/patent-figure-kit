@@ -334,60 +334,131 @@ def _inherited_layout(styles) -> List[str]:
     return errors
 
 
+def _zero(v) -> bool:
+    try:
+        return float(v) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _any(_v) -> bool:
+    return True
+
+
+def _is(*vals):
+    return lambda v: str(v) in vals
+
+
+def _int(v) -> bool:
+    try:
+        int(str(v))
+        return True
+    except ValueError:
+        return False
+
+
+def _N(ns: str, local: str) -> str:
+    return _q(ns, local)
+
+
+# The writer's picture, element by element: (tag, {attribute: validator}, [(child spec, min, max)]).
+# Anything NOT listed — an unknown attribute or child anywhere in the subtree — is refused, so a
+# property nobody thought of (``hidden``, ``title``, effects, locks …) cannot slip through again
+# (WP2 R2c). ``hidden`` is additionally reported by name.
+_FILL_RECT = (_N(_A, "fillRect"), {"l": _zero, "t": _zero, "r": _zero, "b": _zero}, [])
+_PIC_SPEC = (_N(_PIC, "pic"), {}, [
+    ((_N(_PIC, "nvPicPr"), {}, [
+        ((_N(_PIC, "cNvPr"), {"id": _int, "name": _any, "descr": _any}, []), 1, 1),
+        ((_N(_PIC, "cNvPicPr"), {}, []), 1, 1)]), 1, 1),
+    ((_N(_PIC, "blipFill"), {}, [
+        ((_N(_A, "blip"), {_N(_R, "embed"): _any}, []), 1, 1),
+        ((_N(_A, "srcRect"), {"l": _zero, "t": _zero, "r": _zero, "b": _zero}, []), 0, 1),
+        ((_N(_A, "stretch"), {}, [(_FILL_RECT, 1, 1)]), 1, 1)]), 1, 1),
+    ((_N(_PIC, "spPr"), {}, [
+        ((_N(_A, "xfrm"), {"rot": _zero, "flipH": _is("0", "false"), "flipV": _is("0", "false")}, [
+            ((_N(_A, "off"), {"x": _zero, "y": _zero}, []), 1, 1),
+            ((_N(_A, "ext"), {"cx": _int, "cy": _int}, []), 1, 1)]), 1, 1),
+        ((_N(_A, "prstGeom"), {"prst": _is("rect")}, [
+            ((_N(_A, "avLst"), {}, []), 0, 1)]), 1, 1)]), 1, 1)])
+_INLINE_SPEC = (_N(_WP, "inline"),
+                {"distT": _zero, "distB": _zero, "distL": _zero, "distR": _zero}, [
+    ((_N(_WP, "extent"), {"cx": _int, "cy": _int}, []), 1, 1),
+    ((_N(_WP, "effectExtent"), {"l": _zero, "t": _zero, "r": _zero, "b": _zero}, []), 0, 1),
+    ((_N(_WP, "docPr"), {"id": _int, "name": _any, "descr": _any}, []), 1, 1),
+    ((_N(_WP, "cNvGraphicFramePr"), {}, [
+        ((_N(_A, "graphicFrameLocks"), {"noChangeAspect": _is("1", "true")}, []), 0, 1)]), 0, 1),
+    ((_N(_A, "graphic"), {}, [
+        ((_N(_A, "graphicData"), {"uri": _is(_PIC_URI)}, [(_PIC_SPEC, 1, 1)]), 1, 1)]), 1, 1)])
+
+
+def _short(tag: str) -> str:
+    for pre, ns in (("wp", _WP), ("a", _A), ("pic", _PIC), ("r", _R), ("w", _W)):
+        tag = tag.replace("{%s}" % ns, pre + ":")
+    return tag
+
+
+def _conform(el, spec, path: str, errors: List[str]) -> None:
+    """Exact structural conformance of ``el`` to ``spec`` (see ``_PIC_SPEC``)."""
+    tag, attrs, children = spec
+    for name, value in el.attrib.items():
+        check = attrs.get(name)
+        if check is None:
+            errors.append("%s 带未知属性 %s=%r（只允许写出端产生的属性）" % (path, _short(name), value))
+        elif not check(value):
+            errors.append("%s 的属性 %s=%r 不是写出端的取值" % (path, _short(name), value))
+    allowed = {c[0][0]: c for c in children}
+    counts: Dict[str, int] = {}
+    for child in el:
+        ctag = child.tag
+        if ctag not in allowed:
+            errors.append("%s 下有未知子元素 <%s>" % (path, _short(ctag)))
+            continue
+        counts[ctag] = counts.get(ctag, 0) + 1
+        _conform(child, allowed[ctag][0], "%s/%s" % (path, _short(ctag)), errors)
+    for ctag, (_cspec, lo, hi) in allowed.items():
+        n = counts.get(ctag, 0)
+        if not lo <= n <= hi:
+            errors.append("%s 下 <%s> 应为 %d–%d 个，实有 %d" % (path, _short(ctag), lo, hi, n))
+
+
 def _picture_whitelist(inl, where: str) -> List[str]:
-    """The picture inside ``wp:inline`` must be EXACTLY what the writer produces: one ``pic:pic``,
-    a plain blip (no effects), stretched to the full frame with NO crop, a rectangle with an
-    un-rotated, un-flipped transform at the origin whose size equals ``wp:extent`` — otherwise the
-    displayed picture is not the media file mapped onto the extent (R2b #2)."""
+    """The picture inside ``wp:inline`` must be EXACTLY what the writer produces — every element
+    and every attribute is on a whitelist (``_INLINE_SPEC``), so the displayed picture is the
+    media file mapped onto the extent, visible, uncropped, unrotated (R2b #2 / R2c). Hidden
+    objects are named explicitly; the transform size must equal the extent."""
     errors: List[str] = []
-    graphic = inl.find(_q(_A, "graphic"))
-    gdata = graphic.find(_q(_A, "graphicData")) if graphic is not None else None
-    pics = gdata.findall(_q(_PIC, "pic")) if gdata is not None else []
-    if gdata is None or gdata.get("uri") != _PIC_URI or len(pics) != 1 or len(list(gdata)) != 1:
-        return ["%s的图形不是单张图片（DrawingML picture）" % where]
-    pic = pics[0]
-    ext = inl.find(_q(_WP, "extent"))
-    bf = pic.find(_q(_PIC, "blipFill"))
-    if bf is None:
-        return ["%s的图片缺少填充（blipFill）" % where]
-    for el in bf:
-        name = _local(el)
-        if name == "blip":
-            if len(list(el)):
-                errors.append("%s的图片带图像效果 %s" % (where, [_local(c) for c in el]))
-        elif name == "srcRect":
-            if any(float(el.get(a, 0) or 0) != 0 for a in ("l", "t", "r", "b")):
-                errors.append("%s的图片被裁剪（srcRect %s）" % (where, dict(el.attrib)))
-        elif name == "stretch":
-            fr = el.find(_q(_A, "fillRect"))
-            if fr is None or len(list(el)) != 1 or \
-                    any(float(fr.get(a, 0) or 0) != 0 for a in ("l", "t", "r", "b")):
-                errors.append("%s的图片不是满框拉伸（fillRect 有偏移）" % where)
-        else:
-            errors.append("%s的图片填充方式不受控 <%s>" % (where, name))
-    if bf.find(_q(_A, "stretch")) is None:
-        errors.append("%s的图片不是满框拉伸" % where)
-    sppr = pic.find(_q(_PIC, "spPr"))
-    kids = [_local(c) for c in (list(sppr) if sppr is not None else [])]
-    if sppr is None or sorted(kids) != ["prstGeom", "xfrm"]:
-        errors.append("%s的图片形状属性不受控 %s" % (where, kids))
-        return errors
-    geom = sppr.find(_q(_A, "prstGeom"))
-    if geom.get("prst") != "rect":
-        errors.append("%s的图片形状不是矩形（%s）" % (where, geom.get("prst")))
-    xfrm = sppr.find(_q(_A, "xfrm"))
-    if float(xfrm.get("rot", 0) or 0) != 0:
+    for el in (inl.find(_q(_WP, "docPr")),
+               inl.find(".//%s/%s" % (_q(_PIC, "nvPicPr"), _q(_PIC, "cNvPr")))):
+        if el is not None and str(el.get("hidden", "0")).lower() in ("1", "true", "on"):
+            errors.append("%s的图片被设为隐藏（%s hidden=%s），页面上不会显示"
+                          % (where, _short(el.tag), el.get("hidden")))
+    # the common edits, named in plain words (the exact whitelist below catches everything else)
+    crop = inl.find(".//" + _q(_A, "srcRect"))
+    if crop is not None and not all(_zero(crop.get(a, 0)) for a in ("l", "t", "r", "b")):
+        errors.append("%s的图片被裁剪（srcRect %s）" % (where, dict(crop.attrib)))
+    xfrm = inl.find(".//" + _q(_A, "xfrm"))
+    if xfrm is not None and not _zero(xfrm.get("rot", 0)):
         errors.append("%s的图片被旋转（rot=%s）" % (where, xfrm.get("rot")))
-    for a in ("flipH", "flipV"):
-        if str(xfrm.get(a, "0")).lower() in ("1", "true"):
-            errors.append("%s的图片被翻转（%s）" % (where, a))
-    off, xext = xfrm.find(_q(_A, "off")), xfrm.find(_q(_A, "ext"))
-    if off is None or float(off.get("x", 0) or 0) != 0 or float(off.get("y", 0) or 0) != 0:
-        errors.append("%s的图片内部有偏移（a:off）" % where)
-    if xext is None or ext is None or xext.get("cx") != ext.get("cx") \
-            or xext.get("cy") != ext.get("cy"):
+    if xfrm is not None and any(str(xfrm.get(a, "0")).lower() in ("1", "true")
+                                for a in ("flipH", "flipV")):
+        errors.append("%s的图片被翻转" % where)
+    blip = inl.find(".//" + _q(_A, "blip"))
+    if blip is not None and len(list(blip)):
+        errors.append("%s的图片带图像效果 %s" % (where, [_short(c.tag) for c in blip]))
+    _conform(inl, _INLINE_SPEC, where + " wp:inline", errors)
+    ext = inl.find(_q(_WP, "extent"))
+    xext = inl.find(".//%s/%s/%s" % (_q(_PIC, "spPr"), _q(_A, "xfrm"), _q(_A, "ext")))
+    if ext is not None and xext is not None and \
+            (xext.get("cx") != ext.get("cx") or xext.get("cy") != ext.get("cy")):
         errors.append("%s的图片内部变换尺寸与显示尺寸（wp:extent）不一致" % where)
     return errors
+
+
+def _attrs_only(el, allowed: set, where: str, errors: List[str]) -> None:
+    """Every attribute of ``el`` (namespace-stripped) must be in ``allowed``."""
+    for name, value in el.attrib.items():
+        if name.rsplit("}", 1)[-1] not in allowed:
+            errors.append("%s带未知属性 %s=%r（只允许写出端产生的属性）" % (where, _short(name), value))
 
 
 def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[str], dict, list]:
@@ -439,6 +510,14 @@ def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[st
     for el in sect:
         if _local(el) not in allowed_sect:
             errors.append("节属性里有额外设置 <%s>" % _local(el))
+    _attrs_only(sect, {"rsidR", "rsidRPr", "rsidSect", "rsidDel"}, "节属性", errors)
+    _attrs_only(sz, {"w", "h", "orient"}, "页幅", errors)
+    _attrs_only(mar, {"top", "right", "bottom", "left", "header", "footer", "gutter"}, "页边",
+                errors)
+    if cols is not None:
+        _attrs_only(cols, {"space", "num"}, "分栏", errors)
+    if grid is not None:
+        _attrs_only(grid, {"linePitch", "type"}, "文档网格", errors)
     if settings is not None:
         for tag in _SETTINGS_FORBIDDEN:
             if settings.find(_q(_W, tag)) is not None and _on(settings.find(_q(_W, tag))):
@@ -478,6 +557,18 @@ def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[st
         for el in p:
             if _local(el) not in ("pPr", "r"):
                 errors.append("%s里有额外元素 <%s>" % (where, _local(el)))
+        _attrs_only(p, set(), where, errors)
+        if ppr is not None:
+            _attrs_only(ppr, set(), where + "段落属性", errors)
+        for name, allowed_attrs in (("spacing", {"before", "after", "line", "lineRule"}),
+                                    ("ind", {"left", "right", "firstLine"}),
+                                    ("jc", {"val"}), ("pageBreakBefore", {"val"})):
+            if name in props:
+                _attrs_only(props[name], allowed_attrs, "%s的 %s" % (where, name), errors)
+                if len(list(props[name])):
+                    errors.append("%s的 %s 有子元素" % (where, name))
+        for r in p.findall(_q(_W, "r")):
+            _attrs_only(r, set(), where + "文字段", errors)
         for tag in _RUN_FORBIDDEN:
             hits = list(p.iter(_q(_W, tag)))
             if hits:

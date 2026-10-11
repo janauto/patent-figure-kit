@@ -2420,3 +2420,12 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   间距不得用字符 / 行单位（`leftChars`、`firstLineChars`、`beforeLines`……，它们优先于显式置零的值）；文档默认段落
   格式与默认段落样式不得带框架、编号、边框、分节或字符 / 行单位缩进间距，默认样式不得 `basedOn` 别的样式；节属性
   只允许 `pgSz/pgMar/cols/docGrid`（`vAlign` 等一律拒绝）。另外两种格式都核对图片像素宽高比与显示尺寸一致（未被拉伸）。
+
+### 14.10 修复轮 3（Codex R2c）收敛
+
+- **Word 图片白名单改为封闭集**：`wp:inline` 整棵子树按写出端逐元素、逐属性比对（`_INLINE_SPEC`：
+  `extent`/`effectExtent`(全零)/`docPr`(id,name,descr)/`cNvGraphicFramePr`/`graphic`→`graphicData`(picture uri)→
+  `pic:pic`→`nvPicPr`(`cNvPr` id,name,descr + 空 `cNvPicPr`)、`blipFill`(`blip` 仅 `r:embed`、可选全零 `srcRect`、
+  `stretch/fillRect`)、`spPr`(`xfrm` 无旋转翻转、`off`=0、`ext`；`prstGeom rect`)）。**任何未列出的属性或子元素即拒绝**；
+  `wp:docPr` 或 `pic:cNvPr` 的 `hidden`（1/true）另按名报「图片被设为隐藏」。页段落、段落属性（spacing/ind/jc/
+  pageBreakBefore）、文字段、节属性（pgSz/pgMar/cols/docGrid）也只接受写出端产生的属性。
