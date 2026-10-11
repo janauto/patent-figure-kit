@@ -142,6 +142,87 @@ def commit_version(vs: "_V.VersionStore", rid: str, revision: int, result: Dict[
     return became_current
 
 
+# --------------------------------------------------------------------------- candidates (WP2)
+
+#: Candidate trial renders (F2-lite) live in their OWN version store ``<ws>/candidates/`` —
+#: never in the project's store. They are sealed (so ``?v=`` previews and integrity checks
+#: work) but NEVER committed: there is no ``current`` in the candidate store, the project's
+#: ``current.json`` is never touched, and the project's startup reconciliation / reclaim /
+#: export never see them (a candidate can therefore never be rolled into ``current``).
+CANDIDATE_STORE = "candidates"
+#: Keep the candidate versions of this many most-recent suggestion jobs per workspace.
+CANDIDATE_KEEP_JOBS = 3
+
+
+def candidate_store(ws_root) -> "_V.VersionStore":
+    return _V.VersionStore(Path(ws_root) / CANDIDATE_STORE)
+
+
+def seal_candidate(vs: "_V.VersionStore", rid: str, result: Dict[str, Any],
+                   manifest: Dict[str, Any], *, ok: bool) -> None:
+    """Seal a candidate version WITHOUT any commit: write result.json, then seal (fsync +
+    sizes + declared artefacts). There is deliberately no pointer step here."""
+    manifest["ok"] = bool(ok)
+    manifest["candidate"] = True
+    manifest["render_job_id"] = rid
+    result["ok"] = bool(ok)
+    result["candidate"] = True
+    result["render_job_id"] = rid
+    vs.write_result(rid, result)
+    vs.seal(rid, manifest, 0)
+
+
+def render_candidate(ws_root, cache, rid: str, plan: Dict[str, Any], assembly_path,
+                     run_cli: Callable, svg_of: Callable) -> Dict[str, Any]:
+    """Trial-render ONE candidate plan through the same inner render step as every publish
+    (``studio_ext.render_version``: renderer ``--json`` report → QA gate → annotation → declared
+    artefact list) into the candidate store, then seal it. Never commits, never touches the
+    project's ``current``. Returns ``{ok, result, report, version, vdir, svg}`` where ``report``
+    is the renderer's own ``--json`` report (per-figure QA and layout errors)."""
+    import studio_ext as _EXT  # lazy: studio_ext imports versions
+    vs = candidate_store(ws_root)
+    vd = vs.begin(rid)
+    plan_p, asm_p = vd / "inputs" / "plan.json", vd / "inputs" / "assembly.json"
+    _pio.atomic_write_json(plan_p, plan)
+    shutil.copy2(str(assembly_path), str(asm_p))
+    ok, result, manifest = _EXT.render_version(vd, plan_p, asm_p, Path(cache), run_cli, svg_of)
+    try:
+        report = json.loads((vd / "render-report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        report = {}
+    result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    seal_candidate(vs, rid, result, manifest, ok=bool(ok))
+    svg = "fig1.svg" if ok and (vd / "fig1.svg").is_file() else None
+    return {"ok": bool(ok), "result": result, "report": report, "version": rid, "vdir": vd,
+            "svg": svg}
+
+
+def prune_candidates(ws_root, keep_jobs: int = CANDIDATE_KEEP_JOBS,
+                     protect: Optional[set] = None) -> list:
+    """Remove candidate versions of all but the ``keep_jobs`` most recent suggestion jobs
+    (a candidate version id is ``<job id>-c<k>``). Under the candidate store's own lock."""
+    vs = candidate_store(ws_root)
+    if not vs.results.is_dir():
+        return []
+    protect = set(protect or set())
+    with _V.state_lock(vs.root):
+        newest: Dict[str, float] = {}
+        dirs = [d for d in vs.results.iterdir() if d.is_dir()]
+        for d in dirs:
+            job = d.name.rsplit("-c", 1)[0]
+            try:
+                newest[job] = max(newest.get(job, 0.0), d.stat().st_mtime)
+            except OSError:
+                pass
+        keep = set(sorted(newest, key=lambda j: newest[j])[-keep_jobs:]) | protect
+        removed = []
+        for d in dirs:
+            if d.name.rsplit("-c", 1)[0] not in keep:
+                shutil.rmtree(d, ignore_errors=True)
+                removed.append(d.name)
+        return removed
+
+
 # --------------------------------------------------------------------------- direct CLI
 
 

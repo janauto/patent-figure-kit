@@ -403,6 +403,23 @@ def check_dwgread() -> dict:
                   required=False)
 
 
+def check_deliverable() -> dict:
+    """F1 附图导出包（WP2）：PDF 由 matplotlib（必需项）生成，**逐页核验 PDF 需要可选包 pypdf**——
+    没有它，导出包里的 PDF 会被如实报「无法核验 → 不通过」，而不是假装通过。Word 由 python-docx
+    生成（见 plan-studio-deps）。都不在出图链路上。"""
+    try:
+        import pypdf  # noqa: F401
+        version = _dist_version("pypdf") or "?"
+        return _check("deliverable-pdf-check", STATUS_OK,
+                      "pypdf %s —— 导出包 PDF 可逐页核验（页幅/页边/字高/图号/页数）" % version,
+                      required=False)
+    except Exception as exc:  # noqa: BLE001
+        return _check("deliverable-pdf-check", STATUS_MISSING,
+                      "缺 pypdf（%s）—— 导出包里的 PDF 能生成，但无法逐页核验，会被报不通过"
+                      % _import_error(exc),
+                      _pip_fix("pypdf"), required=False)
+
+
 def run_checks() -> dict:
     """Every probe, in a fixed order. Deterministic: no time, no randomness."""
     checks = [
@@ -419,6 +436,7 @@ def run_checks() -> dict:
         check_autocad_core(),
         check_dwgread(),
         check_plan_studio(),
+        check_deliverable(),
     ]
     ok = all(c["status"] == STATUS_OK for c in checks if c["required"])
     return {"checks": checks, "ok": ok}

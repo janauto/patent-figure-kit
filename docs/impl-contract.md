@@ -2255,3 +2255,129 @@ produced the bogus "jsonschema missing" reading on the first pass.
 - 效果：大小写别名（`CASE-OUT.VERSIONS/CURRENT.JSON`、`Case-Out/fig1.dxf`、首次发布
   `FIRST/OUT/...`、`--cache CASE-OUT`）与此前各类别名同样前置退出码 2、不写任何文件。Windows
   （NTFS 默认不区分大小写）同走探测路径，**待 Windows 实机验证**。
+
+## 14. WP2 大众化功能（2026-10-12）
+
+本节是 WP2 的实现契约；与 `docs/openapi.yaml`（字段级冻结）一致。出图链路（DXF、§5.4 摘要、
+N10/N10b 金样）**没有任何改动**：版式、dpi、候选、白话层都在出图之后。
+
+### 14.1 附图导出包（F1）：`deliverable.py` + `deliverable_check.py` + `export.build_bundle`
+
+| 常数（`patent_figure/deliverable.py`） | 值 | 说明 |
+| --- | --- | --- |
+| `PAGE_MM` | 210 × 297 | A4 竖放 |
+| `MARGINS_MM` | 上 25 / 左 25 / 下 15 / 右 15 | 审查指南五部一章 4.3（A15） |
+| `SHEET_PRESETS` | `standard` 170×257、`conservative` 165×245 | 图区居中放在可用区（170×257）内 |
+| `DEFAULT_DPI` / 范围 | 300 / 72–600 | 越界 → HTTP 400 / CLI 退出码 2 |
+| `WINDOW_PAD_MM` | 2.0 | 取景窗外扩；在图区放得下时按轴收缩，保证放得下的图 1:1 |
+| `MIN_TEXT_MM` | 3.5（= `layout.TEXT_FLOOR_MM`） | A16 |
+| `MIN_TEXT_PX` | 24 | 汉字可辨约 16 px，A11 缩印 2/3 仍清晰 → 16 ÷ 2/3 |
+| `CNIPA_NOTE` | 「精确图片参数以当期《电子申请文件格式要求说明》为准」 | 能力接口原样返回，界面/README 旁注 |
+
+**页面合成**：取景窗 = 规范版本 DXF 全部图元外廓 + 外扩（`sheet_window(msp, area)`，写出端与检查端
+共用，只依赖源图与所选预设）；缩放比 = min(1, 图区宽/窗宽, 图区高/窗高)——**从不放大**；栅格用
+ezdxf matplotlib 后端（面向对象 API，不碰 pyplot 全局状态），灰度 8 位，像素尺寸 = 版面尺寸 × dpi，
+轴精确钉在 wpx × hpx 像素上。PDF 用 `PdfPages`，`imshow(interpolation='none')` 使图片按原生分辨率
+嵌入；Word 用 python-docx：同页边、每页一个居中嵌入式图片、第 2 页起 `pageBreakBefore`、图片按版面
+尺寸精确放置。页序 = 图号序（「图N」由标注步骤写进规范版本，N = plan.figures 顺序）。
+
+**逐页检查**（对**写出的文件本身**，`deliverable_check.check_document`）：
+
+1. 页数 = 图数（本版本的结构附图数；流程图属于工作区、不受版本约束，**不进 PDF/Word**，只拷到 `流程图/`）；
+2. 每页恰好一张图片；页幅 A4（±0.5 mm）；图片矩形完全在页边之内、不超出所选图区；Word 另核 `sectPr` 页边 ≥ 要求、
+   无浮动图片、无图片以外的文字段落、每张图前有分页；
+3. 宽高两向缩放一致（未拉伸）；缩放后最小字高 = 源 DXF 最小字高 × 实际缩放比 ≥ 3.5 mm；有效 dpi 按文件里图片的
+   **实际像素**算，栅格字高 ≥ 24 px（dpi 72 时 3.5 mm ≈ 9.9 px → 不通过）；
+4. 第 k 页源图图号文字是「图k」，且在**文件里该图片的像素上**图号位置确有墨迹（PDF 按 CTM 方向翻正后取像素）；
+5. 文件齐全：清单里每个 ok 项对应的文件都在包里且非空。
+
+任一不满足 → 该文件 `ok=false`，移到包内 `_未通过核验/`，对应「图号/版本/格式」项 `fail` 并在 `reasons` 写原因
+（同一文件里本页通过、别页不通过的，原因写「同一文件未通过核验」）。PDF 解析用可选包 **pypdf**（缺失 → 如实报
+「无法核验」→ fail，不得报 ok）；Word 用标准库 zipfile + ElementTree **只读**打开；像素解码用 Pillow（matplotlib 的
+必需依赖）。`conservative` 预设下需要缩小的图（取景窗高 > 245 mm）若含 3.5 mm 字，会被如实判不通过——这是设计行为
+（提示：换 `standard` 或拆图）。
+
+**导出包内容**：`说明书附图_{递交版,交底版}.{pdf,docx}`（主交付）、`递交版_仅图号/`、`交底版_带件号表/` 下的 DXF/DWG
+（源文件，供再编辑；DWG 转换器不可用 → `skip` + 原因，能力接口 `dwg_available=false` 事前告知）、`附图说明.txt`、
+`核对清单.txt`（机器核验结果 + 人工核对事项：M1 无说明书自动对表）、`核验报告.json`（版式规格 + 每份文件逐页结果 +
+缺失文件）、`reference-numerals.json`。`build_bundle` 返回 `{manifest, reasons, items, documents, missing_files,
+files, spec, ok, …}`；`items` 是逐「版本 × 格式」汇总行（`role` = 主交付 / 源文件，供再编辑 / 预览）。浏览器旧导出
+（`/p/{pid}/api/export`）走同一服务：Word 现在两版各一份，流程图不再拼进 Word。
+
+**入口**：REST `POST /v1/projects/{id}/export`（`sheet_preset`、`dpi` 真实生效，非法 → 400）、MCP `get_export`、
+CLI `scripts/export_figure_package.py`（经 `publish.prepare/run_and_publish` 渲染 + 标注，再经
+`export.acquire/build_bundle`）、复核 CLI `scripts/deliverable_check.py`。
+
+### 14.2 候选分图（F2-lite）：`suggest_plan.py` + `scripts/suggest_figure_plan.py` + `/plan/suggest`
+
+- **来源与顺序**：`whole` 整机装配图（兜底，允许被拦）→ `axis` 沿主轴整机分解图 → `split`（`split_suggestions`
+  每张图）→ `subassembly`（每个含 ≥2 种零件的中间装配节点）→ `coaxial`（每个含 ≥2 种零件的同轴组）。按
+  （kind, 成员集）去重；默认最多 8 个（请求可调 1–16），超出的写 `warnings`。
+- **成员契约**（Codex R3c #6）：`members = [{"part": <assembly 零件名原样>}]`，显示名在 `members_display`；
+  出处在 `source.id`（`sub:<装配路径>` / `coax:g2` / `split:<策略>/<序号>`）。接受时成员也可写 `{"group": source.id}`。
+- **标准件规则**（可配置，`standard_part_rule`）：`pattern` = 任务书正则原样
+  `SCREW|BOLT|NUT|WASHER|PIN|BEARING|螺钉|螺栓|螺母|垫圈|销|轴承`，IGNORECASE，匹配零件名与中文名；**英文片段按整词**
+  （两侧不能紧挨字母——否则 SPINDLE、PINION 会命中 PIN）；默认例外 `except` =
+  `(?:LEAD|BALL)[-_ ]?(?:SCREW|NUT)|丝杠|丝母`（传动丝杠/丝杠螺母是机构主件，不是紧固件）；`except` 可置空。
+  命中者试渲染时 `label:"none"`；`label_standard_parts=true` 关闭此规则。
+- **试渲染计划**（不写回用户计划）：用户术语（顺序与优先级不变）；丢掉一个零件都不命中的陈旧术语行；像件号的术语
+  文字换成占位；每个成员保证有术语行；空白术语填唯一占位「待命名零件一…」（字面不影响几何与编号）；标准件 none；
+  只有这一张图。先过 `plan.validate`，有 error 直接 `fail`（不渲染）。
+- **渲染**：一个作业内串行；每个候选经 `publish.render_candidate` → `studio_ext.render_version`（同一内部渲染步骤：
+  渲染器 `--json` 报告 → QA 闸门 → 标注 → 声明产物清单）进**候选专属版本库** `<ws>/candidates/results/<job>-c<k>/`，
+  `publish.seal_candidate` 封口（manifest `candidate: true`），**从不提交**——候选库没有 current，项目的
+  `current.json`、启动对账、回收、导出都看不到它；保留最近 3 次作业（`prune_candidates`）。预览只对 pass 候选给出：
+  `/files/{pid}/cand/fig1.svg?v=<版本>`（只服务已封口的候选版本，白名单 id）。
+- **状态**：只有渲染后才有 `pass`/`fail`（未渲染 `pending`）。读渲染器自己的报告：`gate_pass` → pass；QA 未过 →
+  `reason`「未过闸：<title_zh…>」+ `suggestion`（首项 `hint_plain`）；布局错误 → 白话 `reason` + 原文 `detail` +
+  建议。**全部未通过**（或无可出图零件）→ `empty_reason` + `guide`（「请框选分组」三步）。
+- **同名跨子装配**：需要 `analyze_assembly.py --instances` 的旁路文件 `assembly.instances.json`
+  （`patent-assembly-instances/1`，按 STEP sha256 绑定；`assembly.json` 不变，schema 不变）。子装配候选里，某名称的
+  实例多于组内实例 → `ambiguous_members[{part, selected, in_group, outside_paths, message:「按名称选中 N 处…」}]`；
+  同轴组只能给总数。缺旁路文件时作业现场生成一次；仍缺则退回 `path_sample` 并在 `warnings` 说明。
+- **接受**（`POST /plan/candidates/accept`）：作业须属本工程且成功；装配体 sha256 变了 → 409；在 plan 锁内
+  （`project_io.update_plan(if_match=…)`）对**当前**装配体与计划逐个解析成员（不存在 / 退化 / 被 source 排除 /
+  组解析不到）→ 任一失败 422 + `unresolved`，计划不变；成功则每个候选一张分图（`figN` 空号，成员为转义后的精确
+  选择器 `glob_escape`），补空白术语行，标准件 none（仅当管辖行只覆盖标准件），返回新 ETag。`mode=replace` 替换全部分图。
+- **MCP**：`suggest_figures`、`accept_figure_candidates`。CLI 不改任何计划。
+
+### 14.3 QA 白话层（F4）
+
+`qa.py` 每项检查（13 项 + `file_readable`/`qa_internal_error`）在 `qa.json` 里增补 `title_zh`、`hint_plain`
+（白话，不含 JSON/字段名）、`fix_action = {kind ∈ open_terms | split_figure | change_view | change_density,
+target: {figure, …}}`。`non_continuous`（写出端缺陷）与两个异常项的 `fix_action = null`，`hint_plain` 说明这不是
+用户能改的问题、请反馈。`hint` 原样保留给 Agent。工作台 `failed_checks` 行同样带这三个字段。
+
+### 14.4 AI 起名接力（F9）语义冻结
+
+`POST /v1/projects/{id}/ai/draft-terms`，body `{selectors?, apply=false, plan_etag?}`（或 If-Match）：只对**空白
+术语**的选中零件外发并返回建议（`confidence`、`reason`）；已命名的进 `skipped`；**默认不写 plan**（前端经 `PUT /plan`
+落盘）；`apply=true` 经 `project_io.update_plan` 只填空白（期间被人填了也不覆盖），返回新 ETag，ETag 不符 409。
+无大模型通道 → 200 `status: ai_not_configured`，**不发任何外部请求**。每次都返回 `outbound_fields: ["part_names",
+"part_codes"]` 与 `outbound_note`。通道调用失败 → 502 `ai_call_failed`。MCP 工具 `ai_draft_terms` 共用实现，为兼容
+旧客户端 `apply` 缺省 true。
+
+### 14.5 鉴权六路径与弃用头
+
+首页（`/api/wb/*`）、子应用（`/p/{pid}/api/*`）、SSE、下载（`/v1/exports/*/download`、`/files/*`）、REST、MCP：
+Bearer 与会话 Cookie `wb_token` 都可用；`?token=` 仅兼容期——只凭它通过的受保护请求，响应带 `Deprecation: true`、
+`Warning: 299 - "…deprecated…"`、`X-Auth-Deprecated: query-token`。所有候选凭据都做常数时间比较，第一个**有效**的
+胜出（陈旧的 query token 不会遮住有效的 Cookie）。首页 `/?token=` 是下发 Cookie 的引导，不算弃用。
+`tests/test_wp2_api.py::test_auth_six_paths` 对六条路径 × {Bearer, Cookie, query, 无} 逐一断言。
+
+### 14.6 能力接口与示例工程
+
+`GET /v1/capabilities`：显示名、导出格式 / 主交付 / 源文件、`pdf_check_available`、`docx_available`、
+`dwg_available` + `dwg_route`、`unavailable_reasons`、版式预设、dpi 范围、页边、字高阈值、`note`（CNIPA 旁注）、
+AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from-example` 支持 `gearbox | vise | valve`
+（`patent_figure/examples.py`：首次使用在作业里调 `make_demo_assemblies.py` 生成 STEP——OCP 只在生成器子进程里——
+建 `example-<名>` 并装入已验证能过闸的示例计划；作业等到工程 ready 才 succeeded）与 `synthetic`。
+
+### 14.7 旁路清单增补
+
+- `zipfile.ZipFile` 允许用户新增 `patent_figure/deliverable_check.py`：**只读**打开写出的 Word 文件核验，不建归档
+  （`test_bypass_guard` 另有一条断言它从不以写模式打开）。
+- 候选渲染不是提交路径：`publish.render_candidate` / `seal_candidate` 只封口、不调 `commit_pointer`；
+  `current.json` 字面量仍只在 `versions.py`；`--in-place` 仍只由 `studio_ext.render_version` 传。
+- `dxf_to_svg` 移到 `patent_figure/svg_preview.py`（纯 ezdxf），`plan_studio.dxf_to_svg` 是同一函数对象。
+- 导出包 CLI 与工作台走同一对服务（`publish` 渲染提交、`export` 钉住 + 打包），不另起打包或发布代码。

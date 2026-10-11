@@ -1,0 +1,365 @@
+"""WP2 HTTP 面：能力接口、鉴权六路径、候选分图作业与接受、AI 起名接力语义、导出包参数。
+
+无 OCP 的部分（能力接口、openapi 交叉核对）总是跑；其余需要 cadquery-ocp 出图，没装则跳过。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "scripts"))
+
+try:
+    import OCP  # noqa: F401
+    _HAS_OCP = True
+except ImportError:  # pragma: no cover
+    _HAS_OCP = False
+
+TOKEN = "t0k"
+BEARER = {"Authorization": "Bearer %s" % TOKEN}
+PID = "example-synthetic"
+
+
+def _app(tmp_path):
+    import workbench as W
+    from starlette.testclient import TestClient
+    reg = W.Registry(tmp_path / "data", TOKEN)
+    return W, reg, TestClient(W.Dispatcher(W.build_workbench(reg, TOKEN, 8802), reg),
+                              base_url="http://127.0.0.1:8802")
+
+
+# --------------------------------------------------------------------------- no OCP
+
+
+def test_capabilities_announce_dwg_docx_presets_and_the_cnipa_note(tmp_path):
+    _W, _reg, c = _app(tmp_path)
+    r = c.get("/v1/capabilities", headers=BEARER)
+    assert r.status_code == 200
+    cap = r.json()
+    ex = cap["export"]
+    assert isinstance(ex["dwg_available"], bool)
+    assert ex["note"] == "精确图片参数以当期《电子申请文件格式要求说明》为准"
+    assert ex["sheet_presets"]["standard"]["area_mm"] == [170.0, 257.0]
+    assert ex["sheet_presets"]["conservative"]["area_mm"] == [165.0, 245.0]
+    assert ex["page"]["margins_mm"] == {"top": 25.0, "left": 25.0, "bottom": 15.0, "right": 15.0}
+    assert ex["dpi"]["default"] == 300 and ex["primary_formats"] == ["pdf", "docx"]
+    if not ex["dwg_available"]:
+        assert ex["unavailable_reasons"]["dwg"]
+    assert cap["ai"]["outbound_fields"] == ["part_names", "part_codes"]
+    assert set(cap["examples"]) >= {"gearbox", "vise", "valve"}
+    assert c.get("/v1/capabilities").status_code == 401
+
+
+def test_wp2_routes_are_declared_in_openapi(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    W, _reg, c = _app(tmp_path)
+    spec = yaml.safe_load((_ROOT / "docs" / "openapi.yaml").read_text(encoding="utf-8"))
+    for method, path in (("get", "/v1/capabilities"), ("post", "/v1/projects/{pid}/plan/suggest"),
+                         ("get", "/v1/projects/{pid}/plan/candidates"),
+                         ("post", "/v1/projects/{pid}/plan/candidates/accept"),
+                         ("post", "/v1/projects/{pid}/ai/draft-terms"),
+                         ("post", "/v1/projects/{pid}/export")):
+        assert method in (spec["paths"].get(path) or {}), "%s %s" % (method, path)
+    schemas = spec["components"]["schemas"]
+    for name in ("Candidate", "SuggestResult", "AcceptCandidatesRequest", "Capabilities",
+                 "ExportResult", "DocumentCheck", "DraftTermsResult", "QACheck"):
+        assert name in schemas, name
+    cand = schemas["Candidate"]["properties"]
+    assert "members" in cand and "members_display" in cand and "ambiguous_members" in cand
+    assert set(schemas["QACheck"]["properties"]) >= {"title_zh", "hint_plain", "fix_action"}
+
+
+def test_from_example_unknown_is_404(tmp_path):
+    _W, _reg, c = _app(tmp_path)
+    assert c.post("/v1/projects/from-example", headers=BEARER,
+                  json={"example": "nope"}).status_code == 404
+
+
+# --------------------------------------------------------------------------- live (OCP)
+
+
+@pytest.fixture(scope="module")
+def live(tmp_path_factory):
+    if not _HAS_OCP:
+        pytest.skip("需要 cadquery-ocp")
+    W, reg, c = _app(tmp_path_factory.mktemp("wp2api"))
+    W.ensure_synthetic(reg)
+    t0 = time.time()
+    while True:
+        st = c.get("/api/wb/projects/%s" % PID, headers=BEARER).json()
+        if st["status"] == "ready" and not st["message"]:
+            break
+        assert time.time() - t0 < 300, "示例工程准备超时"
+        time.sleep(1)
+    return W, reg, c
+
+
+def _poll(c, job_id, timeout=600):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        j = c.get("/v1/jobs/%s" % job_id, headers=BEARER).json()
+        if j["state"] in ("succeeded", "failed", "cancelled", "interrupted"):
+            return j
+        time.sleep(0.4)
+    raise AssertionError("作业 %s 超时" % job_id)
+
+
+@pytest.fixture(scope="module")
+def export_job(live):
+    _W, _reg, c = live
+    r = c.post("/v1/projects/%s/export" % PID, headers=BEARER,
+               json={"variant": "both", "formats": ["pdf", "docx", "dxf"]})
+    assert r.status_code == 202, r.text
+    j = _poll(c, r.json()["export_id"])
+    assert j["state"] == "succeeded", j
+    return j
+
+
+def test_export_package_is_checked_page_by_page(live, export_job):
+    res = export_job["result"]
+    assert res["ok"] is True, res["reasons"]
+    for name in ("说明书附图_递交版.pdf", "说明书附图_交底版.pdf", "说明书附图_递交版.docx",
+                 "说明书附图_交底版.docx"):
+        doc = res["documents"][name]
+        assert doc["ok"] and doc["pages"] == doc["expected_pages"] == 2, doc
+        for pg in doc["page_checks"]:
+            assert pg["caption"] == "图%d" % pg["page"] and pg["caption_ink"] > 0
+            assert pg["min_text_mm"] >= 3.5 and pg["min_text_px"] >= 24
+        assert name in res["files"]
+    assert {"附图说明.txt", "核对清单.txt", "核验报告.json"} <= set(res["files"])
+    rows = {(i["variant"], i["format"]): i for i in res["items"]}
+    assert rows[("递交版", "pdf")]["role"] == "主交付" and rows[("递交版", "dxf")]["status"] == "ok"
+    assert res["note"].startswith("精确图片参数")
+
+
+def test_export_rejects_bad_preset_and_dpi_up_front(live):
+    _W, _reg, c = live
+    for body in ({"sheet_preset": "conservative-165x245"}, {"dpi": 10}, {"dpi": 5000},
+                 {"formats": ["pdf", "tiff"]}):
+        r = c.post("/v1/projects/%s/export" % PID, headers=BEARER, json=body)
+        assert r.status_code == 400, (body, r.text)
+
+
+def test_export_dpi_72_fails_the_raster_text_height_and_quarantines_the_documents(live):
+    _W, _reg, c = live
+    r = c.post("/v1/projects/%s/export" % PID, headers=BEARER,
+               json={"variant": "filing", "formats": ["pdf", "docx", "dxf"], "dpi": 72})
+    res = _poll(c, r.json()["export_id"])["result"]
+    assert res["ok"] is False
+    for k, v in res["manifest"].items():
+        if k.endswith(("/pdf", "/docx")):
+            assert v == "fail" and "px" in res["reasons"][k], (k, res["reasons"].get(k))
+        else:
+            assert v == "ok"
+    assert "_未通过核验/说明书附图_递交版.pdf" in res["files"]
+    assert "说明书附图_递交版.pdf" not in res["files"]
+
+
+# ---- 鉴权六路径：首页 / 子应用 / SSE / 下载 / REST / MCP —— Cookie 与 Bearer 都可用；
+# ---- ?token= 只在兼容期可用并带弃用警告头；什么都不带 → 401。
+
+
+def _six_paths(c, export_job):
+    job_id = export_job["id"]
+    return [
+        ("home", "GET", "/api/wb/state", None),
+        ("subapp", "GET", "/p/%s/api/state" % PID, None),
+        ("sse", "GET", "/v1/jobs/%s/events" % job_id, None),
+        ("download", "GET", "/v1/exports/%s/download" % job_id, None),
+        ("rest", "GET", "/v1/projects", None),
+        ("mcp", "POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    ]
+
+
+@pytest.mark.parametrize("cred", ["bearer", "cookie", "query", "none"])
+def test_auth_six_paths(live, export_job, cred):
+    _W, _reg, c = live
+    for name, method, path, body in _six_paths(c, export_job):
+        headers, url, cookies = {}, path, None
+        if cred == "bearer":
+            headers = dict(BEARER)
+        elif cred == "cookie":
+            cookies = {"wb_token": TOKEN}
+        elif cred == "query":
+            url = path + ("&" if "?" in path else "?") + "token=" + TOKEN
+        c.cookies.clear()
+        if cookies:
+            c.cookies.set("wb_token", TOKEN)
+        if method == "GET" and name == "sse":
+            with c.stream("GET", url, headers=headers) as resp:
+                status, rh = resp.status_code, resp.headers
+                if status == 200:
+                    assert "text/event-stream" in rh["content-type"]
+        elif method == "GET":
+            resp = c.get(url, headers=headers)
+            status, rh = resp.status_code, resp.headers
+        else:
+            resp = c.post(url, headers=headers, json=body)
+            status, rh = resp.status_code, resp.headers
+        c.cookies.clear()
+        if cred == "none":
+            assert status == 401, (name, status)
+            continue
+        assert status == 200, (cred, name, status)
+        if cred == "query":
+            assert rh.get("deprecation") == "true", (name, dict(rh))
+            assert "deprecated" in rh.get("warning", "")
+        else:
+            assert "deprecation" not in rh, (cred, name)
+
+
+def test_home_query_bootstrap_sets_the_session_cookie(live):
+    _W, _reg, c = live
+    c.cookies.clear()
+    r = c.get("/?token=" + TOKEN)
+    assert r.status_code == 200 and "wb_token" in r.headers.get("set-cookie", "")
+    c.cookies.clear()
+
+
+# ---- 候选分图
+
+
+@pytest.fixture(scope="module")
+def suggestion(live):
+    _W, reg, c = live
+    studio = reg.get(PID).root / "studio"
+    before = (studio / "current.json").read_bytes()
+    r = c.post("/v1/projects/%s/plan/suggest" % PID, headers=BEARER, json={})
+    assert r.status_code == 202, r.text
+    j = _poll(c, r.json()["job_id"])
+    assert j["state"] == "succeeded", j
+    return j, before, studio
+
+
+def test_suggest_renders_every_candidate_and_never_touches_current(live, suggestion):
+    _W, _reg, c = live
+    j, before, studio = suggestion
+    assert (studio / "current.json").read_bytes() == before        # 不改 current
+    res = j["result"]
+    assert res["schema"] == "patent-figure-candidates/1"
+    assert res["candidates"] and res["summary"]["pending"] == 0
+    for cand in res["candidates"]:
+        assert cand["status"] in ("pass", "fail") and cand["reason"]
+        assert cand["version"] and cand["members"]
+        assert all(set(m) == {"part"} for m in cand["members"])
+    passed = [x for x in res["candidates"] if x["status"] == "pass"]
+    assert passed and res["empty_reason"] is None
+    svg = c.get(passed[0]["preview"]["svg"], headers=BEARER)
+    assert svg.status_code == 200 and svg.text.lstrip().startswith("<svg")
+    # the candidate area only serves sealed CANDIDATE versions
+    assert c.get("/files/%s/cand/fig1.svg" % PID, headers=BEARER).status_code == 404
+    cur = json.loads(before)["render_job_id"]
+    assert c.get("/files/%s/cand/fig1.svg?v=%s" % (PID, cur), headers=BEARER).status_code == 404
+    summ = c.get("/v1/projects/%s" % PID, headers=BEARER).json()["candidates"]
+    assert summ["job_id"] == j["id"] and summ["summary"]["pass"] == len(passed)
+    latest = c.get("/v1/projects/%s/plan/candidates" % PID, headers=BEARER).json()
+    assert latest["id"] == j["id"]
+
+
+def test_accept_rejects_unresolvable_members_with_422_and_writes_nothing(live, suggestion):
+    _W, _reg, c = live
+    j, _b, _s = suggestion
+    plan0 = c.get("/v1/projects/%s/plan" % PID, headers=BEARER)
+    cid = j["result"]["candidates"][0]["id"]
+    r = c.post("/v1/projects/%s/plan/candidates/accept" % PID, headers=BEARER,
+               json={"job_id": j["id"], "candidate_ids": [cid],
+                     "members": {cid: [{"part": "NO-SUCH-PART"}, {"group": "sub:NOPE"}]}})
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert len(detail["unresolved"]) == 2 and detail["unresolved"][0]["candidate"] == cid
+    assert c.get("/v1/projects/%s/plan" % PID, headers=BEARER).headers["etag"] == \
+        plan0.headers["etag"]
+    r = c.post("/v1/projects/%s/plan/candidates/accept" % PID, headers=BEARER,
+               json={"job_id": j["id"], "candidate_ids": ["c99"]})
+    assert r.status_code == 422
+    r = c.post("/v1/projects/%s/plan/candidates/accept" % PID,
+               headers={**BEARER, "If-Match": "stale"},
+               json={"job_id": j["id"], "candidate_ids": [cid]})
+    assert r.status_code == 409
+
+
+def test_accept_writes_exact_selectors_and_returns_the_new_etag(live, suggestion):
+    _W, _reg, c = live
+    j, _b, _s = suggestion
+    plan0 = c.get("/v1/projects/%s/plan" % PID, headers=BEARER)
+    passed = next(x for x in j["result"]["candidates"] if x["status"] == "pass")
+    r = c.post("/v1/projects/%s/plan/candidates/accept" % PID,
+               headers={**BEARER, "If-Match": plan0.headers["etag"]},
+               json={"job_id": j["id"], "candidate_ids": [passed["id"]]})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["plan_etag"] == r.headers["etag"] != plan0.headers["etag"]
+    plan = c.get("/v1/projects/%s/plan" % PID, headers=BEARER).json()
+    fig = next(f for f in plan["figures"] if f["id"] == out["added_figures"][0])
+    assert fig["members"] == sorted(m["part"] for m in passed["members"])
+    assert fig["caption"] == passed["caption"] and fig["kind"] == passed["kind"]
+
+
+# ---- AI 起名接力
+
+
+def _fresh_plan_with_blank(c):
+    r = c.get("/v1/projects/%s/plan" % PID, headers=BEARER)
+    plan = r.json()
+    plan["terms"] = [dict(t, term="") if t["selector"] == "SYN-A01" else t
+                     for t in plan["terms"]]
+    w = c.put("/v1/projects/%s/plan" % PID, headers={**BEARER, "If-Match": r.headers["etag"]},
+              json=plan)
+    assert w.status_code == 200
+    return w.headers["etag"]
+
+
+def test_draft_terms_without_a_channel_is_200_ai_not_configured(live, monkeypatch):
+    W, _reg, c = live
+    monkeypatch.setattr(W.LLM, "public_settings",
+                        lambda: {"provider": "none", "provider_label": "未配置"})
+
+    def boom(*a, **k):
+        raise AssertionError("不得在无通道时调用大模型")
+    monkeypatch.setattr(W.LLM, "draft_terms", boom)
+    r = c.post("/v1/projects/%s/ai/draft-terms" % PID, headers=BEARER, json={})
+    assert r.status_code == 200
+    out = r.json()
+    assert out["status"] == "ai_not_configured" and out["ai_configured"] is False
+    assert out["outbound_fields"] == ["part_names", "part_codes"] and out["suggestions"] == []
+
+
+def test_draft_terms_suggests_only_blank_terms_and_writes_only_with_apply(live, monkeypatch):
+    W, _reg, c = live
+    etag = _fresh_plan_with_blank(c)
+    seen = {}
+    monkeypatch.setattr(W.LLM, "public_settings",
+                        lambda: {"provider": "deepseek", "provider_label": "测试通道"})
+
+    def fake(asm, plan, **kw):
+        seen["parts"] = sorted(p["name"] for p in asm["parts"])
+        return [{"selector": n, "term": "测试底座", "label": "once", "confidence": "high",
+                 "reason": "形状像底座"} for n in seen["parts"]]
+    monkeypatch.setattr(W.LLM, "draft_terms", fake)
+    r = c.post("/v1/projects/%s/ai/draft-terms" % PID, headers=BEARER,
+               json={"selectors": ["SYN-A01", "SYN-B02", "GHOST"]})
+    out = r.json()
+    assert r.status_code == 200 and out["status"] == "ok"
+    assert seen["parts"] == ["SYN-A01"]                       # only the blank one went out
+    assert [s["selector"] for s in out["suggestions"]] == ["SYN-A01"]
+    assert out["suggestions"][0]["confidence"] == "high" and out["suggestions"][0]["reason"]
+    skipped = {s["selector"]: s["reason"] for s in out["skipped"]}
+    assert "已有名称" in skipped["SYN-B02"] and "GHOST" in skipped
+    assert out["applied"] is None and out["plan_etag"] == etag   # 默认不写 plan
+    assert c.get("/v1/projects/%s/plan" % PID, headers=BEARER).headers["etag"] == etag
+    bad = c.post("/v1/projects/%s/ai/draft-terms" % PID, headers={**BEARER, "If-Match": "x"},
+                 json={"selectors": ["SYN-A01"], "apply": True})
+    assert bad.status_code == 409
+    r = c.post("/v1/projects/%s/ai/draft-terms" % PID, headers={**BEARER, "If-Match": etag},
+               json={"selectors": ["SYN-A01"], "apply": True})
+    out = r.json()
+    assert r.status_code == 200 and out["applied"]["filled"] == ["SYN-A01"]
+    assert out["plan_etag"] == r.headers["etag"] != etag
+    plan = c.get("/v1/projects/%s/plan" % PID, headers=BEARER).json()
+    assert next(t for t in plan["terms"] if t["selector"] == "SYN-A01")["term"] == "测试底座"

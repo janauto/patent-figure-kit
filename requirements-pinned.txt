@@ -28,4 +28,6 @@ pytest==8.4.2
 #   fastapi / uvicorn  本地服务器（只绑 127.0.0.1）
 #   httpx              AI 起草零件名时调用大模型接口
 #   openpyxl           «导入 BOM» 读 .xlsx；只用 .csv 的话可以不装
-#   python-docx        导出「说明书附图」Word；缺它只是少一个文件
+#   python-docx        导出「说明书附图」Word；缺它 Word 项为 skip（能力接口 docx_available=false）
+#   pypdf              导出包 PDF 的逐页核验（F1）；缺它 PDF 能生成但会被如实报「无法核验 → 不通过」
+#                      安装：python3 -m pip install pypdf   （doctor 的 deliverable-pdf-check 会提示）

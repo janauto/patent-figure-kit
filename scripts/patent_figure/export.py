@@ -156,21 +156,133 @@ def _dwg(src_dxf: Path, sub: Path, run_cli: Callable, keep_dxf: bool) -> Tuple[b
     return _nonempty(dwg), how
 
 
+DOC_BASENAME = "说明书附图_%s.%s"           # % (递交版|交底版, pdf|docx)
+FAILED_DIR = "_未通过核验"
+REPORT_NAME = "核验报告.json"
+CHECKLIST_NAME = "核对清单.txt"
+DESCRIPTION_NAME = "附图说明.txt"
+#: Variants that carry the figure number 「图N」 and therefore can be a filing document.
+DOC_VARIANTS = ("annotated", "filing")
+
+
+def _fig_rows(figs: Sequence[dict], vdir: Path, suf: str) -> List[Dict[str, Any]]:
+    rows = []
+    for i, f in enumerate(figs, start=1):
+        rows.append({"figure": str(f["id"]), "number": int(f.get("number") or i),
+                     "dxf": vdir / (str(f["id"]) + suf + ".dxf")})
+    return rows
+
+
+def _build_document(variant: str, fmt: str, rows: List[Dict[str, Any]], sp: Dict[str, Any],
+                    dest: Path, pages_cache: Dict[str, list]) -> Dict[str, Any]:
+    """Write ONE final document (PDF or Word) for a variant, then check it page by page from the
+    written file (``deliverable_check``). A failing document is moved to ``_未通过核验/`` so the
+    deliverable folder only ever holds verified documents. Returns the check report + ``path``."""
+    from patent_figure import deliverable as _D
+    from patent_figure import deliverable_check as _C
+    name = DOC_BASENAME % (VARIANT_LABEL[variant], fmt)
+    title = "说明书附图（%s）" % VARIANT_LABEL[variant]
+    missing = [r for r in rows if not _nonempty(Path(r["dxf"]))]
+    if missing:
+        return {"file": name, "format": fmt, "ok": False, "pages": 0,
+                "expected_pages": len(rows), "page_checks": [],
+                "errors": ["版本内源图缺失或为空：%s" % "、".join(
+                    Path(r["dxf"]).name for r in missing)], "path": None}
+    try:
+        if variant not in pages_cache:
+            pages_cache[variant] = [_D.rasterize(Path(r["dxf"]), sp, r["figure"], r["number"])
+                                    for r in rows]
+        pages = pages_cache[variant]
+        out = dest / name
+        if fmt == "pdf":
+            _D.write_pdf(pages, out, title)
+        else:
+            _D.write_docx(pages, out, title)
+        report = _C.check_document(out, _C.sources_from(rows, sp["area_mm"]), sp)
+    except Exception as exc:
+        return {"file": name, "format": fmt, "ok": False, "pages": 0,
+                "expected_pages": len(rows), "page_checks": [],
+                "errors": ["生成失败：%s" % exc], "path": None}
+    report["path"] = name
+    if not report["ok"] and (dest / name).is_file():
+        (dest / FAILED_DIR).mkdir(parents=True, exist_ok=True)
+        os.replace(str(dest / name), str(dest / FAILED_DIR / name))
+        report["path"] = "%s/%s" % (FAILED_DIR, name)
+    return report
+
+
+def _doc_reason(rep: Dict[str, Any], fid: str) -> str:
+    page = next((p for p in rep.get("page_checks", []) if p.get("figure") == fid), None)
+    errs = list(rep.get("errors") or []) + list((page or {}).get("errors") or [])
+    if not errs:          # this page is fine, but the document as a whole failed
+        others = ["第 %d 页：%s" % (p.get("page"), "；".join(p.get("errors") or []))
+                  for p in rep.get("page_checks", []) if not p.get("ok")]
+        errs = ["本页通过，但同一文件未通过核验，整份文件不能递交（%s）" % "；".join(others[:2])]
+    return "；".join(errs[:4])
+
+
+def checklist_text(result: Dict[str, Any], bundle: Dict[str, Any], sp: Optional[dict]) -> str:
+    """《核对清单.txt》：机器核验结果 + 必须由人核对的事项（M1 无说明书自动对表）。"""
+    lines = ["说明书附图导出包 · 核对清单", "",
+             "渲染版本：%s" % bundle.get("render_job_id", ""), ""]
+    if sp:
+        lines += ["版式：A4，页边 上%g/左%g/下%g/右%g mm，图区 %s（%g×%g mm），%d dpi；"
+                  "缩放后字高不低于 %g mm、栅格不低于 %g px。" % (
+                      sp["margins_mm"]["top"], sp["margins_mm"]["left"],
+                      sp["margins_mm"]["bottom"], sp["margins_mm"]["right"], sp["preset"],
+                      sp["area_mm"][0], sp["area_mm"][1], sp["dpi"], sp["min_text_mm"],
+                      sp["min_text_px"]), ""]
+    lines.append("一、机器逐页核验（文件本身，不是源图）")
+    docs = bundle.get("documents") or {}
+    if not docs:
+        lines.append("  （本次未生成 PDF / Word）")
+    for name, rep in sorted(docs.items()):
+        lines.append("  %s %s：%d/%d 页%s" % (
+            "[通过]" if rep.get("ok") else "[不通过]", name, max(rep.get("pages", 0), 0),
+            rep.get("expected_pages", 0),
+            "" if rep.get("ok") else "——已移到 %s/，不要递交。原因：%s" % (
+                FAILED_DIR, "；".join((rep.get("errors") or [])[:2]
+                                     + [e for p in rep.get("page_checks", [])
+                                        for e in p.get("errors", [])][:2]))))
+    skipped = ["%s：%s" % (k, v) for k, v in sorted((bundle.get("reasons") or {}).items())
+               if (bundle.get("manifest") or {}).get(k) == "skip"]
+    if skipped:
+        lines.append("  跳过：" + "；".join(skipped[:6]))
+    lines += ["", "二、必须人工核对（本工具 M1 不做说明书自动对表）",
+              "  [ ] 说明书「附图标记说明」与每张图上的标号逐条一致（见 reference-numerals.json）",
+              "  [ ] 说明书「附图说明」段与本包《附图说明.txt》一致，图号连续（图1、图2…）",
+              "  [ ] 每张图上没有内部件号、尺寸、明细表等不该出现的文字",
+              "  [ ] 递交用的是「递交版」（仅图号）；「交底版」带件号表，只用于内部交底",
+              "  [ ] DXF/DWG 是源文件，供再编辑；递交请用 PDF 或 Word", "",
+              "三、提示", "  %s。" % (sp or {}).get("note", "精确图片参数以当期《电子申请文件格式要求说明》为准"),
+              "  本工具按 CNIPA 形式要求排版，最终以受理为准，不构成法律意见。", ""]
+    return "\n".join(lines)
+
+
 def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated", "filing"),
                  formats: Iterable[str] = ("docx", "dxf"),
                  raw_formats: Optional[Iterable[str]] = None, dpi: int = 300,
                  run_cli: Optional[Callable] = None,
                  flows: Iterable[Tuple[str, Path, dict]] = (),
-                 description_txt: bool = False) -> Dict[str, Any]:
+                 description_txt: bool = False, sheet_preset: str = "standard",
+                 checklist_txt: bool = False,
+                 dwg_available: Optional[bool] = None) -> Dict[str, Any]:
     """Build an export bundle from ONE pinned version into ``dest``.
 
     ``variants`` ⊆ {raw, annotated, filing}; ``formats`` ⊆ {dxf, svg, png, docx, dwg, pdf}
     (``raw_formats`` overrides the list for the raw variant). ``flows`` = ``(id, out_dir,
-    result)`` of flowcharts to include under 流程图/ (workspace-level, not version-bound).
-    Returns ``{manifest, files, notes, dwg_log, figure_descriptions}`` where ``manifest`` maps
-    ``<fig>/<版本>/<fmt>`` → ``ok`` / ``skip`` (not available: pdf → WP2, Word of a
-    non-disclosure version, DWG of the raw figure) / ``fail`` (source missing/empty or the
-    conversion failed)."""
+    result)`` of flowcharts copied under 流程图/ (workspace-level, not version-bound — they are
+    NOT pages of the PDF/Word deliverables, so 页数 = 结构附图数).
+
+    F1 (WP2): ``pdf`` / ``docx`` are the PRIMARY deliverables — one document per numbered variant
+    (``说明书附图_递交版.pdf`` …), A4 pages at ``dpi`` under ``sheet_preset``, each checked page by
+    page from the written file (``deliverable_check``); a failing document goes to
+    ``_未通过核验/`` and its items are ``fail`` with the reason. DWG is ``skip`` (with reason) when
+    no converter is available (``dwg_available``; probed when None).
+
+    Returns ``{manifest, reasons, items, documents, files, notes, dwg_log, figure_descriptions,
+    spec, ok}`` where ``manifest`` maps ``<fig>/<版本>/<fmt>`` → ``ok`` / ``skip`` / ``fail``
+    (``reasons`` explains every skip/fail) and ``ok`` is True iff no requested item failed."""
     vdir, result = pin.vdir, pin.result
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -181,9 +293,27 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
                    if (f.get("pass") if "pass" in f else f.get("gate_pass"))],
                   key=lambda f: (f.get("number") or 999, str(f.get("id"))))
     manifest: Dict[str, str] = {}
+    reasons: Dict[str, str] = {}
     notes: List[str] = []
     dwg_log: List[str] = []
-    docx_png: Dict[str, Path] = {}
+    sp = None
+    if any(f in ("pdf", "docx") for f in formats):
+        from patent_figure import deliverable as _D
+        try:
+            sp = _D.spec(sheet_preset, dpi)
+        except _D.DeliverableError as exc:
+            notes.append(str(exc))
+    if "dwg" in formats + raw_formats and dwg_available is None:
+        from patent_figure import capabilities as _CAP
+        dwg_available = _CAP.dwg_route() is not None
+
+    def put(key: str, status: str, reason: str = "") -> None:
+        manifest[key] = status
+        if reason:
+            reasons[key] = reason
+        elif key in reasons:
+            del reasons[key]
+
     for fig in figs:
         fid = str(fig["id"])
         for variant in variants:
@@ -193,74 +323,85 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
             fmts = raw_formats if variant == "raw" else formats
             for fmt in fmts:
                 key = "%s/%s/%s" % (fid, label, fmt)
-                if fmt == "pdf":
-                    manifest[key] = "skip"                       # F1 PDF 在 WP2
-                    continue
-                if fmt == "docx" and variant != "annotated":
-                    manifest[key] = "skip"                       # 仅交底版有 Word (R1b #7)
-                    continue
+                if fmt in ("pdf", "docx"):
+                    if variant not in DOC_VARIANTS:
+                        put(key, "skip", "原始出图没有图号，不出 PDF/Word")
+                    continue                                 # documents: second pass below
                 if fmt == "dwg" and variant == "raw":
-                    manifest[key] = "skip"
+                    put(key, "skip", "原始出图不转 DWG")
                     continue
                 src = vdir / (fid + suf + (".svg" if fmt == "svg" else ".dxf"))
                 if not _nonempty(src):                           # never package a hole
-                    manifest[key] = "fail"
+                    put(key, "fail", "版本内源文件缺失或为空（%s）" % src.name)
                     notes.append("%s：版本内源文件缺失或为空（%s）" % (key, src.name))
                     continue
                 sub.mkdir(parents=True, exist_ok=True)
                 if fmt in ("dxf", "svg"):
                     shutil.copy2(src, sub / src.name)
-                    manifest[key] = "ok" if _nonempty(sub / src.name) else "fail"
-                elif fmt in ("png", "docx"):
+                    if _nonempty(sub / src.name):
+                        put(key, "ok")
+                    else:
+                        put(key, "fail", "复制后文件为空")
+                elif fmt == "png":
                     png = sub / (fid + suf + ".png")
                     try:
                         if not _nonempty(png):
                             _png(src_dxf, png, dpi)
                     except Exception as exc:
                         notes.append("%s：PNG 生成失败：%s" % (key, exc))
-                    if not _nonempty(png):
-                        manifest[key] = "fail"
-                    elif fmt == "png":
-                        manifest[key] = "ok"
+                    if _nonempty(png):
+                        put(key, "ok")
                     else:
-                        docx_png[fid] = png
-                        manifest[key] = "pending"
+                        put(key, "fail", "PNG 生成失败")
                 elif fmt == "dwg":
-                    if run_cli is None:
-                        manifest[key] = "skip"
+                    if run_cli is None or not dwg_available:
+                        put(key, "skip", "未检测到 DWG 转换器（AutoCAD Core Console 或 LibreDWG）"
+                            if not dwg_available else "本入口未接 DWG 转换")
                         continue
                     ok, how = _dwg(src_dxf, sub, run_cli, keep_dxf="dxf" in fmts)
-                    manifest[key] = "ok" if ok else "fail"
+                    put(key, "ok" if ok else "fail", "" if ok else "DWG 转换失败：%s" % how)
                     dwg_log.append("%s/%s: %s" % (VARIANT_DIRS[variant], src_dxf.stem,
                                                   how if ok else how + "，转换失败"))
                 else:
-                    manifest[key] = "skip"
+                    put(key, "skip", "未知格式")
                     notes.append("%s：未知格式" % key)
 
+    # ---- F1 primary deliverables: one PDF / Word per numbered variant, checked page by page ---
+    documents: Dict[str, Dict[str, Any]] = {}
+    pages_cache: Dict[str, list] = {}
+    for variant in [v for v in variants if v in DOC_VARIANTS]:
+        label = VARIANT_LABEL[variant]
+        for fmt in [f for f in ("pdf", "docx") if f in formats]:
+            keys = ["%s/%s/%s" % (str(f["id"]), label, fmt) for f in figs]
+            if not figs:
+                continue
+            if sp is None:
+                for k in keys:
+                    put(k, "fail", "版式参数无效：%s" % "；".join(notes[-1:]))
+                continue
+            if fmt == "docx":
+                from patent_figure import deliverable as _D
+                if not _D.docx_available():
+                    for k in keys:
+                        put(k, "skip", "未安装 python-docx，不生成 Word（pip install python-docx）")
+                    continue
+            rep = _build_document(variant, fmt, _fig_rows(figs, vdir, VARIANT_SUFFIX[variant]),
+                                  sp, dest, pages_cache)
+            documents[rep["file"]] = rep
+            for f, k in zip(figs, keys):
+                page = next((p for p in rep.get("page_checks", [])
+                             if p.get("figure") == str(f["id"])), None)
+                good = rep["ok"] and page is not None and page.get("ok")
+                put(k, "ok" if good else "fail", "" if good else _doc_reason(rep, str(f["id"])))
+    pages_cache.clear()
+
     flows = [(fid, Path(odir), res or {}) for fid, odir, res in flows]
-    flow_pngs = []
     for fid, odir, _res in flows:
         for ext in (".dxf", ".png", ".svg"):
             src = odir / (fid + ext)
             if _nonempty(src):
                 (dest / FLOW_DIR).mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dest / FLOW_DIR / src.name)
-                if ext == ".png":
-                    flow_pngs.append(dest / FLOW_DIR / src.name)
-
-    # 交底版 Word: one page per figure whose PNG rendered (+ flowcharts); each figure's docx item
-    # is ok only if it actually made it into the document (R1b #7 — no blanket ok).
-    if "docx" in formats and (docx_png or flow_pngs):
-        ordered = [docx_png[str(f["id"])] for f in figs if str(f["id"]) in docx_png]
-        included = set()
-        try:
-            write_docx(ordered + flow_pngs, dest / DOCX_NAME)
-            if _nonempty(dest / DOCX_NAME):
-                included = set(docx_png)
-        except Exception as exc:                 # python-docx 不在时只少一个文件
-            notes.append("Word 未生成：%s" % exc)
-        for fid in docx_png:
-            manifest["%s/交底版/docx" % fid] = "ok" if fid in included else "fail"
 
     numerals_src = vdir / NUMERALS_NAME
     numerals_doc: Dict[str, Any] = {}
@@ -278,10 +419,75 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
     if description_txt:
         text = ("【附图说明】\n" + "\n".join(desc) + "\n\n"
                 + (numerals_doc.get("description_zh") or "") + "\n")
-        (dest / "附图说明.txt").write_text(text, encoding="utf-8")
+        (dest / DESCRIPTION_NAME).write_text(text, encoding="utf-8")
+
+    bundle = {"manifest": manifest, "reasons": reasons, "documents": documents,
+              "render_job_id": pin.rid}
+    if checklist_txt:
+        (dest / CHECKLIST_NAME).write_text(checklist_text(result, bundle, sp), encoding="utf-8")
+
+    # ---- 文件齐全：every item reported ok must be a non-empty file in the bundle -------------
+    from patent_figure import deliverable_check as _C
+    expected_files = []
+    for k, v in manifest.items():
+        if v != "ok":
+            continue
+        fid, label, fmt = k.split("/")
+        variant = next(x for x, y in VARIANT_LABEL.items() if y == label)
+        if fmt in ("pdf", "docx"):
+            expected_files.append(DOC_BASENAME % (label, fmt))
+        elif fmt in ("dxf", "svg", "png", "dwg"):
+            expected_files.append("%s/%s%s.%s" % (VARIANT_DIRS[variant], fid,
+                                                  VARIANT_SUFFIX[variant], fmt))
+    if description_txt:
+        expected_files.append(DESCRIPTION_NAME)
+    if checklist_txt:
+        expected_files.append(CHECKLIST_NAME)
+    missing_files = _C.check_files(dest, sorted(set(expected_files)))
+    for k, v in list(manifest.items()):
+        fid, label, fmt = k.split("/")
+        variant = next(x for x, y in VARIANT_LABEL.items() if y == label)
+        f = DOC_BASENAME % (label, fmt) if fmt in ("pdf", "docx") else \
+            "%s/%s%s.%s" % (VARIANT_DIRS[variant], fid, VARIANT_SUFFIX[variant], fmt)
+        if v == "ok" and f in missing_files:
+            put(k, "fail", "包内缺文件或为空：%s" % f)
+
+    report = {"schema": "patent-figure-export-check/1", "render_job_id": pin.rid,
+              "spec": sp, "documents": documents, "missing_files": missing_files,
+              "manifest": manifest, "reasons": reasons}
+    (dest / REPORT_NAME).write_text(json.dumps(report, ensure_ascii=False, indent=2,
+                                               default=str), encoding="utf-8")
     files = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
-    return {"manifest": manifest, "files": files, "notes": notes, "dwg_log": dwg_log,
-            "figure_descriptions": desc, "render_job_id": pin.rid}
+    return {"manifest": manifest, "reasons": reasons,
+            "items": items_of(manifest, reasons, documents),
+            "documents": documents, "missing_files": missing_files, "files": files,
+            "notes": notes, "dwg_log": dwg_log, "figure_descriptions": desc,
+            "render_job_id": pin.rid, "spec": sp,
+            "ok": not any(v == "fail" for v in manifest.values())}
+
+
+def items_of(manifest: Dict[str, str], reasons: Dict[str, str],
+             documents: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Per (版本, 格式) summary rows for the export screen: status = fail if any figure failed,
+    ok if every figure is ok, otherwise skip; ``reason`` = the first reason found."""
+    groups: Dict[Tuple[str, str], List[str]] = {}
+    for k in manifest:
+        _fid, label, fmt = k.split("/")
+        groups.setdefault((label, fmt), []).append(k)
+    out = []
+    for (label, fmt), keys in sorted(groups.items()):
+        sts = [manifest[k] for k in keys]
+        status = "fail" if "fail" in sts else ("ok" if all(s == "ok" for s in sts) else "skip")
+        reason = next((reasons[k] for k in keys if manifest[k] == status and k in reasons), "")
+        doc = DOC_BASENAME % (label, fmt) if fmt in ("pdf", "docx") else None
+        if doc is not None:                      # where the file really is (failed → 未通过核验/)
+            doc = ((documents or {}).get(doc) or {}).get("path") or (
+                doc if status == "ok" else None)
+        out.append({"variant": label, "format": fmt, "status": status, "reason": reason,
+                    "figures": len(keys), "file": doc, "role": (
+                        "主交付" if fmt in ("pdf", "docx") else
+                        ("源文件，供再编辑" if fmt in ("dxf", "dwg") else "预览"))})
+    return out
 
 
 def zip_dir(src: Path, archive: Path) -> Path:

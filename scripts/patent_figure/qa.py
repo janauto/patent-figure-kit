@@ -538,12 +538,82 @@ def _threshold_str(op: str, value: Any) -> str:
     return "%s%s" % (op, text)
 
 
+# ===========================================================================
+# F4 (WP2): plain-language layer for every check — 中文名、白话提示（不含 JSON 字段名）与修复动作。
+# ``hint`` stays the precise, plan-level instruction for agents; ``hint_plain`` is for people who
+# never see a plan file. ``fix_action.kind`` ∈ open_terms | split_figure | change_view |
+# change_density; ``None`` = not something the user can fix (a writer-side defect → report it).
+# ===========================================================================
+CHECK_PLAIN: Dict[str, Tuple[str, str, Optional[str], Dict[str, Any]]] = {
+    "geometry_occupancy": (
+        "图形占比", "零件图形在纸面上占得太少，图显得空。换个视角，或把这张图的零件分得更紧凑。",
+        "change_view", {}),
+    "sheet_fill": (
+        "版面铺满度", "图形没有把纸铺开（太扁或太长）。换一个视角，或把零件拆到两张图里。",
+        "change_view", {}),
+    "text_height_mm": (
+        "标号字高", "标号的字太小，打印出来看不清。把螺钉等标准件设为不标号，或把这张图拆成几张。",
+        "open_terms", {"focus": "standard_parts"}),
+    "text_slot_ratio": (
+        "零件与字号比例", "有的被标零件在图上太小、比标号还小。把这些小零件设为不标号，"
+        "或单独给它们画一张放大的分图。", "split_figure", {}),
+    "label_overlap_pairs": (
+        "标号重叠", "有标号挤在一起压住了。减少这张图的标号（标准件不标号），或拆图。",
+        "open_terms", {"focus": "standard_parts"}),
+    "leader_hits_numeral_box": (
+        "引线压字", "有引线穿过了别的标号数字。减少标号或把这张图拆开。", "split_figure", {}),
+    "leader_crossing": (
+        "引线交叉", "引线互相交叉，读图时容易认错零件。减少标号或把这张图拆开。",
+        "split_figure", {}),
+    "leader_anchor_gap": (
+        "引线落点", "有引线没有落在它指的零件上（这个零件可能被别的零件挡住了）。"
+        "把被挡住的零件放进分解图里标注，或换个视角。", "split_figure", {}),
+    "part_bbox_overlap_pairs": (
+        "零件压叠", "分解图里零件互相压住了。把零件之间的间距调松一些。",
+        "change_density", {"density": "loose"}),
+    "labels_per_figure": (
+        "标号数量", "这张图的标号超过上限。拆成几张图，或把标准件设为不标号。",
+        "split_figure", {}),
+    "non_numeral_text_ratio": (
+        "多余文字", "图上出现了标号以外的文字（例如工程明细表）。在版面设置里关掉「工程明细表」。",
+        "change_density", {"engineering_table": False}),
+    "non_continuous": (
+        "线型", "图上出现了虚线等非实线——这是出图程序的问题，不是你的操作问题，请把这张图反馈给维护者。",
+        None, {}),
+    "forbidden_text": (
+        "禁用文字", "零件名称里出现了像内部件号的字母数字串。到术语页把它改成中文技术名称。",
+        "open_terms", {"focus": "names"}),
+    "file_readable": (
+        "文件可读", "这张图的文件读不出来。请重新出图；仍然不行就反馈给维护者。", None, {}),
+    "qa_internal_error": (
+        "检查程序异常", "检查程序自己出错了，这张图暂时不能算合格。请把这张图反馈给维护者。",
+        None, {}),
+}
+
+
+def plain_fields(check_id: str, figure: str) -> Dict[str, Any]:
+    """``{title_zh, hint_plain, fix_action}`` for one check of one figure."""
+    title, plain, kind, extra = CHECK_PLAIN.get(
+        check_id, (check_id, "这一项没通过，请按技术提示处理或反馈给维护者。", None, {}))
+    action = None
+    if kind is not None:
+        target = {"figure": figure}
+        target.update(extra)
+        action = {"kind": kind, "target": target}
+    return {"title_zh": title, "hint_plain": plain, "fix_action": action}
+
+
 def _report(dxf: Path, checks: List[Check]) -> Dict[str, Any]:
     passed = sum(1 for c in checks if c.passed)
+    rows = []
+    for c in checks:
+        row = c.to_json()
+        row.update(plain_fields(c.id, dxf.stem))
+        rows.append(row)
     return {"schema": "patent-figure-qa/1",
             "file": dxf.name,
             "pass": all(c.passed for c in checks),
-            "checks": [c.to_json() for c in checks],
+            "checks": rows,
             "summary": {"failed": len(checks) - passed, "passed": passed}}
 
 

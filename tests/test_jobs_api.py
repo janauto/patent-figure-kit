@@ -66,9 +66,6 @@ def test_openapi_paths_match_live_routes(tmp_path):
         for method in item:
             if method.lower() not in ("get", "post", "put", "delete", "patch"):
                 continue
-            # suggest is explicitly documented as WP2-not-yet-implemented
-            if path.endswith("/plan/suggest"):
-                continue
             if (method.upper(), path) not in live:
                 missing.append("%s %s" % (method.upper(), path))
     assert not missing, "openapi.yaml 声明了实现里没有的路由：%s" % missing
@@ -253,15 +250,17 @@ def test_export_async_then_download(client):
     j = _poll(client, eid)
     assert j["state"] == "succeeded", j
     manifest = j["result"]["manifest"]
-    # Per figure × version × format accounting (R1 #8): dxf produced, pdf deferred to WP2.
+    # Per figure × version × format accounting (R1 #8). WP2 F1: PDF and Word are the primary
+    # deliverables — one document per numbered variant, each verified page by page from the file.
     assert manifest, manifest
     dxf_items = {k: v for k, v in manifest.items() if k.endswith("/dxf")}
     pdf_items = {k: v for k, v in manifest.items() if k.endswith("/pdf")}
     assert dxf_items and all(v == "ok" for v in dxf_items.values()), manifest
-    assert pdf_items and all(v == "skip" for v in pdf_items.values()), manifest
-    # docx is one Word per disclosure variant; the 交底版 item is ok.
-    docx_ok = [k for k, v in manifest.items() if k.endswith("/docx") and v == "ok"]
-    assert docx_ok, manifest
+    assert pdf_items and all(v == "ok" for v in pdf_items.values()), j["result"]["reasons"]
+    docx_items = {k: v for k, v in manifest.items() if k.endswith("/docx")}
+    assert {k.split("/")[1] for k in docx_items} == {"交底版", "递交版"}
+    assert all(v == "ok" for v in docx_items.values()), j["result"]["reasons"]
+    assert all(d["ok"] for d in j["result"]["documents"].values())
     dl = client.get("/v1/exports/%s/download" % eid, headers=H)
     assert dl.status_code == 200
     assert dl.headers["content-type"] == "application/zip"

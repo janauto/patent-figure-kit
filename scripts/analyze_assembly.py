@@ -25,6 +25,7 @@ from patent_figure.analyze import (  # noqa: E402
     AnalyzeError,
     DEFAULT_MAX_LABELS,
     build_assembly,
+    instances_doc,
     validate_assembly,
     write_assembly,
 )
@@ -53,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="每张图的标记上限，用于生成 split_suggestions（默认 %d，"
                         "与 figure-plan 的 layout.max_labels_per_figure 默认值一致）"
                         % DEFAULT_MAX_LABELS)
+    p.add_argument("--instances", default=None, metavar="PATH",
+                   help="另写一份逐实例旁路文件（patent-assembly-instances/1：每个实例的名称、"
+                        "装配路径、包围盒），供候选分图识别子装配与同名跨子装配；不改 assembly.json")
     p.add_argument("--no-validate", action="store_true",
                    help="跳过输出文档的 schema 校验（默认校验，不通过则退出码 1）")
     return p
@@ -71,9 +75,10 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return EXIT_USAGE
 
+    rows = [] if args.instances else None
     try:
         doc = build_assembly(step, include=args.include, exclude=args.exclude,
-                             max_labels_per_figure=args.max_labels)
+                             max_labels_per_figure=args.max_labels, instances_out=rows)
     except AnalyzeError as exc:
         print("分析失败：%s" % (exc,), file=sys.stderr)
         return EXIT_FAIL
@@ -98,6 +103,13 @@ def main(argv=None) -> int:
     except OSError as exc:
         print("写出失败：%s" % (exc,), file=sys.stderr)
         return EXIT_FAIL
+
+    if args.instances:
+        try:
+            write_assembly(instances_doc(rows, doc["source"]["sha256"]), Path(args.instances))
+        except OSError as exc:
+            print("写出逐实例文件失败：%s" % (exc,), file=sys.stderr)
+            return EXIT_FAIL
 
     axis = doc["principal_axis"]
     print("已写出 %s" % (out,))

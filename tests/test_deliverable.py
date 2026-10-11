@@ -1,0 +1,315 @@
+"""F1 附图导出包（WP2）：页面合成 + 最终文档逐页检查（OCP 无关；DXF 用 ezdxf 现造）。
+
+每个检查项都有故障注入：dpi 72 字高不达标、页数不等、越过页边、非 A4、图片被拉伸、图号缺墨迹、
+页序颠倒、Word 页边过小 / 两图同页 / 多余文字段落、缺 pypdf——全部必须判不通过并给出原因；
+导出服务把不通过的文件移进 ``_未通过核验/``，对应清单项 fail，不得报 ok。
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "scripts"))
+
+ezdxf = pytest.importorskip("ezdxf")
+pytest.importorskip("matplotlib")
+
+from patent_figure import deliverable as D  # noqa: E402
+from patent_figure import deliverable_check as C  # noqa: E402
+from patent_figure import export as EX  # noqa: E402
+from patent_figure import versions as V  # noqa: E402
+from ezdxf.enums import TextEntityAlignment  # noqa: E402
+
+
+def sheet(path: Path, number: int, height: float = 200.0, text_h: float = 3.5,
+          caption: str = None) -> Path:
+    """A minimal annotated sheet: a part outline, one numeral + leader, the 「图N」 caption."""
+    doc = ezdxf.new("R2018")
+    for name in ("GEOM", "LEADER", "NUM", "CAPTION"):
+        doc.layers.add(name)
+    msp = doc.modelspace()
+    msp.add_lwpolyline([(30, 30), (140, 30), (140, 30 + height), (30, 30 + height)],
+                       close=True, dxfattribs={"layer": "GEOM"})
+    msp.add_line((60, 60), (110, 60 + height * 0.5), dxfattribs={"layer": "GEOM"})
+    msp.add_line((140, 100), (152, 100), dxfattribs={"layer": "LEADER"})
+    t = msp.add_text("1", dxfattribs={"layer": "NUM", "height": text_h})
+    t.set_placement((155, 100), align=TextEntityAlignment.MIDDLE_LEFT)
+    c = msp.add_text(caption or ("图%d" % number), dxfattribs={"layer": "CAPTION", "height": 5.0})
+    c.set_placement((85, 15), align=TextEntityAlignment.MIDDLE_CENTER)
+    doc.saveas(str(path))
+    return path
+
+
+@pytest.fixture()
+def two(tmp_path):
+    rows = [{"figure": "fig1", "number": 1, "dxf": sheet(tmp_path / "fig1_filing.dxf", 1)},
+            {"figure": "fig2", "number": 2,
+             "dxf": sheet(tmp_path / "fig2_filing.dxf", 2, height=150, text_h=7.0)}]
+    return tmp_path, rows
+
+
+def _build(rows, sp, out: Path, fmt: str):
+    pages = [D.rasterize(r["dxf"], sp, r["figure"], r["number"]) for r in rows]
+    (D.write_pdf if fmt == "pdf" else D.write_docx)(pages, out)
+    return pages
+
+
+def _check(path, rows, sp):
+    return C.check_document(path, C.sources_from(rows, sp["area_mm"]), sp)
+
+
+# --------------------------------------------------------------------------- happy path
+
+
+@pytest.mark.parametrize("fmt", ["pdf", "docx"])
+def test_good_document_passes_every_page_check(two, fmt):
+    if fmt == "docx":
+        pytest.importorskip("docx")
+    if fmt == "pdf":
+        pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    out = tmp / ("doc." + fmt)
+    _build(rows, sp, out, fmt)
+    rep = _check(out, rows, sp)
+    assert rep["ok"], (rep["errors"], [p["errors"] for p in rep["page_checks"]])
+    assert rep["pages"] == rep["expected_pages"] == 2
+    p1, p2 = rep["page_checks"]
+    assert p1["caption"] == "图1" and p2["caption"] == "图2"
+    assert p1["caption_ink"] > C.INK_FRACTION_MIN and p2["caption_ink"] > C.INK_FRACTION_MIN
+    assert p1["scale"] == 1.0 and abs(p1["dpi_effective"] - 300) < 1
+    assert p1["min_text_mm"] == pytest.approx(3.5) and p1["min_text_px"] >= 24
+    left, top = p1["image_mm"]["left"], p1["image_mm"]["top"]
+    assert left >= 25 - 0.5 and top >= 25 - 0.5
+    assert left + p1["image_mm"]["width"] <= 195.5 and top + p1["image_mm"]["height"] <= 282.5
+
+
+def test_independent_reader_agrees_on_pdf_geometry(two):
+    """Cross-check the checker's PDF geometry with a second, independent PDF library."""
+    fitz = pytest.importorskip("fitz")
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    out = tmp / "doc.pdf"
+    _build(rows, sp, out, "pdf")
+    rep = _check(out, rows, sp)
+    doc = fitz.open(str(out))
+    for page, pc in zip(doc, rep["page_checks"]):
+        xref = [x for x in page.get_images() if page.get_image_rects(x[0])][0][0]
+        r = page.get_image_rects(xref)[0]
+        mm = 25.4 / 72.0
+        assert abs(r.x0 * mm - pc["image_mm"]["left"]) < 0.2
+        assert abs(r.y0 * mm - pc["image_mm"]["top"]) < 0.2
+        assert abs(r.width * mm - pc["image_mm"]["width"]) < 0.2
+        assert abs(page.rect.width * mm - 210) < 0.2 and abs(page.rect.height * mm - 297) < 0.2
+
+
+# --------------------------------------------------------------------------- fault injection
+
+
+@pytest.mark.parametrize("fmt", ["pdf", "docx"])
+def test_dpi_72_fails_the_raster_text_height(two, fmt):
+    if fmt == "docx":
+        pytest.importorskip("docx")
+    if fmt == "pdf":
+        pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 72)
+    out = tmp / ("low." + fmt)
+    _build(rows, sp, out, fmt)
+    rep = _check(out, rows, sp)
+    assert not rep["ok"]
+    assert any("px" in e for e in rep["page_checks"][0]["errors"])
+    assert rep["page_checks"][0]["min_text_px"] < 24
+
+
+def test_conservative_preset_shrinks_tall_sheets_and_the_check_says_so(tmp_path):
+    pytest.importorskip("pypdf")
+    rows = [{"figure": "fig1", "number": 1,
+             "dxf": sheet(tmp_path / "tall.dxf", 1, height=238.0, text_h=3.5)}]
+    sp = D.spec("conservative", 300)
+    out = tmp_path / "c.pdf"
+    _build(rows, sp, out, "pdf")
+    rep = _check(out, rows, sp)
+    pc = rep["page_checks"][0]
+    assert pc["scale"] < 1.0 and not rep["ok"]
+    assert any("缩放后最小字高" in e for e in pc["errors"])
+    sp2 = D.spec("standard", 300)                       # the same sheet fits 1:1 in 170×257
+    _build(rows, sp2, tmp_path / "s.pdf", "pdf")
+    assert _check(tmp_path / "s.pdf", rows, sp2)["ok"]
+
+
+def test_page_count_must_equal_figure_count(two):
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    _build(rows[:1], sp, tmp / "one.pdf", "pdf")
+    rep = _check(tmp / "one.pdf", rows, sp)
+    assert not rep["ok"] and "页数 1 ≠ 图数 2" in rep["errors"][0]
+
+
+def test_swapped_page_order_is_caught_by_the_figure_number(two):
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    _build(list(reversed(rows)), sp, tmp / "rev.pdf", "pdf")
+    rep = _check(tmp / "rev.pdf", rows, sp)
+    assert not rep["ok"]
+    assert any("图号应为「图1」" in e or "拉伸" in e for e in rep["page_checks"][0]["errors"])
+
+
+def test_missing_caption_ink_is_caught_from_the_pixels(two):
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    pages = [D.rasterize(r["dxf"], sp, r["figure"], r["number"]) for r in rows]
+    # erase the caption area from page 1's raster only (the source DXF still says 图1)
+    src = C.Source("fig1", 1, rows[0]["dxf"], sp["area_mm"])
+    bx0, by0, bx1, by1 = D.caption_box(src.caption)
+    wx0, wy0, wx1, wy1 = src.window
+    g = pages[0].gray
+    H, W = g.shape
+    c0, c1 = int((bx0 - wx0) / (wx1 - wx0) * W) - 40, int((bx1 - wx0) / (wx1 - wx0) * W) + 40
+    r0, r1 = int((wy1 - by1) / (wy1 - wy0) * H) - 40, int((wy1 - by0) / (wy1 - wy0) * H) + 40
+    g[max(r0, 0):r1, max(c0, 0):c1] = 255
+    D.write_pdf(pages, tmp / "noink.pdf")
+    rep = _check(tmp / "noink.pdf", rows, sp)
+    assert not rep["page_checks"][0]["ok"]
+    assert any("没有墨迹" in e for e in rep["page_checks"][0]["errors"])
+    assert rep["page_checks"][1]["ok"]
+
+
+def _pdf_with_placement(path: Path, page: "D.Page", page_mm=(210.0, 297.0), rect=None):
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.figure import Figure
+    pw, ph = page_mm
+    x, top, w, h = rect or (page.placement["x"], page.placement["top"], page.placement["w"],
+                            page.placement["h"])
+    with PdfPages(str(path)) as pdf:
+        fig = Figure(figsize=(pw / 25.4, ph / 25.4), dpi=72)
+        ax = fig.add_axes([x / pw, (ph - top - h) / ph, w / pw, h / ph])
+        ax.set_axis_off()
+        ax.imshow(page.gray, cmap="gray", vmin=0, vmax=255, interpolation="none", aspect="auto")
+        pdf.savefig(fig)
+
+
+def test_margin_violation_non_a4_and_stretching_are_each_caught(tmp_path):
+    pytest.importorskip("pypdf")
+    rows = [{"figure": "fig1", "number": 1, "dxf": sheet(tmp_path / "a.dxf", 1)}]
+    sp = D.spec("standard", 300)
+    page = D.rasterize(rows[0]["dxf"], sp, "fig1", 1)
+    pl = page.placement
+    _pdf_with_placement(tmp_path / "left.pdf", page, rect=(8.0, pl["top"], pl["w"], pl["h"]))
+    errs = _check(tmp_path / "left.pdf", rows, sp)["page_checks"][0]["errors"]
+    assert any("越过页边" in e for e in errs)
+    _pdf_with_placement(tmp_path / "letter.pdf", page, page_mm=(215.9, 279.4))
+    errs = _check(tmp_path / "letter.pdf", rows, sp)["page_checks"][0]["errors"]
+    assert any("不是 A4" in e for e in errs)
+    _pdf_with_placement(tmp_path / "stretch.pdf", page,
+                        rect=(pl["x"], pl["top"], pl["w"], pl["h"] * 0.8))
+    errs = _check(tmp_path / "stretch.pdf", rows, sp)["page_checks"][0]["errors"]
+    assert any("拉伸" in e for e in errs)
+
+
+def test_missing_pypdf_is_reported_as_unverifiable_never_ok(two, monkeypatch):
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    _build(rows, sp, tmp / "x.pdf", "pdf")
+    monkeypatch.setattr(C, "pdf_checker_available", lambda: False)
+    rep = _check(tmp / "x.pdf", rows, sp)
+    assert rep["ok"] is False and "pypdf" in rep["errors"][0]
+
+
+def _rewrite_docx(src: Path, dst: Path, fn):
+    with zipfile.ZipFile(str(src)) as zin, zipfile.ZipFile(str(dst), "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/document.xml":
+                data = fn(data.decode("utf-8")).encode("utf-8")
+            zout.writestr(item, data)
+
+
+def test_docx_margins_page_breaks_and_stray_text_are_checked(two):
+    pytest.importorskip("docx")
+    import re
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    assert _check(good, rows, sp)["ok"]
+    _rewrite_docx(good, tmp / "m.docx",
+                  lambda x: re.sub(r'w:left="\d+"', 'w:left="567"', x))       # 10 mm
+    rep = _check(tmp / "m.docx", rows, sp)
+    assert not rep["ok"] and any("页边" in e for e in rep["errors"])
+    _rewrite_docx(good, tmp / "b.docx", lambda x: x.replace("<w:pageBreakBefore/>", ""))
+    rep = _check(tmp / "b.docx", rows, sp)
+    assert not rep["ok"] and any("没有分页" in e for e in rep["errors"])
+    _rewrite_docx(good, tmp / "t.docx", lambda x: x.replace(
+        "<w:sectPr", "<w:p><w:r><w:t>多余说明</w:t></w:r></w:p><w:sectPr", 1))
+    rep = _check(tmp / "t.docx", rows, sp)
+    assert not rep["ok"] and any("图片以外的文字" in e for e in rep["errors"])
+
+
+# --------------------------------------------------------------------------- export service
+
+
+def _publish(store, rid, tmp):
+    vd = store.begin(rid)
+    arts = ["reference-numerals.json"]
+    figs = []
+    for k in (1, 2):
+        fid = "fig%d" % k
+        for suf in ("", "_annotated", "_filing"):
+            sheet(vd / ("%s%s.dxf" % (fid, suf)), k, height=180 + 10 * k)
+            (vd / ("%s%s.svg" % (fid, suf))).write_text("<svg/>", encoding="utf-8")
+            arts += ["%s%s.dxf" % (fid, suf), "%s%s.svg" % (fid, suf)]
+        figs.append({"id": fid, "pass": True, "number": k,
+                     "annotation": {"figure_description": "图%d为测试示意图；" % k}})
+    (vd / "reference-numerals.json").write_text(json.dumps({"description_zh": "1—底座"}),
+                                                encoding="utf-8")
+    store.write_result(rid, {"ok": True, "figures": figs})
+    store.seal(rid, {"ok": True, "required_artefacts": arts}, 1)
+    with V.state_lock(store.root):
+        store.commit_pointer(rid, 1)
+    return vd
+
+
+def test_export_service_builds_checks_and_quarantines(tmp_path):
+    pytest.importorskip("docx")
+    pytest.importorskip("pypdf")
+    store = V.VersionStore(tmp_path / "ws")
+    _publish(store, "r1", tmp_path)
+    with EX.acquire(store.root) as pin:
+        ok = EX.build_bundle(pin, tmp_path / "ok", variants=("annotated", "filing"),
+                             formats=("pdf", "docx", "dxf", "dwg"), dpi=300,
+                             run_cli=lambda *a, **k: None, description_txt=True,
+                             checklist_txt=True, dwg_available=False)
+    assert ok["ok"] is True, ok["reasons"]
+    assert {d for d in ok["documents"]} == {"说明书附图_递交版.pdf", "说明书附图_递交版.docx",
+                                           "说明书附图_交底版.pdf", "说明书附图_交底版.docx"}
+    assert all(v == "skip" for k, v in ok["manifest"].items() if k.endswith("/dwg"))
+    assert "DWG 转换器" in ok["reasons"]["fig1/递交版/dwg"]
+    for name in ("附图说明.txt", "核对清单.txt", "核验报告.json"):
+        assert name in ok["files"]
+    checklist = (tmp_path / "ok" / "核对清单.txt").read_text(encoding="utf-8")
+    assert "人工核对" in checklist and "电子申请文件格式要求说明" in checklist
+    report = json.loads((tmp_path / "ok" / "核验报告.json").read_text(encoding="utf-8"))
+    assert report["missing_files"] == [] and report["documents"]
+    with EX.acquire(store.root) as pin:
+        low = EX.build_bundle(pin, tmp_path / "low", variants=("filing",),
+                              formats=("pdf", "dxf"), dpi=72, checklist_txt=True)
+    assert low["ok"] is False
+    assert low["manifest"]["fig1/递交版/pdf"] == "fail" and low["manifest"]["fig1/递交版/dxf"] == "ok"
+    assert "_未通过核验/说明书附图_递交版.pdf" in low["files"]
+    assert "说明书附图_递交版.pdf" not in low["files"]
+    item = next(i for i in low["items"] if i["format"] == "pdf")
+    assert item["status"] == "fail" and item["file"].startswith("_未通过核验/")
+    assert "不要递交" in (tmp_path / "low" / "核对清单.txt").read_text(encoding="utf-8")
+    assert store.referenced() == set()

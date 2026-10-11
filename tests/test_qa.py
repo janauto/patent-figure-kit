@@ -100,7 +100,31 @@ def test_good_figure_passes_every_gate(tmp_path):
     assert [c["id"] for c in report["checks"]] == list(QA.CHECK_ORDER)
     for check in report["checks"]:
         assert check["detail"].strip() and check["hint"].strip(), check["id"]
-        assert set(check) == {"id", "pass", "value", "threshold", "detail", "hint"}
+        # WP2 F4: the plain-language layer is part of every check's shape.
+        assert set(check) == {"id", "pass", "value", "threshold", "detail", "hint",
+                              "title_zh", "hint_plain", "fix_action"}
+
+
+def test_every_check_has_a_plain_chinese_name_hint_and_action():
+    """F4: all 13 gates carry 中文名 + 白话提示 without JSON / field-name jargon, and a fix action
+    from the frozen kind set — except the writer-side defect (non_continuous), which is not
+    user-fixable and says so."""
+    import re
+    assert set(QA.CHECK_ORDER) <= set(QA.CHECK_PLAIN)
+    kinds = {"open_terms", "split_figure", "change_view", "change_density"}
+    for cid in QA.CHECK_ORDER:
+        row = QA.plain_fields(cid, "fig7")
+        assert re.search(r"[\u4e00-\u9fff]", row["title_zh"]), cid
+        plain = row["hint_plain"]
+        assert re.search(r"[\u4e00-\u9fff]", plain), cid
+        # no JSON / plan field jargon: no ASCII identifiers, brackets, quotes or dotted paths
+        assert not re.search(r"[A-Za-z_\[\]{}\"=:]", plain), (cid, plain)
+        act = row["fix_action"]
+        if cid == "non_continuous":
+            assert act is None and "反馈" in plain
+        else:
+            assert act["kind"] in kinds, cid
+            assert act["target"]["figure"] == "fig7"
 
 
 def test_thresholds_are_the_frozen_ones():

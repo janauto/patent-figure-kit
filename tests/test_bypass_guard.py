@@ -45,7 +45,17 @@ def _users(dotted: str):
 def test_zip_archives_only_via_the_export_service():
     # bench.py keeps a LABELLED legacy zip only for timing an R1e-era baseline repo that has no
     # version store (export_path = "legacy-zip(baseline repo)"); it never reads a real project.
-    assert _users("zipfile.ZipFile") <= {"patent_figure/export.py", "bench.py"}
+    # WP2: deliverable_check.py opens the WRITTEN Word file (a zip container) READ-ONLY to verify
+    # it page by page — it never creates an archive (pinned by the test below).
+    assert _users("zipfile.ZipFile") <= {"patent_figure/export.py", "bench.py",
+                                         "patent_figure/deliverable_check.py"}
+
+
+def test_deliverable_check_only_reads_zip_containers():
+    src = (_SCRIPTS / "patent_figure" / "deliverable_check.py").read_text(encoding="utf-8")
+    calls = [line.strip() for line in src.splitlines() if "zipfile.ZipFile(" in line]
+    assert calls and all(", \"w\"" not in c and ", 'w'" not in c and "mode=" not in c
+                         for c in calls), calls
 
 
 def test_pointer_writes_only_in_the_store_and_the_publish_service():
