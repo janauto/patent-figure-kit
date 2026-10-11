@@ -516,30 +516,12 @@ class Tools:
         if args.get("apply"):
             if_match = str(args.get("plan_etag") or "").strip('"') or None
             outcome = {"filled": [], "kept_human": [], "added": []}
+            all_names = [p["name"] for p in asm.get("parts", [])]
 
             def mutate(cur):
-                by_sel = {t.get("selector"): t for t in cur.get("terms", [])}
-                for r in rows:
-                    sel, term = r["selector"], str(r.get("term", "")).strip()
-                    if not term:
-                        continue
-                    row = by_sel.get(sel)
-                    if row is None and SUG.winning_row(cur, sel) is None:
-                        row = {"selector": sel, "term": term,
-                               "label": r.get("label") if r.get("label") in ("once", "none")
-                               else "once"}
-                        cur.setdefault("terms", []).append(row)
-                        by_sel[sel] = row
-                        outcome["added"].append(sel)
-                        continue
-                    row = row or SUG.winning_row(cur, sel)
-                    if str(row.get("term") or "").strip():
-                        outcome["kept_human"].append(sel)      # filled meanwhile: never overwrite
-                        continue
-                    row["term"] = term
-                    if r.get("label") in ("once", "none"):
-                        row["label"] = r["label"]
-                    outcome["filled"].append(sel)
+                # Only the selected, still-blank parts change (R2b #1): a shared wildcard row is
+                # never edited — an exact row is inserted ahead of it instead (REST and MCP).
+                outcome.update(SUG.fill_blank_terms(cur, rows, all_names))
                 return cur
 
             try:

@@ -311,3 +311,34 @@ def test_edge_crowded_low_part_count_ends_empty_with_guide(edge_dir):
     for c in doc["candidates"]:
         assert c["status"] == "fail" and c["suggestion"]
         assert "{" not in c["reason"] and "layout" not in c["reason"]
+
+
+# --------------------------------------------------------------------------- AI 起名写回（R2b #1）
+
+
+def test_fill_blank_terms_never_edits_a_shared_wildcard_row():
+    names = ["SYN-A01", "SYN-B02", "SYN-C03", "ONLY-ME"]
+    plan = {"terms": [{"selector": "SYN-*", "term": "", "label": "all"},
+                      {"selector": "ONLY-*", "term": "", "label": "once"}]}
+    out = SP.fill_blank_terms(plan, [{"selector": "SYN-A01", "term": "底座", "label": "once"},
+                                     {"selector": "ONLY-ME", "term": "壳体", "label": "none"}],
+                              names)
+    assert out == {"filled": ["SYN-A01", "ONLY-ME"], "kept_human": [], "added": []}
+    rows = plan["terms"]
+    # an exact row for SYN-A01 is inserted AHEAD of the untouched shared wildcard
+    assert rows[0] == {"selector": "SYN-A01", "term": "底座", "label": "once"}
+    assert rows[1] == {"selector": "SYN-*", "term": "", "label": "all"}
+    # a row that covers only this part is filled in place
+    assert rows[2] == {"selector": "ONLY-*", "term": "壳体", "label": "none"}
+    assert SP.winning_row(plan, "SYN-B02")["term"] == "" and \
+        SP.winning_row(plan, "SYN-B02")["label"] == "all"
+    assert SP.term_of(plan, "SYN-A01") == "底座"
+
+
+def test_fill_blank_terms_keeps_human_names_and_adds_missing_rows():
+    plan = {"terms": [{"selector": "A", "term": "人填的", "label": "once"}]}
+    out = SP.fill_blank_terms(plan, [{"selector": "A", "term": "机器的"},
+                                     {"selector": "B[1]", "term": "新件"}], ["A", "B[1]"])
+    assert out == {"filled": [], "kept_human": ["A"], "added": ["B[1]"]}
+    assert plan["terms"][0]["term"] == "人填的"
+    assert plan["terms"][1] == {"selector": "B[[]1]", "term": "新件", "label": "once"}

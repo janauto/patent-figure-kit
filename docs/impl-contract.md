@@ -2407,3 +2407,16 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   租约与未封口未取消的目录，只回收已封口或已取消、且不在最近 N 次作业里的版本（顺带修了 `keep_jobs=0` 时
   `[-0:]` 切片保留全部的问题）。`tests/test_candidate_gc.py`：四作业交错、作业运行中被并发回收、中途取消、
   预览读取期间回收、另一进程持租约直到其退出。
+
+### 14.9 修复轮 2（Codex R2b）收敛
+
+- **AI 起名写回只动选中且空白的零件**（R2b #1）：`suggest_plan.fill_blank_terms` 按编号优先级找到管辖该零件的
+  术语行——已有名 → `kept_human`；没有行 → 追加精确（转义）行；行只覆盖这一个零件 → 原地填写；行是**共享的**
+  （如空白的 `SYN-*` 同时管着别的零件）→ 原行的 term 与 label 一律不动，在它**前面**插入该零件的精确行使其优先。
+  REST 与 MCP（`apply` 缺省 true）共用。
+- **Word 图片与继承格式白名单**（R2b #2）：每张行内图片必须与写出端完全同构——`graphicData` 里恰一张
+  `pic:pic`；`blip` 无效果子元素；`blipFill` 只有 `blip` + `stretch/fillRect`（无偏移），`srcRect` 若存在必须全零；
+  `spPr` 只有 `xfrm` + `prstGeom rect`；`xfrm` 无旋转、无翻转、`off`=(0,0)、`ext` 与 `wp:extent` 相同。段落缩进 /
+  间距不得用字符 / 行单位（`leftChars`、`firstLineChars`、`beforeLines`……，它们优先于显式置零的值）；文档默认段落
+  格式与默认段落样式不得带框架、编号、边框、分节或字符 / 行单位缩进间距，默认样式不得 `basedOn` 别的样式；节属性
+  只允许 `pgSz/pgMar/cols/docGrid`（`vAlign` 等一律拒绝）。另外两种格式都核对图片像素宽高比与显示尺寸一致（未被拉伸）。

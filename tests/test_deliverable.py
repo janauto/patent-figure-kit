@@ -227,12 +227,15 @@ def test_missing_pypdf_is_reported_as_unverifiable_never_ok(two, monkeypatch):
     assert rep["ok"] is False and "pypdf" in rep["errors"][0]
 
 
-def _rewrite_docx(src: Path, dst: Path, fn):
+def _rewrite_docx(src: Path, dst: Path, fn, part: str = "word/document.xml"):
     with zipfile.ZipFile(str(src)) as zin, zipfile.ZipFile(str(dst), "w") as zout:
         for item in zin.infolist():
             data = zin.read(item.filename)
-            if item.filename == "word/document.xml":
-                data = fn(data.decode("utf-8")).encode("utf-8")
+            if item.filename == part:
+                if part.startswith("word/media/"):          # binary part: fn gets/returns bytes
+                    data = fn(data)
+                else:
+                    data = fn(data.decode("utf-8")).encode("utf-8")
             zout.writestr(item, data)
 
 
@@ -293,6 +296,62 @@ def test_word_structure_is_strict_any_layout_deviation_fails(two, inject, expect
     assert ok["layout_note"] == "Word 按文档结构核验，实际排版以 Word 打开为准"
     bad = tmp / "bad.docx"
     _rewrite_docx(good, bad, inject)
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"], rep
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert expect in msgs, msgs
+
+
+def _squash_png(data: bytes) -> bytes:
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as im:
+        out = io.BytesIO()
+        im.resize((im.width // 2, im.height)).save(out, "PNG")
+        return out.getvalue()
+
+
+_NORMAL = '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>'
+
+
+@pytest.mark.parametrize("part, inject, expect", [
+    ("word/document.xml", lambda x: x.replace("<a:stretch>", '<a:srcRect b="50000"/><a:stretch>', 1),
+     "被裁剪"),
+    ("word/document.xml", lambda x: x.replace("<a:xfrm>", '<a:xfrm rot="5400000">', 1), "旋转"),
+    ("word/document.xml", lambda x: x.replace("<a:xfrm>", '<a:xfrm flipH="1">', 1), "翻转"),
+    ("word/document.xml", lambda x: x.replace('<a:off x="0" y="0"/><a:ext cx="',
+                                              '<a:off x="0" y="0"/><a:ext cx="1', 1),
+     "内部变换尺寸"),
+    ("word/document.xml", lambda x: x.replace('<a:blip r:embed="', '<a:blip r:embed="', 1)
+     .replace('"/><a:stretch>', '"><a:grayscl/></a:blip><a:stretch>', 1), "图像效果"),
+    ("word/document.xml", lambda x: x.replace('<w:ind w:left="0"', '<w:ind w:leftChars="20000" w:left="0"', 1),
+     "字符单位"),
+    ("word/document.xml", lambda x: x.replace('<w:ind w:left="0"', '<w:ind w:firstLineChars="200" w:left="0"', 1),
+     "字符单位"),
+    ("word/document.xml", lambda x: x.replace("<w:docGrid", '<w:vAlign w:val="center"/><w:docGrid', 1),
+     "额外设置"),
+    ("word/styles.xml", lambda x: x.replace(_NORMAL, _NORMAL + '<w:pPr><w:ind w:leftChars="3000"/></w:pPr>', 1),
+     "字符/行单位"),
+    ("word/styles.xml", lambda x: x.replace(_NORMAL, _NORMAL + '<w:pPr><w:framePr w:w="2000"/></w:pPr>', 1),
+     "framePr"),
+    ("word/styles.xml", lambda x: x.replace('<w:spacing w:after="200"', '<w:spacing w:beforeLines="500" w:after="200"', 1),
+     "字符/行单位"),
+    ("word/media/image1.png", _squash_png, "宽高比"),
+])
+def test_word_picture_and_inherited_formatting_are_whitelisted(two, part, inject, expect):
+    """R2b #2: the full check_docx rejects a cropped / rotated / flipped / resized-inside /
+    effect-laden picture, character-unit indents, a page-level vertical alignment, inherited
+    indents / frames / line-unit spacing from the default style or docDefaults, and media whose
+    pixel aspect does not match the displayed size."""
+    pytest.importorskip("docx")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.docx"
+    _build(rows, sp, good, "docx")
+    assert _check(good, rows, sp)["ok"]
+    bad = tmp / "bad.docx"
+    _rewrite_docx(good, bad, inject, part)
+    with zipfile.ZipFile(str(good)) as a, zipfile.ZipFile(str(bad)) as b:
+        assert a.read(part) != b.read(part), "注入没有生效"
     rep = _check(bad, rows, sp)
     assert not rep["ok"], rep
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])

@@ -38,6 +38,8 @@ _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+_PIC_URI = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 _PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
@@ -103,6 +105,10 @@ def _page_check(k: int, src: Source, sp: Dict[str, Any], rect_mm: Tuple[float, f
     scale = min(sx, sy)
     if abs(sx - sy) > SCALE_TOL * max(sx, sy):
         errors.append("图片被拉伸（横向缩放 %.4f ≠ 纵向 %.4f）" % (sx, sy))
+    if px[0] > 0 and px[1] > 0 and w > 0 and h > 0 and \
+            abs((px[0] / px[1]) / (w / h) - 1.0) > SCALE_TOL:
+        errors.append("图片像素宽高比 %d×%d 与显示尺寸 %.1f×%.1f mm 不一致（被拉伸）"
+                      % (px[0], px[1], w, h))
     dpi_eff = min(px[0] / (w / 25.4), px[1] / (h / 25.4)) if w > 0 and h > 0 else 0.0
     min_mm = min_px = None
     if src.min_text_mm is None:
@@ -289,6 +295,101 @@ def _on(el) -> bool:
     return el is not None and str(_wattr(el, "val", "1")).lower() not in ("0", "false", "off")
 
 
+#: Indent / spacing attributes in CHARACTER or LINE units: they take precedence over the twip
+#: values and resize with the font, so a zero twip indent says nothing while one is set.
+_UNIT_ATTRS = ("leftChars", "rightChars", "startChars", "endChars", "firstLineChars",
+               "hangingChars", "beforeLines", "afterLines")
+
+
+def _unit_attrs(el) -> List[str]:
+    return [a for a in _UNIT_ATTRS if el is not None and float(_wattr(el, a, 0) or 0) != 0]
+
+
+def _inherited_layout(styles) -> List[str]:
+    """Formatting a page paragraph would INHERIT (docDefaults + the default paragraph style —
+    page paragraphs carry no pStyle) that the explicit direct formatting does not neutralise:
+    frames, numbering, borders, sections, character/line-unit indents or spacing."""
+    errors: List[str] = []
+    if styles is None:
+        return errors
+    sources = []
+    dd = styles.find(_q(_W, "docDefaults"))
+    if dd is not None:
+        sources.append(("文档默认段落格式", dd.find("%s/%s" % (_q(_W, "pPrDefault"), _q(_W, "pPr")))))
+    for st in styles.iter(_q(_W, "style")):
+        if _wattr(st, "type") == "paragraph" and str(_wattr(st, "default", "0")) in ("1", "true"):
+            sources.append(("默认段落样式「%s」" % _wattr(st, "styleId", "?"), st.find(_q(_W, "pPr"))))
+            if st.find(_q(_W, "basedOn")) is not None:
+                errors.append("默认段落样式继承自别的样式，继承格式无法确定")
+    for label, ppr in sources:
+        if ppr is None:
+            continue
+        for tag in ("framePr", "numPr", "pBdr", "sectPr", "textDirection"):
+            if ppr.find(_q(_W, tag)) is not None:
+                errors.append("%s带 %s（会移动或改变图片）" % (label, tag))
+        for tag in ("ind", "spacing"):
+            bad = _unit_attrs(ppr.find(_q(_W, tag)))
+            if bad:
+                errors.append("%s带字符/行单位的缩进或间距 %s（优先于显式置零的值）" % (label, bad))
+    return errors
+
+
+def _picture_whitelist(inl, where: str) -> List[str]:
+    """The picture inside ``wp:inline`` must be EXACTLY what the writer produces: one ``pic:pic``,
+    a plain blip (no effects), stretched to the full frame with NO crop, a rectangle with an
+    un-rotated, un-flipped transform at the origin whose size equals ``wp:extent`` — otherwise the
+    displayed picture is not the media file mapped onto the extent (R2b #2)."""
+    errors: List[str] = []
+    graphic = inl.find(_q(_A, "graphic"))
+    gdata = graphic.find(_q(_A, "graphicData")) if graphic is not None else None
+    pics = gdata.findall(_q(_PIC, "pic")) if gdata is not None else []
+    if gdata is None or gdata.get("uri") != _PIC_URI or len(pics) != 1 or len(list(gdata)) != 1:
+        return ["%s的图形不是单张图片（DrawingML picture）" % where]
+    pic = pics[0]
+    ext = inl.find(_q(_WP, "extent"))
+    bf = pic.find(_q(_PIC, "blipFill"))
+    if bf is None:
+        return ["%s的图片缺少填充（blipFill）" % where]
+    for el in bf:
+        name = _local(el)
+        if name == "blip":
+            if len(list(el)):
+                errors.append("%s的图片带图像效果 %s" % (where, [_local(c) for c in el]))
+        elif name == "srcRect":
+            if any(float(el.get(a, 0) or 0) != 0 for a in ("l", "t", "r", "b")):
+                errors.append("%s的图片被裁剪（srcRect %s）" % (where, dict(el.attrib)))
+        elif name == "stretch":
+            fr = el.find(_q(_A, "fillRect"))
+            if fr is None or len(list(el)) != 1 or \
+                    any(float(fr.get(a, 0) or 0) != 0 for a in ("l", "t", "r", "b")):
+                errors.append("%s的图片不是满框拉伸（fillRect 有偏移）" % where)
+        else:
+            errors.append("%s的图片填充方式不受控 <%s>" % (where, name))
+    if bf.find(_q(_A, "stretch")) is None:
+        errors.append("%s的图片不是满框拉伸" % where)
+    sppr = pic.find(_q(_PIC, "spPr"))
+    kids = [_local(c) for c in (list(sppr) if sppr is not None else [])]
+    if sppr is None or sorted(kids) != ["prstGeom", "xfrm"]:
+        errors.append("%s的图片形状属性不受控 %s" % (where, kids))
+        return errors
+    geom = sppr.find(_q(_A, "prstGeom"))
+    if geom.get("prst") != "rect":
+        errors.append("%s的图片形状不是矩形（%s）" % (where, geom.get("prst")))
+    xfrm = sppr.find(_q(_A, "xfrm"))
+    if float(xfrm.get("rot", 0) or 0) != 0:
+        errors.append("%s的图片被旋转（rot=%s）" % (where, xfrm.get("rot")))
+    for a in ("flipH", "flipV"):
+        if str(xfrm.get(a, "0")).lower() in ("1", "true"):
+            errors.append("%s的图片被翻转（%s）" % (where, a))
+    off, xext = xfrm.find(_q(_A, "off")), xfrm.find(_q(_A, "ext"))
+    if off is None or float(off.get("x", 0) or 0) != 0 or float(off.get("y", 0) or 0) != 0:
+        errors.append("%s的图片内部有偏移（a:off）" % where)
+    if xext is None or ext is None or xext.get("cx") != ext.get("cx") \
+            or xext.get("cy") != ext.get("cy"):
+        errors.append("%s的图片内部变换尺寸与显示尺寸（wp:extent）不一致" % where)
+    return errors
+
+
 def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[str], dict, list]:
     """STRICT structural equivalence with what ``deliverable.write_docx`` writes (WP2 R2 #3).
     A Word file is only accepted when its layout is fully determined by its structure: one
@@ -342,13 +443,7 @@ def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[st
         for tag in _SETTINGS_FORBIDDEN:
             if settings.find(_q(_W, tag)) is not None and _on(settings.find(_q(_W, tag))):
                 errors.append("文档设置启用了 %s（改变页面布局）" % tag)
-    if styles is not None:                         # the default paragraph style (no pStyle used)
-        for st in styles.iter(_q(_W, "style")):
-            if _wattr(st, "type") == "paragraph" and str(_wattr(st, "default", "0")) in ("1", "true"):
-                ppr = st.find(_q(_W, "pPr"))
-                for tag in ("framePr", "numPr", "pBdr", "sectPr"):
-                    if ppr is not None and ppr.find(_q(_W, tag)) is not None:
-                        errors.append("默认段落样式带 %s（会移动图片）" % tag)
+    errors += _inherited_layout(styles)       # page paragraphs carry no pStyle → Normal + defaults
     # ---- page paragraphs ---------------------------------------------------------------------
     paras = [el for el in kids[:-1] if _local(el) == "p"]
     pictures = []
@@ -368,8 +463,10 @@ def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[st
             errors.append("%s的段落间距不是「段前 0、段后 0、单倍行距」" % where)
         ind = props.get("ind")
         if ind is None or any(float(_wattr(ind, a, 0) or 0) != 0 for a in (
-                "left", "right", "start", "end", "firstLine", "hanging")):
-            errors.append("%s有缩进（或未显式置零），图片位置会偏移" % where)
+                "left", "right", "start", "end", "firstLine", "hanging")) or _unit_attrs(ind):
+            errors.append("%s有缩进（或未显式置零、或用了字符单位缩进），图片位置会偏移" % where)
+        if _unit_attrs(sp_el):
+            errors.append("%s用了行单位的段前/段后间距 %s" % (where, _unit_attrs(sp_el)))
         jc = props.get("jc")
         if jc is None or str(_wattr(jc, "val")) != "center":
             errors.append("%s不是居中对齐" % where)
@@ -408,6 +505,7 @@ def _docx_structure(root, settings, styles, sp: Dict[str, Any]) -> Tuple[List[st
             if r is not run and any(_local(c) != "rPr" for c in r):
                 errors.append("%s有额外的文字段" % where)
         el = inl[0]
+        errors += _picture_whitelist(el, where)
         if any(float(el.get(a, 0) or 0) != 0 for a in ("distT", "distB", "distL", "distR")):
             errors.append("%s图片带环绕距离" % where)
         eff = el.find(_q(_WP, "effectExtent"))

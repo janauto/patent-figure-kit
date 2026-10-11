@@ -721,3 +721,48 @@ def accept_into(plan: dict, assembly: dict, accepted: Sequence[dict], *,
             skipped.append(n)
     return p, {"added_figures": added, "standard_labels_set": labelled_none,
                "standard_labels_skipped": skipped}
+
+
+# --------------------------------------------------------------------------- AI 起名写回（F9）
+
+
+def fill_blank_terms(plan: dict, rows: Sequence[dict], part_names: Sequence[str]) -> dict:
+    """Write AI-suggested names into ``plan`` (in place) for EXACTLY the parts in ``rows`` —
+    never for any other part (WP2 R2b #1). For each ``{selector: <part name>, term, label}``:
+
+    * the governing row (numbering precedence: first selector that matches) already has a term
+      → ``kept_human`` (a human filled it meanwhile; never overwritten);
+    * no row governs the part → append an exact (glob-escaped) row → ``added``;
+    * the governing row covers ONLY this part → fill it in place → ``filled``;
+    * the governing row is SHARED (a wildcard such as ``SYN-*`` that also covers other parts) →
+      leave it untouched (its term AND label stay as they are for every other part) and insert an
+      exact row for this part right BEFORE it, so the new row wins precedence → ``filled``.
+
+    Returns ``{filled, kept_human, added}``."""
+    outcome: Dict[str, List[str]] = {"filled": [], "kept_human": [], "added": []}
+    terms = plan.setdefault("terms", [])
+    names = [str(n) for n in part_names]
+    for r in rows:
+        sel, term = str(r.get("selector") or ""), str(r.get("term", "")).strip()
+        if not sel or not term:
+            continue
+        label = r.get("label") if r.get("label") in ("once", "none") else None
+        row = winning_row(plan, sel)
+        if row is None:
+            terms.append({"selector": glob_escape(sel), "term": term, "label": label or "once"})
+            outcome["added"].append(sel)
+            continue
+        if str(row.get("term") or "").strip():
+            outcome["kept_human"].append(sel)
+            continue
+        covered = [n for n in names if fnmatchcase(n, str(row.get("selector")))]
+        if covered == [sel]:
+            row["term"] = term
+            if label:
+                row["label"] = label
+        else:
+            new = {"selector": glob_escape(sel), "term": term,
+                   "label": label or str(row.get("label") or "once")}
+            terms.insert(terms.index(row), new)
+        outcome["filled"].append(sel)
+    return outcome

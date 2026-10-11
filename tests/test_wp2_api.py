@@ -414,3 +414,41 @@ def test_ai_outbound_payload_carries_only_the_selected_blank_parts(live, monkeyp
     sent.clear()
     c.post("/v1/projects/%s/ai/draft-terms" % PID, headers=BEARER, json={})
     assert sent and not [o for o in others if o in sent[0]]
+
+
+def test_ai_apply_with_a_shared_wildcard_row_names_only_the_selected_part(live, monkeypatch):
+    """R2b #1: a blank wildcard row (``SYN-*``) governs every part. Selecting SYN-A01 with
+    apply=true must name SYN-A01 only — SYN-B02's name AND label stay exactly as before — via REST
+    and via MCP (whose apply defaults to true)."""
+    W, _reg, c = live
+    r = c.get("/v1/projects/%s/plan" % PID, headers=BEARER)
+    plan = r.json()
+    plan["terms"] = [{"selector": "SYN-*", "term": "", "label": "all"}]
+    w = c.put("/v1/projects/%s/plan" % PID, headers={**BEARER, "If-Match": r.headers["etag"]},
+              json=plan)
+    assert w.status_code == 200
+    monkeypatch.setattr(W.LLM, "public_settings",
+                        lambda: {"provider": "deepseek", "provider_label": "测试通道"})
+    monkeypatch.setattr(W.LLM, "draft_terms", lambda asm, plan, **kw: [
+        {"selector": p["name"], "term": "名%s" % p["name"][-1], "label": "once",
+         "confidence": "high", "reason": "测"} for p in asm["parts"]])
+
+    def governing(name):
+        cur = c.get("/v1/projects/%s/plan" % PID, headers=BEARER).json()
+        from patent_figure import suggest_plan as SPm
+        return SPm.winning_row(cur, name)
+
+    out = c.post("/v1/projects/%s/ai/draft-terms" % PID, headers=BEARER,
+                 json={"selectors": ["SYN-A01"], "apply": True}).json()
+    assert out["applied"]["filled"] == ["SYN-A01"], out
+    assert governing("SYN-A01")["term"] == "名1"
+    assert governing("SYN-B02") == {"selector": "SYN-*", "term": "", "label": "all"}
+    m = c.post("/mcp", headers=BEARER, json={
+        "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+        "params": {"name": "ai_draft_terms",
+                   "arguments": {"project_id": PID, "selectors": ["SYN-C03"]}}})
+    res = m.json()["result"]["structuredContent"]
+    assert res["applied"]["filled"] == ["SYN-C03"], res
+    assert governing("SYN-C03")["term"] == "名3"
+    assert governing("SYN-B02") == {"selector": "SYN-*", "term": "", "label": "all"}
+    assert governing("SYN-A01")["term"] == "名1"
