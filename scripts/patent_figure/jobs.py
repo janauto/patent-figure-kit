@@ -21,6 +21,7 @@ The FastAPI layer (``workbench.py``) formats the SSE frames and runs the actual 
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -143,6 +144,15 @@ class Job:
                 "last_event_id": self._next_event - 1,
             }
 
+    def to_disk(self) -> Dict[str, Any]:
+        """Full durable state — like ``to_dict`` but with the complete event log and the
+        monotonic counter, so a restart can replay SSE from any ``Last-Event-ID`` (R1 #10)."""
+        with self._cond:
+            d = self.to_dict()
+            d["events"] = [dict(e) for e in self.events]
+            d["next_event"] = self._next_event
+            return d
+
     def _persist(self) -> None:
         if self._store is not None:
             self._store._save(self)
@@ -156,6 +166,8 @@ class JobStore:
         self._jobs: "Dict[str, Job]" = {}
         self._by_key: Dict[str, str] = {}
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()   # serialise disk writes (R1 #9)
+        self._seq = 0
         if self.root is not None:
             self.root.mkdir(parents=True, exist_ok=True)
             self._recover()
@@ -166,38 +178,81 @@ class JobStore:
         return self.root / (job_id + ".json")
 
     def _save(self, job: Job) -> None:
+        """Atomic durable write (R1 #9): unique temp → flush+fsync → ``os.replace``, under a
+        store-wide lock so a crash mid-write cannot leave a half-file that later reads as
+        corrupt. The full event log is persisted (R1 #10)."""
         if self.root is None:
             return
-        try:
-            self._path(job.id).write_text(
-                json.dumps(job.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
-        except OSError:
-            pass
+        payload = json.dumps(job.to_disk(), ensure_ascii=False, indent=1)
+        with self._save_lock:
+            self._seq += 1
+            tmp = self._path(job.id).with_name(
+                "%s.%d.%d.%s.tmp" % (job.id, os.getpid(), self._seq, os.urandom(4).hex()))
+            try:
+                with open(str(tmp), "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(str(tmp), str(self._path(job.id)))
+            except OSError:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
 
     def _recover(self) -> None:
-        """Load persisted jobs. Any that were mid-flight when the process died are marked
-        ``interrupted`` — never resurrected as if still running (S1-09)."""
+        """Load persisted jobs. A job that was mid-flight when the process died is marked
+        ``interrupted`` with an appended terminal event (so a reconnect with an old
+        Last-Event-ID still gets a terminal frame, R1 #10). A record that will not parse is
+        kept as a *queryable* error-state job rather than vanishing into a 404 (R1 #9)."""
         assert self.root is not None
         for path in sorted(self.root.glob("*.json")):
+            jid = path.stem
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                # Corrupt/torn record: surface it as a failed job, not a 404.
+                job = Job("unknown", "", job_id=jid)
+                job.state = FAILED
+                job.stage = FAILED
+                job.error = {"code": "E_JOB_RECORD_CORRUPT",
+                             "message": "作业记录损坏，无法读取（可能上次写入时崩溃）",
+                             "hint": "重新提交一次。"}
+                job.events = [{"id": 1, "type": EV_ERROR, "stage": FAILED, "progress": 0.0,
+                               "data": job.error, "ts": time.time()}]
+                job._next_event = 2
+                self._jobs[job.id] = job
                 continue
             job = Job(data.get("kind", "render"), data.get("project_id", ""),
                       inputs=data.get("inputs"), idempotency_key=data.get("idempotency_key"),
-                      job_id=data.get("id"))
+                      job_id=data.get("id", jid))
+            job.events = list(data.get("events") or [])
+            job._next_event = int(data.get("next_event",
+                                           (job.events[-1]["id"] + 1) if job.events else 1))
             state = data.get("state", INTERRUPTED)
-            if state in (QUEUED, RUNNING):
-                state = INTERRUPTED
-                job.error = {"code": "E_INTERRUPTED", "message": "进程重启，作业被中断",
-                             "hint": "重新提交一次渲染。"}
-            job.state = state
-            job.stage = data.get("stage", state)
-            job.progress = float(data.get("progress", 0.0))
             job.result = data.get("result")
-            job.error = job.error or data.get("error")
+            job.error = data.get("error")
             job.created_at = data.get("created_at", time.time())
             job.updated_at = data.get("updated_at", job.created_at)
+            job.stage = data.get("stage", state)
+            job.progress = float(data.get("progress", 0.0))
+            if state in (QUEUED, RUNNING):
+                # Crashed mid-flight: mark interrupted AND append a terminal event continuing
+                # the id sequence, so Last-Event-ID replay sees the end (R1 #10).
+                job.state = INTERRUPTED
+                job.error = {"code": "E_INTERRUPTED", "message": "进程重启，作业被中断",
+                             "hint": "重新提交一次渲染。"}
+                job.events.append({"id": job._next_event, "type": EV_ERROR, "stage": INTERRUPTED,
+                                   "progress": job.progress, "data": job.error, "ts": time.time()})
+                job._next_event += 1
+                job._store = self
+                self._jobs[job.id] = job
+                if job.idempotency_key:
+                    self._by_key[job.idempotency_key] = job.id
+                job._persist()           # write the interrupted event back durably
+                continue
+            job.state = state
             self._jobs[job.id] = job
             if job.idempotency_key:
                 self._by_key[job.idempotency_key] = job.id
@@ -272,6 +327,11 @@ class JobStore:
             code = getattr(exc, "code", "E_JOB_FAILED")
             job.error = {"code": str(code), "message": str(exc),
                          "hint": getattr(exc, "hint", "") or ""}
+            # A structured failure (e.g. a render that ran but did not pass QA) may carry a
+            # result payload with the per-figure diagnostics — keep it queryable (R1 #5).
+            payload = getattr(exc, "result", None)
+            if isinstance(payload, dict):
+                job.result = payload
             job._set_state(FAILED)
             job.emit(EV_ERROR, job.error, stage=FAILED)
         finally:

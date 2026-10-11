@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import statistics
@@ -112,12 +113,18 @@ def bench_segments(repo: Path, step: Path, work: Path, reps: int) -> Dict[str, o
         cache = root / "cache"
         out = root / "out"
 
+        rcs: List[int] = seg.setdefault("_render_rcs", [])  # type: ignore
+        figcounts: List[int] = seg.setdefault("_render_figcounts", [])  # type: ignore
+
         def render(o, c):
             return _run(repo, [rp, plan, "--assembly", asm, "-o", o, "--cache", c])
 
         # 无缓存：空 cache 首渲
         t = time.perf_counter(); r1 = render(out, cache); dt = time.perf_counter() - t
         states["no_cache"].append(round(dt, 4)); seg["render"].append(round(dt, 4))
+        rcs.append(r1.returncode)
+        figcounts.append(len([p for p in out.glob("*.dxf")
+                              if not p.stem.endswith(("_annotated", "_filing", "_engineering"))]))
         # HLR 全命中：同 plan 同 cache 再渲
         out2 = root / "out2"
         states["hlr_hit"].append(_time(lambda: render(out2, cache)))
@@ -152,10 +159,14 @@ def bench_segments(repo: Path, step: Path, work: Path, reps: int) -> Dict[str, o
                             zf.write(f, f.relative_to(out).as_posix())
             seg["export"].append(_time(do_zip))
 
+    render_rcs = seg.pop("_render_rcs", [])
+    render_figcounts = seg.pop("_render_figcounts", [])
     return {
         "segments_median_s": {k: _median(v) for k, v in seg.items()},
         "candidates_median_s": None,  # WP2
         "cache_states_render_median_s": {k: _median(v) for k, v in states.items()},
+        "render_returncodes": render_rcs,       # R1 #13: record the actual exit path
+        "render_figcounts": render_figcounts,
         "reps": reps,
     }
 
@@ -177,37 +188,65 @@ def bench_worker_amortization(repo: Path, step: Path, work: Path, k: int) -> Dic
                     encoding="utf-8")
     rp = repo / "scripts" / "render_patent_figure.py"
 
-    def subprocess_path() -> float:
+    def _figcount(d: Path) -> int:
+        return len([p for p in d.glob("*.dxf")
+                    if not p.stem.endswith(("_annotated", "_filing", "_engineering"))]) \
+            if d.is_dir() else 0
+
+    def subprocess_path():
+        """Returns (total_s, [rc...], [figcount...]) so equivalence can be judged (R1 #13)."""
+        rcs, figs = [], []
         t0 = time.perf_counter()
         for i in range(k):
-            _run(repo, [rp, plan, "--assembly", asm, "-o", root / ("sp-%d" % i)],
-                 env_extra={"PFK_WORKER": "0"})
-        return time.perf_counter() - t0
+            outdir = root / ("sp-%d" % i)
+            pc = _run(repo, [rp, plan, "--assembly", asm, "-o", outdir],
+                      env_extra={"PFK_WORKER": "0"})
+            rcs.append(pc.returncode)
+            figs.append(_figcount(outdir))
+        return time.perf_counter() - t0, rcs, figs
 
-    sp_total = subprocess_path()
+    sp_total, sp_rcs, sp_figs = subprocess_path()
     out: Dict[str, object] = {"k": k, "subprocess_total_s": round(sp_total, 3),
-                              "subprocess_per_render_s": round(sp_total / k, 3)}
+                              "subprocess_per_render_s": round(sp_total / k, 3),
+                              "subprocess_returncodes": sp_rcs, "subprocess_figcounts": sp_figs,
+                              "subprocess_path": "per-call subprocess (PFK_WORKER=0)"}
 
     # resident worker — only if the tree under test has worker.py
     worker_py = repo / "scripts" / "patent_figure" / "worker.py"
     if worker_py.is_file():
         driver = (
-            "import sys, time, json; sys.path.insert(0, %r);\n"
+            "import sys, time, json, pathlib; sys.path.insert(0, %r)\n"
             "from patent_figure.worker import Worker\n"
             "w = Worker(); rp, plan, asm, root = %r, %r, %r, %r\n"
+            "rcs, figs = [], []\n"
             "t0 = time.perf_counter()\n"
-            "import pathlib\n"
             "for i in range(%d):\n"
-            "    w.run([rp, plan, '--assembly', asm, '-o', root + ('/wk-%%d' %% i)])\n"
-            "w.close(); print(json.dumps({'total': time.perf_counter() - t0}))\n"
+            "    o = root + ('/wk-%%d' %% i)\n"
+            "    p = w.run([rp, plan, '--assembly', asm, '-o', o]); rcs.append(p.returncode)\n"
+            "    d = pathlib.Path(o); figs.append(len([q for q in d.glob('*.dxf')"
+            " if not q.stem.endswith(('_annotated','_filing','_engineering'))]) if d.is_dir() else 0)\n"
+            "w.close()\n"
+            "print(json.dumps({'total': time.perf_counter() - t0, 'rcs': rcs, 'figs': figs}))\n"
             % (str(repo / "scripts"), str(rp), str(plan), str(asm), str(root), k)
         )
         proc = _run(repo, ["-c", driver])
         try:
-            wk_total = json.loads(proc.stdout.strip().splitlines()[-1])["total"]
+            res = json.loads(proc.stdout.strip().splitlines()[-1])
+            wk_total = res["total"]
             out["worker_total_s"] = round(wk_total, 3)
             out["worker_per_render_s"] = round(wk_total / k, 3)
-            out["speedup_x"] = round(sp_total / wk_total, 2) if wk_total else None
+            out["worker_returncodes"] = res["rcs"]
+            out["worker_figcounts"] = res["figs"]
+            out["worker_path"] = "resident worker (OCP imported once)"
+            # Only report a speedup when the two paths did EQUIVALENT work — same exit codes
+            # and same figure counts per render (R1 #13) — otherwise it would compare paths
+            # that stopped at different stages.
+            equivalent = (sp_rcs == res["rcs"] and sp_figs == res["figs"])
+            out["equivalent_work"] = equivalent
+            out["speedup_x"] = (round(sp_total / wk_total, 2)
+                                if (equivalent and wk_total) else None)
+            if not equivalent:
+                out["note"] = "两条路径工作量不等价（退出码/图数不同），不计加速比"
         except Exception:
             out["worker_error"] = (proc.stderr or proc.stdout)[-300:]
     else:
@@ -253,15 +292,26 @@ def main(argv=None) -> int:
     work = (args.work or Path(tempfile.mkdtemp(prefix="pfk-bench-"))).resolve()
     work.mkdir(parents=True, exist_ok=True)
 
-    result: dict = {"repo": str(repo), "python": sys.version.split()[0],
-                    "reps": args.reps, "tiers": []}
+    def _commit(r: Path) -> str:
+        try:
+            p = subprocess.run(["git", "-C", str(r), "rev-parse", "--short", "HEAD"],
+                               capture_output=True, text=True)
+            return p.stdout.strip() or "?"
+        except Exception:
+            return "?"
+
+    result: dict = {"repo": str(repo), "commit": _commit(repo),
+                    "python": sys.version.split()[0], "reps": args.reps,
+                    "seed": args.seed, "tiers": []}
     for n in args.tiers:
         step = _fixture(repo, work, n, args.seed)
+        step_sha = hashlib.sha256(step.read_bytes()).hexdigest()
         print("  规模 %d 实例：分段计时…" % n, file=sys.stderr, flush=True)
         seg = bench_segments(repo, step, work / ("t%d" % n), args.reps)
         print("  规模 %d 实例：worker 摊销…" % n, file=sys.stderr, flush=True)
         am = bench_worker_amortization(repo, step, work / ("t%d-am" % n), args.amortize_k)
-        result["tiers"].append({"n_instances": n, "segments": seg, "worker_amortization": am})
+        result["tiers"].append({"n_instances": n, "input_step_sha256": step_sha,
+                                "segments": seg, "worker_amortization": am})
 
     if args.json_out:
         args.json_out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

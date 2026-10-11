@@ -192,15 +192,22 @@ paths:
       - in: query
         name: wait
         schema: {type: integer, enum: [0, 1], default: 0}
-        description: wait=1 兼容旧同步语义，直接 200 返回出图结果；否则 202 + job_id。
+        description: >
+          wait=1 提交同一作业并在服务线程池里**非阻塞**等待该 job 完成（不阻塞事件循环/SSE/取消）；
+          成功 200 返回该次渲染结果，失败 200 返回 {state, error, result}，超时 202 + job_id
+          （绝不返回上一次的结果）。wait=0（默认）立即 202 + job_id。
+      - in: query
+        name: timeout
+        schema: {type: number, default: 600}
+        description: wait=1 的等待上限秒数，超时返回 202 + job_id。
     post:
       tags: [出图]
-      summary: 出图（异步 202 + job_id；?wait=1 同步）
+      summary: 出图（异步 202 + job_id；?wait=1 非阻塞等待同一作业）
       parameters:
         - {in: header, name: Idempotency-Key, schema: {type: string}}
       responses:
         "202":
-          description: 已排队
+          description: 已排队（或 wait=1 超时）
           content:
             application/json:
               schema:
@@ -208,7 +215,7 @@ paths:
                 properties:
                   job_id: {type: string}
                   inputs: {$ref: '#/components/schemas/InputSnapshot'}
-        "200": {description: wait=1 时的同步出图结果}
+        "200": {description: wait=1 且作业已终态时的结果（成功为渲染结果，失败含 error/result）}
   /v1/projects/{pid}/plan/suggest:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
     post:
@@ -267,27 +274,43 @@ paths:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
     post:
       tags: [导出]
-      summary: 导出附图包（异步 202 → export_id）
-      description: WP1 返回现有导出能力（PDF/Word/DXF，dwg 视转换器可用性）；F1 新格式在 WP2。
+      summary: 导出附图包（异步 202 → export_id，绑定一次成功渲染）
+      description: >
+        绑定到一次成功的渲染作业（render_job_id，缺省取该工程最近一次成功渲染），读其不可变
+        产物快照打包，不读共享工作目录（R1 #7）。清单按「图号×版本×格式」逐项核对，区分
+        skip（不支持，如本轮的 pdf）与 fail（生成失败）（R1 #8）。variant/formats/dpi 真实生效；
+        sheet_preset 尚未实现，传入即 400（R1 #12）。F1 的 PDF 主交付在 WP2。
       requestBody:
         content:
           application/json:
             schema:
               type: object
               properties:
-                variant: {type: string, enum: [filing, disclosure, both]}
+                render_job_id: {type: string, description: 要导出的成功渲染作业；缺省取最近一次}
+                variant: {type: string, enum: [filing, disclosure, both], default: both}
                 formats:
                   type: array
-                  items: {type: string, enum: [pdf, docx, dxf, dwg]}
-                dpi: {type: integer}
-                sheet_preset: {type: string}
-                plan_etag: {type: string, description: 若与当前 plan 不符则 409}
+                  items: {type: string, enum: [docx, dxf, dwg, png, pdf]}
+                dpi: {type: integer, default: 300, description: PNG/Word 栅格分辨率}
+                sheet_preset: {type: string, description: 尚未实现，传入返回 400}
+                plan_etag:
+                  type: string
+                  description: 与被导出渲染的输入版本比对，不一致 409（而非与当前 plan 比）
       responses:
         "202":
           content:
             application/json:
-              schema: {type: object, properties: {export_id: {type: string}, job_id: {type: string}}}
-        "409": {description: plan 已变更}
+              schema:
+                type: object
+                properties:
+                  export_id: {type: string}
+                  job_id: {type: string}
+                  render_job_id: {type: string}
+        "400": {description: 传了尚未实现的参数（如 sheet_preset）}
+        "409": {description: 没有可导出的成功渲染，或 plan_etag 与被导出渲染不一致}
+      x-manifest-note: >
+        作业 result.manifest 的键是 "图号/版本/格式"（版本为 交底版/递交版），值为 ok|skip|fail；
+        result.notes 与 result.dwg_log 保留错误明细。
   /v1/exports/{export_id}:
     parameters: [{in: path, name: export_id, required: true, schema: {type: string}}]
     get:

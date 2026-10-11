@@ -469,8 +469,16 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None) -> FastAPI
         plan = body.get("plan")
         if not isinstance(plan, dict):
             raise HTTPException(400, "body.plan 必须是对象")
-        ws.snapshot_plan()
-        ws.plan.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        # WP1 R1 #3: the one versioned-write entry, shared with the workbench REST path and
+        # keyed by the plan file, so a browser save and an API write of the same plan cannot
+        # interleave. If-Match optional here (the browser is the single editor of its own tab).
+        from patent_figure import project_io as _pio
+        if_match = request.headers.get("if-match", "").strip('"')
+        try:
+            _pio.write_plan(ws.plan, plan, if_match if if_match else None,
+                            snapshot_cb=ws.snapshot_plan)
+        except _pio.PlanConflict as exc:
+            raise HTTPException(409, "plan 已被改动（ETag 当前 %s）" % exc.current)
         return {"validate": validate_now()}
 
     @app.post("/api/bom")
@@ -499,7 +507,8 @@ def build_app(ws: Workspace, token: str, home_url: str | None = None) -> FastAPI
             else:
                 row["term"] = hit["name"]
                 filled.append(part)
-        ws.plan.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        from patent_figure import project_io as _pio
+        _pio.atomic_write_json(ws.plan, plan)     # WP1 R1 #3/#9: atomic, crash-safe write
         (ws.root / "bom.json").write_text(
             json.dumps({"file": filename, "rows": len(bom), "matched": matched},
                        ensure_ascii=False, indent=2), encoding="utf-8")

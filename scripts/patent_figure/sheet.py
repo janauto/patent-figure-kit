@@ -464,49 +464,86 @@ EXT_LINEWEIGHT_DEFAULT = -1
 EXT_LINETYPE_DEFAULT = "BYLAYER"
 
 
-def _ext_style_record(entity: Any) -> tuple:
-    """The style attributes the extended digest adds on top of ``_entity_record``.
+#: ACI value meaning "inherit from layer". lineweight -1 / linetype BYLAYER are the same.
+EXT_BYLAYER_COLOR = 256
 
-    Covers exactly what Codex R0 S0-01 showed the frozen digest is blind to — colour,
-    lineweight, linetype, and (for TEXT) rotation and alignment — so a change that is
-    visible on the sheet but geometrically identical can no longer slip through unhashed.
-    Read defensively: ``dxf.get(attr, default)`` never raises for an entity that does not
-    carry the attribute.
+
+def _layer_table(doc: Any) -> dict:
+    """{layer name: (color, lineweight, linetype)} from the LAYER table.
+
+    R1 finding 11: entities are written BYLAYER (colour 256, lineweight -1), so their own
+    attributes never change when a LAYER's colour or lineweight is edited — yet the drawing
+    looks different. Capturing the layer table (and resolving BYLAYER against it) closes that
+    hole.
+    """
+    out = {}
+    for lay in doc.layers:
+        out[str(lay.dxf.name)] = (int(getattr(lay.dxf, "color", 7)),
+                                  int(getattr(lay.dxf, "lineweight", -3)),
+                                  str(getattr(lay.dxf, "linetype", "CONTINUOUS")))
+    return out
+
+
+def _style_table(doc: Any) -> dict:
+    """{text-style name: font} from the STYLE table (a font swap must move the digest)."""
+    out = {}
+    for st in doc.styles:
+        out[str(st.dxf.name)] = str(getattr(st.dxf, "font", "")) or str(
+            getattr(st.dxf, "bigfont", ""))
+    return out
+
+
+def _ext_style_record(entity: Any, layers: dict, styles: dict) -> tuple:
+    """Style attributes the extended digest adds, with BYLAYER resolved to the effective
+    value (R0 S0-01 + R1 finding 11).
+
+    Covers what the frozen §5.4 digest is blind to: effective colour, true colour, effective
+    lineweight, effective linetype, TEXT font, and TEXT rotation / horizontal+vertical
+    alignment. Read defensively; ``dxf.get`` never raises for a missing attribute.
     """
     dxf = entity.dxf
-    color = int(dxf.get("color", EXT_COLOR_DEFAULT))
+    layer = str(dxf.layer)
+    lcolor, lweight, lltype = layers.get(layer, (7, -3, "CONTINUOUS"))
+
+    color = int(dxf.get("color", EXT_BYLAYER_COLOR))
+    eff_color = lcolor if color == EXT_BYLAYER_COLOR else color     # resolve BYLAYER
     true_color = dxf.get("true_color", None)
     true_color = None if true_color is None else int(true_color)
-    lineweight = int(dxf.get("lineweight", EXT_LINEWEIGHT_DEFAULT))
-    linetype = str(dxf.get("linetype", EXT_LINETYPE_DEFAULT))
+    lineweight = int(dxf.get("lineweight", -1))
+    eff_weight = lweight if lineweight == -1 else lineweight
+    linetype = str(dxf.get("linetype", "BYLAYER"))
+    eff_ltype = lltype if linetype in ("BYLAYER", "") else linetype
+
     if entity.dxftype() == "TEXT":
         rotation = _r(dxf.get("rotation", 0.0))
         halign = int(dxf.get("halign", 0))
         valign = int(dxf.get("valign", 0))
+        font = styles.get(str(dxf.get("style", "")), "")
     else:
-        rotation, halign, valign = None, None, None
-    return (color, true_color, lineweight, linetype, rotation, halign, valign)
+        rotation, halign, valign, font = None, None, None, None
+    return (eff_color, true_color, eff_weight, eff_ltype, rotation, halign, valign, font)
 
 
-def _entity_record_ext(entity: Any) -> tuple:
-    """The base record (§5.4) with the extended style attributes appended."""
-    return _entity_record(entity) + _ext_style_record(entity)
+def _entity_record_ext(entity: Any, layers: dict, styles: dict) -> tuple:
+    """The base record (§5.4) with the effective style attributes appended."""
+    return _entity_record(entity) + _ext_style_record(entity, layers, styles)
 
 
 def normalized_digest_ext(dxf: Path) -> str:
-    """SHA-256 over an *extended* canonical form (WP1 deliverable 7 / Codex R0 S0-01).
+    """SHA-256 over an *extended* canonical form (WP1 deliverable 7 / Codex R0 S0-01, R1 #11).
 
-    Identical recipe to ``normalized_digest`` — read, build one tuple per modelspace
-    entity, total-order sort, join ``repr()`` with newlines, SHA-256 — but every entity
-    tuple also carries colour (ACI), true colour, lineweight, linetype, and TEXT rotation /
-    horizontal+vertical alignment. The base digest deliberately leaves those out (§5.4), so
-    this is the companion gate for "the drawing looks different but its geometry rounds the
-    same". It is a *separate* function and a *separate* baseline: ``normalized_digest`` and
-    its N10 golden are never touched.
+    Same recipe as ``normalized_digest`` — read, one tuple per modelspace entity, total-order
+    sort, join ``repr()`` with newlines, SHA-256 — but every entity tuple also carries its
+    **effective** colour, true colour, lineweight, linetype, plus TEXT font / rotation /
+    alignment; BYLAYER is resolved against the LAYER table, which is itself hashed in (as are
+    the TEXT styles) so editing a layer's colour, lineweight or linetype — which changes the
+    drawing's look while leaving every entity BYLAYER — moves the digest. The base digest
+    deliberately leaves all of this out (§5.4); this is the companion gate and a *separate*
+    baseline. ``normalized_digest`` and its N10 golden are never touched.
 
-    The coverage is a property of the rendered figure, not of the DXF file bytes: the raw
-    file SHA changes every run (``$TDCREATE`` and the per-save GUIDs), so it is recorded in
-    the baseline as provenance only and never asserted — only this digest is the invariant.
+    The coverage is a property of the rendered figure, not of the DXF file bytes: the raw file
+    SHA changes every run (``$TDCREATE`` and the per-save GUIDs), so the baseline records it as
+    provenance only and never asserts it — only this digest is the invariant.
     """
     doc = ezdxf.readfile(str(Path(dxf)))
     insunits = doc.header.get("$INSUNITS", None)
@@ -514,7 +551,12 @@ def normalized_digest_ext(dxf: Path) -> str:
         raise SheetError(
             "normalized_digest_ext: $INSUNITS = %r，期望 %d（毫米）。"
             "该文件不是按本契约 §5.4 写出的，摘要没有意义。" % (insunits, INSUNITS_MM))
-    records = [_entity_record_ext(e) for e in doc.modelspace()]
+    layers = _layer_table(doc)
+    styles = _style_table(doc)
+    records = [_entity_record_ext(e, layers, styles) for e in doc.modelspace()]
     records.sort(key=repr)   # tuples may hold None; sort on repr for a total order
-    blob = "\n".join(repr(rec) for rec in records)
+    # The referenced tables are hashed in too, so a change to a layer/style nothing currently
+    # overrides is still caught.
+    tables = ("LAYERS", sorted(layers.items()), "STYLES", sorted(styles.items()))
+    blob = "\n".join([repr(tables)] + [repr(rec) for rec in records])
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()

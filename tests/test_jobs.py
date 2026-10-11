@@ -133,6 +133,51 @@ def test_terminal_job_not_recovered_as_interrupted(tmp_path):
     assert store2.get(job.id).state == J.SUCCEEDED
 
 
+def test_save_is_atomic_and_leaves_no_temp(tmp_path):
+    """R1 #9: durable write is unique-temp + fsync + os.replace; no .tmp survives."""
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("render", "p")
+    for i in range(5):
+        job.emit(J.EV_LOG, "line %d" % i)
+    assert not list(tmp_path.glob("*.tmp")), "no temp file may survive a successful save"
+    # the on-disk record is complete JSON with the full event log
+    import json
+    data = json.loads((tmp_path / (job.id + ".json")).read_text(encoding="utf-8"))
+    assert len(data["events"]) == 5 and data["next_event"] == 6
+
+
+def test_corrupt_record_recovers_as_queryable_error(tmp_path):
+    """R1 #9: a torn/corrupt record must come back as a failed, queryable job — not a 404."""
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("render", "p")
+    (tmp_path / (job.id + ".json")).write_text("{ this is not valid json", encoding="utf-8")
+    store2 = J.JobStore(tmp_path)
+    rec = store2.get(job.id)
+    assert rec is not None, "corrupt record must still be queryable"
+    assert rec.state == J.FAILED
+    assert rec.error["code"] == "E_JOB_RECORD_CORRUPT"
+
+
+def test_interrupted_job_keeps_event_sequence_for_replay(tmp_path):
+    """R1 #10: a crashed job recovers with its events + a terminal interrupted event, so a
+    client reconnecting with its old Last-Event-ID still receives a terminal frame."""
+    store = J.JobStore(tmp_path)
+    job, _ = store.create("render", "p")
+    job.emit(J.EV_STAGE, "running", stage=J.RUNNING, progress=0.2)
+    e2 = job.emit(J.EV_LOG, "halfway")
+    job._set_state(J.RUNNING)
+    job._persist()
+    last_seen = e2["id"]
+    store2 = J.JobStore(tmp_path)
+    rec = store2.get(job.id)
+    assert rec.state == J.INTERRUPTED
+    # events survived AND a new terminal event beyond last_seen exists
+    fresh = rec.events_since(last_seen)
+    assert fresh, "a terminal event beyond the client's Last-Event-ID must exist"
+    assert fresh[-1]["type"] == J.EV_ERROR and fresh[-1]["stage"] == J.INTERRUPTED
+    assert fresh[-1]["id"] > last_seen
+
+
 def test_sse_frame_format(tmp_path):
     store = J.JobStore(tmp_path)
     job, _ = store.create("render", "p")

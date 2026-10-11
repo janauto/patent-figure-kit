@@ -270,6 +270,47 @@ def test_extended_digest_catches_what_the_base_digest_misses(rendered, tmp_path)
     assert SH.normalized_digest_ext(tampered) != ext0, "ext digest must catch colour/rotation"
 
 
+@pytest.mark.parametrize("mutate,what", [
+    ("entity_color", "每实体线色"),
+    ("entity_lineweight", "每实体线宽"),
+    ("entity_linetype", "每实体线型"),
+    ("layer_color", "图层线色（BYLAYER 继承）"),
+    ("layer_lineweight", "图层线宽（BYLAYER 继承）"),
+    ("text_valign", "TEXT 垂直对齐"),
+    ("text_font", "文字样式字体"),
+])
+def test_extended_digest_per_attribute_variation(rendered, tmp_path, mutate, what):
+    """R1 #11: each visual attribute — including ones inherited from the LAYER / STYLE table —
+    moves the extended digest, while the base digest stays put (it is geometry-only)."""
+    import ezdxf
+    src = rendered["out_a"] / "fig1.dxf"
+    base0, ext0 = SH.normalized_digest(src), SH.normalized_digest_ext(src)
+    doc = ezdxf.readfile(str(src))
+    msp = doc.modelspace()
+    if mutate == "entity_color":
+        next(e for e in msp if e.dxftype() == "LINE").dxf.color = 3
+    elif mutate == "entity_lineweight":
+        next(e for e in msp if e.dxftype() == "LINE").dxf.lineweight = 50
+    elif mutate == "entity_linetype":
+        doc.linetypes.add("DASHED", pattern=[0.5, -0.25, 0.25, -0.25]) \
+            if "DASHED" not in doc.linetypes else None
+        next(e for e in msp if e.dxftype() == "LINE").dxf.linetype = "DASHED"
+    elif mutate == "layer_color":
+        doc.layers.get("GEOM").dxf.color = 3        # entities stay BYLAYER
+    elif mutate == "layer_lineweight":
+        doc.layers.get("GEOM").dxf.lineweight = 50
+    elif mutate == "text_valign":
+        next(e for e in msp if e.dxftype() == "TEXT").dxf.valign = 0
+    elif mutate == "text_font":
+        doc.styles.get("HZ").dxf.font = "other.ttf"
+    tampered = tmp_path / ("t_%s.dxf" % mutate)
+    doc.saveas(str(tampered))
+    assert SH.normalized_digest_ext(tampered) != ext0, "ext digest must catch %s" % what
+    # geometry-only mutations (color/weight/type/font) leave the base digest unchanged;
+    # (we do not assert base equality for geometry-touching cases — there are none here)
+    assert SH.normalized_digest(tampered) == base0, "base digest must ignore %s" % what
+
+
 def test_qa_passes_on_both_figures(rendered):
     for fid in FIGURE_IDS:
         report = json.loads((rendered["out_a"] / (fid + ".qa.json")).read_text(encoding="utf-8"))

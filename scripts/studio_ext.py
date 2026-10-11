@@ -207,31 +207,38 @@ def bom_names_of(ws) -> Dict[str, str]:
 
 
 def apply_terms(ws, rows: List[dict], overwrite: bool = False) -> dict:
-    """把 [{selector, term, label}] 写进 plan.terms：默认只填空白，人填过的不动。"""
-    plan = _load(ws.plan, {}) or {}
-    ws.snapshot_plan()
-    by_sel = {t.get("selector"): t for t in plan.get("terms", [])}
-    filled, kept, added = [], [], []
-    for r in rows:
-        sel, term = r.get("selector"), str(r.get("term", "")).strip()
-        if not sel or not term:
-            continue
-        row = by_sel.get(sel)
-        if row is None:
-            row = {"selector": sel, "term": term, "label": r.get("label", "once")}
-            plan.setdefault("terms", []).append(row)
-            by_sel[sel] = row
-            added.append(sel)
-            continue
-        if (row.get("term") or "").strip() and not overwrite:
-            kept.append(sel)
-            continue
-        row["term"] = term
-        if r.get("label") in ("once", "all", "none"):
-            row["label"] = r["label"]
-        filled.append(sel)
-    _dump(ws.plan, plan)
-    return {"plan": plan, "filled": filled, "kept_human": kept, "added": added}
+    """把 [{selector, term, label}] 写进 plan.terms：默认只填空白，人填过的不动。
+
+    WP1 R1 #3：读-改-写走 project_io.update_plan，在该 plan 文件的进程级锁内完成并原子落盘，
+    不再与别的写者交错覆盖（原先直接 _load → 修改 → _dump，两次并发 apply 会丢一次）。"""
+    from patent_figure import project_io as _pio
+    outcome = {"filled": [], "kept_human": [], "added": []}
+
+    def mutate(plan):
+        by_sel = {t.get("selector"): t for t in plan.get("terms", [])}
+        for r in rows:
+            sel, term = r.get("selector"), str(r.get("term", "")).strip()
+            if not sel or not term:
+                continue
+            row = by_sel.get(sel)
+            if row is None:
+                row = {"selector": sel, "term": term, "label": r.get("label", "once")}
+                plan.setdefault("terms", []).append(row)
+                by_sel[sel] = row
+                outcome["added"].append(sel)
+                continue
+            if (row.get("term") or "").strip() and not overwrite:
+                outcome["kept_human"].append(sel)
+                continue
+            row["term"] = term
+            if r.get("label") in ("once", "all", "none"):
+                row["label"] = r["label"]
+            outcome["filled"].append(sel)
+        return plan
+
+    plan = _pio.update_plan(ws.plan, mutate, snapshot_cb=ws.snapshot_plan)
+    return {"plan": plan, "filled": outcome["filled"],
+            "kept_human": outcome["kept_human"], "added": outcome["added"]}
 
 
 # --------------------------------------------------------------------------- #

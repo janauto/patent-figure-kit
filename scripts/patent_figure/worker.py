@@ -134,7 +134,25 @@ class Worker:
         self._queue: "Optional[_Queue]" = None
         self._reader: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._abort_lock = threading.Lock()
+        self._current_token: Optional[str] = None
         self.rebuilds = 0
+
+    def abort_if_running(self, token: str) -> bool:
+        """Kill the child iff it is currently running the job identified by ``token`` (R1 #6).
+
+        Safe to call from another thread while ``run`` is blocked: it does not take the main
+        lock, and killing the child makes the in-flight ``run`` return a non-zero result. The
+        next ``run`` rebuilds the worker. Returns True if a kill was issued."""
+        with self._abort_lock:
+            proc = self._proc if self._current_token == token else None
+        if proc is None:
+            return False
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return True
 
     # -- lifecycle -----------------------------------------------------------
     def _spawn(self) -> None:
@@ -198,12 +216,14 @@ class Worker:
             self._proc = self._queue = self._reader = None
 
     # -- the one operation ---------------------------------------------------
-    def run(self, args: List[Any], timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+    def run(self, args: List[Any], timeout: Optional[float] = None,
+            token: Optional[str] = None) -> subprocess.CompletedProcess:
         """Run one CLI invocation (``args`` = the same list ``run_cli`` would pass).
 
         Returns a ``CompletedProcess`` indistinguishable from ``subprocess.run``. A script the
         child does not dispatch in-process is run as a plain subprocess (transparent fallback).
         A timeout or a dead child kills and rebuilds the worker and returns a non-zero result.
+        ``token`` tags the in-flight job so ``abort_if_running(token)`` can cancel exactly it.
         """
         argv = [str(a) for a in args]
         basename = Path(argv[0]).name if argv else ""
@@ -218,13 +238,19 @@ class Worker:
                 # Could not get a worker at all — degrade to a subprocess rather than fail.
                 return self._subprocess(argv, limit, note="worker 不可用，回退子进程：%s" % exc)
             assert self._proc is not None and self._queue is not None
+            with self._abort_lock:
+                self._current_token = token
             try:
                 self._proc.stdin.write(json.dumps({"argv": argv}) + "\n")
                 self._proc.stdin.flush()
             except Exception:
+                with self._abort_lock:
+                    self._current_token = None
                 self._hard_kill()
                 return self._subprocess(argv, limit, note="worker 写入失败，回退子进程")
             line = self._queue.get(limit)
+            with self._abort_lock:
+                self._current_token = None
             if line is None:
                 # Timeout or the child died mid-job: kill, rebuild on next call, report.
                 died = self._proc.poll() is not None

@@ -5,11 +5,11 @@
 # 以及 TEXT 的旋转与水平/垂直对齐。基础摘要的 N10 金样与本文件互不影响。
 #
 # 说明：这里的 digest 是渲染产物的不变量；DXF 文件原始字节 SHA 因 $TDCREATE/GUID 每次都变，
-# 不作基线、不做断言。下面记录的是原始输入文件（source STEP）的 SHA，用于溯源，它是稳定可断言的。
+# 不作基线、不做断言。下面记录的是原始输入文件（source STEP）的 SHA，用于溯源，稳定可断言。
 # Regenerate with:  python3 tests/test_golden.py --update-ext
 # recorded on cadquery-ocp 7.7.2, ezdxf 1.4.2, numpy 2.0.2, python 3.9
 #
 # source-step  tests/fixtures/synthetic.stp  sha256=b61f1b71af391884052cbcc52865c1985009e29a96ca070dd4c3aae317de4539
 
-fig1.dxf  642757788ad8a84e3dcd8558dc4e3205e788ba4018f8fa6ef53efdfb8362c12b
-fig2.dxf  c6e30850c40ec510d95c2f564fb0bab6f7828844e068d375253830f873cee1c7
+fig1.dxf  ef94f0c848955aaa72a9737db927a237dda10160d268acc28c0378afe0b21d12
+fig2.dxf  b022a44c3067d9c2e15c2c9bdb4c7691c81fe92ec135e4ac028d4098bef7ee72

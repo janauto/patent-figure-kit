@@ -33,6 +33,7 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -51,6 +52,7 @@ from fastapi.responses import (FileResponse, JSONResponse,  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from patent_figure import jobs as JOBS  # noqa: E402
+from patent_figure import project_io as PIO  # noqa: E402
 from patent_figure import worker as WK  # noqa: E402
 
 REPO = SCRIPTS.parent
@@ -345,7 +347,10 @@ class Tools:
             imgs = []
             for f in data["figures"]:
                 png = studio.ws.out / (f["id"] + "_annotated.png")
-                if png.is_file():
+                # R1 #14: the interactive path writes SVGs only, so the PNG may not exist yet.
+                # Generate it on demand (from the sibling DXF) exactly like the HTTP image
+                # routes do, so a pure-MCP client gets images without a browser visit / export.
+                if EXT.ensure_preview_png(png):
                     imgs.append(png.read_bytes())
             return data, imgs[:6]
         return data
@@ -751,29 +756,172 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     jobs = JOBS.JobStore(reg.data / "jobs")
     exports: Dict[str, str] = {}             # export job id -> zip path (HTTP + MCP share this)
     app.state.jobs = jobs
+    _proj_locks: Dict[str, threading.Lock] = {}
+    _proj_locks_guard = threading.Lock()
 
-    def _plan_etag(ws) -> str:
+    def _plock(pid: str) -> threading.Lock:
+        """One reentrant-free lock per project: serialises renders and version-checked writes
+        so a render reads a consistent plan and two writers cannot interleave (R1 #1/#3)."""
+        with _proj_locks_guard:
+            return _proj_locks.setdefault(pid, threading.Lock())
+
+    def _plan_etag_of(path: Path) -> str:
         try:
-            return hashlib.sha256(ws.plan.read_bytes()).hexdigest()[:32]
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:32]
         except OSError:
             return ""
 
+    def _plan_etag(ws) -> str:
+        return _plan_etag_of(ws.plan)
+
+    def write_plan(ws, new_plan: dict, if_match: Optional[str], pid: str):
+        """The single versioned-write entry (R1 #3). Delegates to patent_figure.project_io,
+        whose lock is keyed by the plan FILE and therefore shared with the mounted plan_studio
+        sub-app and the terms path — so a REST PUT, a browser save and a term edit of the same
+        plan all serialise, and two same-ETag writers get one 200 and one 409."""
+        from patent_figure import project_io as _pio
+        try:
+            return _pio.write_plan(ws.plan, new_plan, if_match if if_match else None,
+                                   snapshot_cb=ws.snapshot_plan)
+        except _pio.PlanConflict as exc:
+            raise HTTPException(409, "plan 已被他人修改（ETag 不匹配，当前 %s）" % exc.current)
+
+    def _freeze_inputs(ws, inputs_dir: Path) -> dict:
+        """Copy the job's semantic inputs into its private ``inputs/`` so a later edit to the
+        shared plan cannot change what this job renders (R1 #1). STEP is referenced by sha
+        (the project's model file is immutable). Returns the frozen snapshot hashes."""
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        snap = WK.snapshot_inputs(ws.plan)
+        snap["plan_etag"] = _plan_etag(ws)
+        for name in ("plan.json", "assembly.json", "glossary.json", "structure.json"):
+            src = ws.root / name
+            if src.is_file():
+                shutil.copy2(src, inputs_dir / name)
+        # rewrite the frozen plan's source.step to an absolute path (it already is), leave as-is
+        return snap
+
+    def _publish_atomic(work: Path, out: Path) -> None:
+        """Replace ``out`` with *exactly* the contents of ``work`` via a directory swap, so a
+        figure that failed, was deleted or renamed this run leaves ``out`` (R1 #2). ``work``
+        is copied (not moved) because it stays as the job's immutable artifact snapshot."""
+        token = "%d.%s" % (os.getpid(), uuid.uuid4().hex[:8])
+        staging = out.with_name(out.name + ".new-" + token)
+        trash = out.with_name(out.name + ".old-" + token)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        shutil.copytree(work, staging)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.exists():
+            os.replace(str(out), str(trash))
+        os.replace(str(staging), str(out))
+        shutil.rmtree(trash, ignore_errors=True)
+
+    def _collect_figures(pid: str, plan_path: Path, dxf_dir: Path, shim) -> dict:
+        """Build the render result (figures + variants + numerals) from a figure directory,
+        reusing the shared annotate + svg helpers but against the *frozen* plan (R1 #1)."""
+        result: dict = {"figures": [], "ok": False, "numerals": None}
+        numerals_file = dxf_dir / "reference-numerals.json"
+        part_names = []
+        try:
+            part_names = [p["name"] for p in json.loads(
+                (plan_path.parent / "assembly.json").read_text(encoding="utf-8")).get("parts", [])]
+        except Exception:
+            part_names = []
+        if numerals_file.is_file():
+            result["numerals"] = json.loads(numerals_file.read_text(encoding="utf-8"))
+        for dxf in sorted(dxf_dir.glob("*.dxf")):
+            fid = dxf.stem
+            if fid.endswith(("_annotated", "_filing", "_engineering")):
+                continue
+            (dxf_dir / (fid + ".svg")).write_text(PS.dxf_to_svg(dxf), encoding="utf-8")
+            qa_file = dxf_dir / (fid + ".qa.json")
+            qa = json.loads(qa_file.read_text(encoding="utf-8")) if qa_file.is_file() else None
+            result["figures"].append({"id": fid, "pass": bool(qa and qa.get("pass")),
+                                      "qa": qa, "svg": "/api/preview/%s.svg" % fid})
+        if result["figures"]:
+            EXT.annotate_all(shim, PS.run_cli, PS.dxf_to_svg, result)
+        result["ok"] = bool(result["figures"]) and all(f["pass"] for f in result["figures"])
+        return result
+
     def _render_job(pid: str, idem: Optional[str]):
-        """Create (or idempotently reuse) a render job and start it in the background."""
+        """Create (or idempotently reuse) an **isolated** render job (R1 #1/#2/#5/#6).
+
+        The job freezes its inputs, renders into its own ``jobs/<id>/work/`` from those frozen
+        inputs (never the live shared plan), then atomically publishes exactly this run's
+        passing set to ``out/``. ``ok:false`` becomes a structured *failed* job; cancellation
+        is checked before exec and before publish so a cancelled job never publishes."""
         studio = reg.studio(pid)                       # 409 if the project isn't ready
-        snap = WK.snapshot_inputs(studio.ws.plan)
-        snap["plan_etag"] = _plan_etag(studio.ws)
+        ws = studio.ws
+        with _plock(pid):
+            snap = WK.snapshot_inputs(ws.plan)
+            snap["plan_etag"] = _plan_etag(ws)
         job, created = jobs.create("render", pid, inputs=snap, idempotency_key=idem)
-        if created:
-            def fn(j):
-                j.emit(JOBS.EV_STAGE, "渲染中", stage="render", progress=0.1)
-                res = studio.render_and_wait()
+        if not created:
+            return job
+        jdir = jobs.root / job.id
+        inputs_dir = jdir / "inputs"
+        work = jdir / "work"
+
+        def fn(j):
+            j.raise_if_cancelled()                     # (1) before executing
+            # Freeze under the shared plan lock so the copy is consistent with any concurrent
+            # plan write (R1 #1/#3); the project render-lock serialises renders.
+            with _plock(pid), PIO.plan_lock(ws.plan):
                 j.raise_if_cancelled()
-                j.emit(JOBS.EV_LOG, (res.get("log") or "")[-800:], progress=0.9)
-                data = tools._figures(pid, res, brief=True)
-                data["ok"] = bool(res.get("ok"))
-                return data
-            jobs.start(job, fn)
+                _freeze_inputs(ws, inputs_dir)
+            if work.exists():
+                shutil.rmtree(work)
+            work.mkdir(parents=True, exist_ok=True)
+            j.emit(JOBS.EV_STAGE, "渲染中", stage="render", progress=0.2)
+            render_argv = [
+                str(SCRIPTS / "render_patent_figure.py"), str(inputs_dir / "plan.json"),
+                "--assembly", str(inputs_dir / "assembly.json"), "-o", str(work),
+                "--cache", str(ws.cache)]
+            worker = WK.get_shared_worker()
+            # token=job.id lets DELETE /v1/jobs/{id} abort exactly this render (R1 #6).
+            proc = worker.run(render_argv, token=j.id) if worker else PS.run_cli(render_argv)
+            j.emit(JOBS.EV_LOG, (proc.stdout[-800:] + "\n" + proc.stderr[-400:]).strip(),
+                   progress=0.8)
+            j.raise_if_cancelled()                     # (2) before annotate/publish
+            shim = SimpleNamespace(plan=inputs_dir / "plan.json", out=work, root=inputs_dir)
+            result = _collect_figures(pid, inputs_dir / "plan.json", work, shim)
+            j.raise_if_cancelled()                     # (3) before publish
+            with _plock(pid):
+                j.raise_if_cancelled()
+                _publish_atomic(work, ws.out)
+                # Bridge the published result into the shared render_state so the figures
+                # endpoint, MCP get_project_figures and the browser all see this /v1 render as
+                # the project's current result (inputs stay frozen; only the *result* is
+                # shared, which is correct — it is the latest published render). R1 #14 / #2.
+                result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                studio.render_state["result"] = result
+                try:
+                    (ws.root / "last_render.json").write_text(
+                        json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+                except OSError:
+                    pass
+            data = tools._figures(pid, result, brief=True)
+            data["ok"] = bool(result["ok"])
+            data["render_job_id"] = job.id
+            data["plan_etag"] = snap.get("plan_etag", "")
+            data["manifest"] = {
+                "figures": [{"id": f["id"], "number": f.get("number"),
+                             "pass": f.get("pass"),
+                             "variants": sorted((f.get("variants") or {}).keys())}
+                            for f in result["figures"]],
+            }
+            if not data["ok"]:
+                # QA failure / unplaceable labels → a structured *failed* job (R1 #5), not a
+                # fake success. The passing figures are still published; the job records why.
+                failed = [f["id"] for f in result["figures"] if not f["pass"]]
+                err = RuntimeError("出图未全部过闸：未通过的图 %s" % (failed or "（无合格图）"))
+                err.code = "E_RENDER_NOT_OK"            # type: ignore
+                err.hint = "按每张图的 QA 提示改计划后重渲"  # type: ignore
+                err.result = data                        # carried for the error payload
+                raise err
+            return data
+
+        jobs.start(job, fn)
         return job
 
     def _job_or_404(job_id: str):
@@ -858,6 +1006,12 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     def v1_job_cancel(job_id: str):
         job = _job_or_404(job_id)
         jobs.cancel(job.id)
+        # Best-effort: if this render is the one running in the worker right now, kill it so a
+        # cancelled job stops promptly (its checkpoints already prevent any publish). R1 #6.
+        if job.kind == "render":
+            worker = WK.get_shared_worker()
+            if worker is not None:
+                worker.abort_if_running(job.id)
         return {"id": job.id, "state": job.state}
 
     @app.get("/v1/jobs/{job_id}/events", tags=["作业"], summary="作业事件流（SSE）")
@@ -892,15 +1046,38 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             "Cache-Control": "no-cache", "Connection": "keep-alive",
             "X-Accel-Buffering": "no"})
 
+    def _wait_job(job, timeout: float) -> bool:
+        """Block (in a worker thread, never the event loop) until the job is terminal or the
+        timeout elapses. Returns True if terminal."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if job.is_terminal():
+                return True
+            time.sleep(0.2)
+        return job.is_terminal()
+
     @app.post("/v1/projects/{pid}/render", tags=["出图"],
-              summary="出图（异步 202 + job_id；?wait=1 兼容旧同步语义）")
-    async def v1_render(pid: str, request: Request, wait: int = 0):
+              summary="出图（异步 202 + job_id；?wait=1 等同一作业的非阻塞等待）")
+    async def v1_render(pid: str, request: Request, wait: int = 0, timeout: float = 600.0):
         reg.need(pid)
-        if wait:
-            return call("render_project", {"project_id": pid})   # 200, old sync behaviour
         idem = request.headers.get("idempotency-key")
         job = _render_job(pid, idem)
-        return JSONResponse({"job_id": job.id, "inputs": job.inputs}, status_code=202)
+        if not wait:
+            return JSONResponse({"job_id": job.id, "inputs": job.inputs}, status_code=202)
+        # wait=1 submits the SAME job and waits NON-blockingly in a threadpool, so this long
+        # wait never blocks the event loop / SSE / cancellation (R1 #4). On timeout it returns
+        # 202 + job_id — never a stale previous result.
+        from starlette.concurrency import run_in_threadpool
+        done = await run_in_threadpool(_wait_job, job, float(timeout))
+        if not done:
+            return JSONResponse({"job_id": job.id, "state": job.state,
+                                 "detail": "渲染仍在进行，改用 GET /v1/jobs/%s 轮询" % job.id},
+                                status_code=202)
+        d = job.to_dict()
+        if job.state != JOBS.SUCCEEDED:
+            return JSONResponse({"job_id": job.id, "state": job.state, "error": d.get("error"),
+                                 "result": d.get("result")}, status_code=200)
+        return JSONResponse(d.get("result") or {"ok": True, "job_id": job.id})
 
     @app.get("/v1/projects/{pid}/plan", tags=["工程"], summary="读取 figure-plan（带 ETag）")
     def v1_get_plan(pid: str):
@@ -915,34 +1092,131 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
              summary="覆盖 figure-plan（If-Match，冲突 409）")
     async def v1_put_plan(pid: str, request: Request):
         ws = reg.studio(pid).ws
-        current = _plan_etag(ws)
         if_match = request.headers.get("if-match", "").strip('"')
-        if if_match and if_match != current:
-            return JSONResponse({"detail": "plan 已被他人修改（ETag 不匹配）",
-                                 "etag": current}, status_code=409)
         body = await request.json()
-        ws.plan.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
-        return JSONResponse({"ok": True}, headers={"ETag": _plan_etag(ws)})
+        # All writes go through the one versioned entry (R1 #3): read→compare→atomic replace
+        # inside the project lock, so two same-ETag writers get one 200 and one 409.
+        etag = write_plan(ws, body, if_match if if_match else None, pid)
+        return JSONResponse({"ok": True}, headers={"ETag": etag})
 
-    def _start_export(pid: str, formats, variant=None):
-        """Create + start an export job (shared by the HTTP endpoint and the MCP tool)."""
-        studio = reg.studio(pid)
-        formats = formats or ["pdf", "docx", "dxf"]
-        want_dwg = "dwg" in formats
-        job, _ = jobs.create("export", pid, inputs={"formats": formats, "variant": variant})
+    _VARIANT_SUFFIX = {"filing": ["_filing"], "disclosure": ["_annotated"],
+                       "both": ["_annotated", "_filing"]}
+    _VARIANT_LABEL = {"_annotated": "交底版_带件号表", "_filing": "递交版_仅图号"}
+
+    def _latest_render_job(pid: str):
+        renders = [j for j in jobs.list(pid)
+                   if j.kind == "render" and j.state == JOBS.SUCCEEDED]
+        return renders[-1] if renders else None
+
+    def _build_export(render_job, dest: Path, variant: str, formats, dpi: int):
+        """Build the bundle from the render job's **immutable** work snapshot (R1 #7), with
+        per figure×version×format accounting that distinguishes skip (unsupported) from fail
+        (生成失败) (R1 #8), honouring variant/formats/dpi (R1 #12)."""
+        from patent_figure import sheet as _sheet
+        work = jobs.root / render_job.id / "work"
+        if not work.is_dir():
+            raise RuntimeError("渲染作业 %s 的产物快照不存在" % render_job.id)
+        suffixes = _VARIANT_SUFFIX.get(variant or "both", _VARIANT_SUFFIX["both"])
+        figs = sorted(p.stem for p in work.glob("*.dxf")
+                      if not p.stem.endswith(("_annotated", "_filing", "_engineering")))
+        manifest: Dict[str, str] = {}
+        notes: List[str] = []
+        dwg_log: List[str] = []
+        docx_pngs: List[Path] = []
+        for fid in figs:
+            for suf in suffixes:
+                ver = "交底版" if suf == "_annotated" else "递交版"
+                srcdxf = work / (fid + suf + ".dxf")
+                sub = dest / _VARIANT_LABEL[suf]
+                for fmt in formats:
+                    key = "%s/%s/%s" % (fid, ver, fmt)
+                    if fmt == "pdf":
+                        manifest[key] = "skip"                     # F1 PDF 在 WP2
+                        continue
+                    if not srcdxf.is_file():
+                        manifest[key] = "fail"
+                        continue
+                    sub.mkdir(parents=True, exist_ok=True)
+                    if fmt == "dxf":
+                        shutil.copy2(srcdxf, sub / srcdxf.name)
+                        manifest[key] = "ok"
+                    elif fmt == "png":
+                        png = sub / (srcdxf.stem + ".png")
+                        try:
+                            _sheet.render_preview(srcdxf, png, dpi=dpi)
+                            manifest[key] = "ok" if png.is_file() else "fail"
+                        except Exception as exc:
+                            manifest[key] = "fail"; notes.append("%s PNG: %s" % (key, exc))
+                    elif fmt == "docx":
+                        # One Word doc per the disclosure (annotated) variant; collect its PNGs.
+                        if suf == "_annotated":
+                            png = sub / (srcdxf.stem + ".png")
+                            try:
+                                _sheet.render_preview(srcdxf, png, dpi=dpi)
+                                if png.is_file():
+                                    docx_pngs.append(png)
+                            except Exception:
+                                pass
+                        manifest[key] = "pending"
+                    elif fmt == "dwg":
+                        dwg = sub / (srcdxf.stem + ".dwg")
+                        proc = PS.run_cli([str(SCRIPTS / "autocad_core_dxf_to_dwg.py"),
+                                           str(srcdxf), str(dwg)], timeout=600)
+                        if proc.returncode != 0:
+                            proc = PS.run_cli([str(SCRIPTS / "libredwg_dxf_to_dwg.py"),
+                                               str(srcdxf), "-o", str(sub)], timeout=600)
+                        if dwg.is_file():
+                            manifest[key] = "ok"; dwg_log.append("%s: ok" % key)
+                        else:
+                            manifest[key] = "fail"; dwg_log.append("%s: 转换失败" % key)
+        # Resolve the per-variant docx now that its PNGs exist.
+        if "docx" in formats:
+            if docx_pngs:
+                try:
+                    EXT._docx(docx_pngs, dest / "说明书附图_交底版.docx")
+                    ok = (dest / "说明书附图_交底版.docx").is_file()
+                except Exception as exc:
+                    ok = False; notes.append("Word: %s" % exc)
+            else:
+                ok = False
+            for key in list(manifest):
+                if key.endswith("/docx"):
+                    manifest[key] = "ok" if ok else ("skip" if "交底版" not in key else "fail")
+        # reference-numerals + 附图说明 always travel with the package.
+        numerals = work / "reference-numerals.json"
+        if numerals.is_file():
+            shutil.copy2(numerals, dest / numerals.name)
+        return manifest, notes, dwg_log
+
+    def _start_export(pid: str, formats, variant=None, dpi: int = 300, render_job_id=None):
+        """Create + start an export job bound to a specific successful render job (R1 #7)."""
+        reg.need(pid)
+        formats = formats or ["docx", "dxf"]
+        render_job = jobs.get(render_job_id) if render_job_id else _latest_render_job(pid)
+        job, _ = jobs.create("export", pid, inputs={
+            "formats": formats, "variant": variant or "both", "dpi": dpi,
+            "render_job_id": render_job.id if render_job else None})
 
         def fn(j):
+            if render_job is None:
+                err = RuntimeError("没有可导出的成功渲染，请先出图")
+                err.code = "E_NO_RENDER"; raise err          # type: ignore
             j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
-            bundle = studio.export_now(want_dwg)
-            download = base + "/v1/exports/%s/download" % j.id
-            # Per-format manifest derived from the extensions actually produced — never
-            # report a format "ok" that is not in the zip (S0-04 / S1-11: 缺项不得报成功).
-            # PDF is not produced this round (F1 lands in WP2), so it reports "skip".
-            exts = {Path(n).suffix.lower().lstrip(".") for n in bundle.get("files", [])}
-            manifest = {f: ("ok" if f in exts else "skip") for f in formats}
-            exports[j.id] = str(Path(bundle["dir"]).with_suffix(".zip"))
-            return {"export_id": j.id, "manifest": manifest, "files": bundle.get("files", []),
-                    "download_url": download}
+            dest = (jobs.root / j.id / "bundle")
+            dest.mkdir(parents=True, exist_ok=True)
+            manifest, notes, dwg_log = _build_export(render_job, dest, variant or "both",
+                                                     formats, dpi)
+            import zipfile
+            archive = (jobs.root / j.id / "bundle.zip")
+            with zipfile.ZipFile(str(archive), "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in sorted(dest.rglob("*")):
+                    if f.is_file():
+                        zf.write(str(f), f.relative_to(dest).as_posix())
+            exports[j.id] = str(archive)
+            return {"export_id": j.id, "render_job_id": render_job.id,
+                    "render_plan_etag": (render_job.result or {}).get("plan_etag", ""),
+                    "manifest": manifest, "notes": notes, "dwg_log": dwg_log,
+                    "download_url": base + "/v1/exports/%s/download" % j.id}
 
         jobs.start(job, fn)
         return job
@@ -953,19 +1227,34 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     tools.start_export = _start_export
 
     @app.post("/v1/projects/{pid}/export", status_code=202, tags=["导出"],
-              summary="导出附图包（异步 202 → export_id）")
+              summary="导出附图包（异步 202 → export_id，绑定一次成功渲染）")
     async def v1_export(pid: str, request: Request):
-        studio = reg.studio(pid)
+        reg.need(pid)
         try:
             body = await request.json()
         except ValueError:
             body = {}
-        if_match = str(body.get("plan_etag", "")).strip('"')
-        if if_match and if_match != _plan_etag(studio.ws):
-            return JSONResponse({"detail": "plan 已变更，请重渲后再导出", "etag": _plan_etag(studio.ws)},
-                                status_code=409)
-        job = _start_export(pid, body.get("formats"), body.get("variant"))
-        return JSONResponse({"export_id": job.id, "job_id": job.id}, status_code=202)
+        # sheet_preset is accepted by the schema but not implemented → reject rather than
+        # silently ignore (R1 #12).
+        if body.get("sheet_preset"):
+            raise HTTPException(400, "sheet_preset 尚未实现（WP2）；请不要传该参数")
+        render_job_id = body.get("render_job_id")
+        render_job = jobs.get(render_job_id) if render_job_id else _latest_render_job(pid)
+        if render_job is None:
+            raise HTTPException(409, "没有可导出的成功渲染，请先出图")
+        # Verify the request's plan ETag against the RENDER JOB's frozen input — not the
+        # current (possibly edited) plan — so "render A → edit to B → export with B's etag"
+        # is caught (R1 #7).
+        want_etag = str(body.get("plan_etag", "")).strip('"')
+        render_etag = (render_job.result or {}).get("plan_etag", "")
+        if want_etag and want_etag != render_etag:
+            return JSONResponse({"detail": "请求的 plan_etag 与被导出渲染的输入版本不一致",
+                                 "render_plan_etag": render_etag}, status_code=409)
+        dpi = int(body.get("dpi") or 300)
+        job = _start_export(pid, body.get("formats"), body.get("variant"), dpi=dpi,
+                            render_job_id=render_job.id)
+        return JSONResponse({"export_id": job.id, "job_id": job.id,
+                             "render_job_id": render_job.id}, status_code=202)
 
     @app.get("/v1/exports/{export_id}", tags=["导出"], summary="导出包清单与下载地址")
     def v1_export_status(export_id: str):

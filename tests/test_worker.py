@@ -140,3 +140,40 @@ def test_snapshot_inputs_hashes(prepared):
     assert snap["plan_hash"] and snap["terms_hash"] and snap["step_sha"]
     # deterministic
     assert W.snapshot_inputs(prepared["plan"]) == snap
+
+
+def test_abort_if_running_kills_the_tagged_render(prepared):
+    """R1 #6: a render tagged with a token can be aborted mid-flight from another thread; the
+    in-flight run returns non-zero, and the worker stays usable afterwards."""
+    import threading
+    import time as _t
+    w = W.Worker()
+    try:
+        box = {}
+
+        def do():
+            box["res"] = w.run([RP, str(prepared["plan"]), "--assembly", str(prepared["asm"]),
+                                "-o", str(prepared["work"] / "abort")], token="job-abort")
+
+        t = threading.Thread(target=do)
+        t.start()
+        # wait until the worker reports it is running our token, then abort
+        for _ in range(200):
+            with w._abort_lock:
+                cur = w._current_token
+            if cur == "job-abort":
+                break
+            _t.sleep(0.02)
+        killed = w.abort_if_running("job-abort")
+        t.join(timeout=30)
+        assert not t.is_alive()
+        # either we aborted it (killed → non-zero), or it finished before we could; both are
+        # acceptable, but if we issued the kill the result must be non-zero.
+        if killed:
+            assert box["res"].returncode != 0
+        # worker recovers for the next job
+        ok = w.run([RP, str(prepared["plan"]), "--assembly", str(prepared["asm"]),
+                    "-o", str(prepared["work"] / "after-abort")])
+        assert ok.returncode == 0
+    finally:
+        w.close()
