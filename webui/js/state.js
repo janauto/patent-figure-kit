@@ -164,9 +164,13 @@ const digestKey = (pid) => `inkline-render-digest-${pid}`;
 export function digestStoreGet(pid) { try { return localStorage.getItem(digestKey(pid)) || null; } catch { return null; } }
 export function digestStoreSet(pid, d) { try { if (d) localStorage.setItem(digestKey(pid), d); else localStorage.removeItem(digestKey(pid)); } catch { /* 隐私模式 */ } }
 
-// 结果是否过期 / 为何过期：'no-proof'（无版本证据，需重新出图）| 'changed'（plan 已改）| null（一致）。
+// 结果是否过期 / 为何过期：
+//   'unsaved'（有未持久化编辑或保存失败——必须先存好再谈一致）| 'no-proof'（无版本证据）| 'changed' | null
 export function renderStaleReason() {
   if (!state.render) return null;
+  // 本地还有没落盘的编辑、或上次保存失败 → 立即判过期（live 的 planEtag 此刻还是旧值，不能据此放行）
+  if (state.editVersion > state.savedVersion) return 'unsaved';
+  if (state.saveState === 'error' || state.saveState === 'conflict') return 'unsaved';
   // 判据：有 ETag（live /v1 后端）→ 用 ETag 比对；无 ETag（legacy 旧 /api/*）→ 用输入摘要比对。
   if (state.planEtag) {                          // live：以结果绑定的 ETag 为准
     if (!state.renderInputs.etag) return 'no-proof';
@@ -189,7 +193,6 @@ export function mutate(fn) {
   saveTimer = setTimeout(flush, 600);
 }
 
-let savingPromise = null;     // 在途保存；flush 会等它，直到「当前编辑版本」真正持久化
 async function doSave() {
   if (api.readOnly) { state.saveState = 'readonly'; bus.emit('save-state'); return; }
   const v = state.editVersion;                   // 本轮要保存的版本（PUT body 在 api 里同步序列化 = 此刻的 plan）
@@ -200,7 +203,6 @@ async function doSave() {
     if (res.etag) state.planEtag = res.etag;
     if (res.validate) { state.validate = res.validate; bus.emit('validate'); }
     state.savedVersion = Math.max(state.savedVersion, v);
-    // 只有「期间没有新编辑」才算 saved；否则保持 dirty，由 flush 的循环继续保存最新版
     state.saveState = (state.editVersion === v) ? 'saved' : 'dirty';
   } catch (err) {
     state.saveState = err.code === 'etag_conflict' ? 'conflict' : 'error';
@@ -208,16 +210,23 @@ async function doSave() {
   }
   bus.emit('save-state');
 }
-export async function flush() {
+// 全局唯一的保存循环：所有 flush() 调用共享同一个 Promise，只有这一个循环负责发送与清理，
+// 杜绝并发 flush 各自发 PUT（同 ETag → 409 / 丢编辑）。循环持续到最新编辑版本已落盘或保存失败。
+let flushLoop = null;
+export function flush() {
   clearTimeout(saveTimer);
-  // 循环直到「当前编辑版本」已持久化：慢 PUT 期间连续编辑也不会被吞（服务端最终收到最新版）
-  for (let guard = 0; guard < 20; guard += 1) {
-    if (savingPromise) { await savingPromise; }          // 等在途保存
-    if (state.saveState === 'error' || state.saveState === 'conflict') return;
-    if (state.savedVersion >= state.editVersion) return; // 最新编辑已落盘
-    savingPromise = doSave();
-    try { await savingPromise; } finally { savingPromise = null; }
+  if (!flushLoop) {
+    flushLoop = (async () => {
+      try {
+        for (let guard = 0; guard < 100; guard += 1) {
+          if (state.saveState === 'error' || state.saveState === 'conflict') break;
+          if (state.savedVersion >= state.editVersion) break;   // 最新编辑已落盘
+          await doSave();                                        // 串行，一次只有一个 PUT 在途
+        }
+      } finally { flushLoop = null; }
+    })();
   }
+  return flushLoop;
 }
 
 export function setSelection(names) {

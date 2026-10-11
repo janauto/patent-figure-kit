@@ -35,6 +35,10 @@ class ApiError extends Error {
 }
 
 async function raw(method, url, { body, headers = {}, formData } = {}) {
+  // 统一写保护：静态只读模式绝不发任何写请求（POST/PUT/DELETE/PATCH），从请求层兜底拦截。
+  if (readOnly && !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) {
+    throw new ApiError('静态演示站只读，不能执行写操作', 0, 'read_only');
+  }
   const init = { method, headers: { ...(token ? { 'X-Studio-Token': token, Authorization: `Bearer ${token}` } : {}), ...headers } };
   if (formData) init.body = formData;
   else if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }

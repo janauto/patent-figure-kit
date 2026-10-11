@@ -1,7 +1,7 @@
 // 屏⑤ 导出：版本段控 + 格式矩阵 + 推荐组合 + 打包进度与清单。
 // 递交版 = PDF / Word；DXF / DWG 标「源文件，供再编辑」，不暗示能递交；DWG 不可用时禁选。
 // 四态：QA 未全过（禁用 + 指向 QA）/ 就绪 / 打包中 / 完成清单。
-import { state, renderStale, renderStaleReason, bus } from './state.js';
+import { state, renderStale, renderStaleReason, flush, bus } from './state.js';
 import { api } from './api.js';
 import { toast } from './main.js';
 import { esc } from './esc.js';
@@ -39,10 +39,12 @@ function render() {
     const reason = renderStaleReason();
     const stale = reason && state.render;
     const h2 = reason === 'no-proof' ? '无法证明结果对应当前计划'
-      : (reason === 'changed' ? '计划改过，结果已过期' : '还有图未过 QA，不能导出');
+      : (reason === 'unsaved' ? '计划有改动尚未保存'
+        : (reason === 'changed' ? '计划改过，结果已过期' : '还有图未过 QA，不能导出'));
     const body = reason === 'no-proof' ? '为安全起见，未经本会话重新出图的结果不解锁导出。请到「出图与 QA」重新出图以解锁。'
-      : (reason === 'changed' ? '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」重新出图并过闸再来导出。'
-        : '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」按提示修改并重渲，全过后再来导出。');
+      : (reason === 'unsaved' ? '本地改动还没保存好（或保存失败）。先把计划存好、重新出图并过闸，再来导出。'
+        : (reason === 'changed' ? '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」重新出图并过闸再来导出。'
+          : '未过闸的图不进交付目录——这是红线。请先到「出图与 QA」按提示修改并重渲，全过后再来导出。'));
     host.innerHTML = `<div class="exp-blank">
       <i class="reg reg-tl"></i><i class="reg reg-tr"></i><i class="reg reg-bl"></i><i class="reg reg-br"></i>
       <p class="stamp-fail">导出锁定</p>
@@ -145,6 +147,10 @@ function renderDone() {
 
 async function doPack() {
   if (api.readOnly) { toast('静态演示站只读，不能打包', ''); return; }   // 绝不向静态服务器发写请求
+  // 提交前先把本地改动落盘，再重新核对门禁：保存失败或结果过期一律禁止提交旧版本导出请求
+  await flush();
+  if (state.saveState === 'error' || state.saveState === 'conflict') { toast('计划没能保存，未打包——请先解决保存问题。', 'bad'); render(); return; }
+  if (!gatePassed()) { toast('结果已不对应当前计划或未过闸，未打包——请先到「出图与 QA」重新出图。', 'bad'); render(); return; }
   packing = true; render();
   const fill = host.querySelector('#pack-fill');
   const log = host.querySelector('#pack-log');

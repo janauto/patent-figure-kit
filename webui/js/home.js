@@ -198,6 +198,7 @@ function closeUpload() {
 }
 
 function openUploadIdle(dragging) {
+  if (readOnly) { toast('静态演示站只读，无法新建工程', ''); return; }
   openUpload();
   $('#upload-body').innerHTML = `
     <div class="up-drop ${dragging ? 'over' : ''}" id="up-drop">
@@ -302,6 +303,7 @@ function validateStep(file) {
 
 let pendingTitle = ''; let pendingAi = true;   // 完整上传上下文：重试不丢文件/标题/开关
 async function startUpload(file, titleOverride) {
+  if (readOnly) return;
   const err0 = validateStep(file);
   if (err0) { toast(err0, 'bad'); return; }
   pendingFile = file;
@@ -327,6 +329,7 @@ async function startUpload(file, titleOverride) {
 }
 
 async function startExample(ex) {
+  if (readOnly) { toast('静态演示站只读，无法载入示例', ''); return; }
   if (isLegacy) {                   // 旧后端的示例已在列表里，直接打开
     const p = cachedProjects.find((x) => x.example) || cachedProjects[0];
     if (p) { location.href = toStudio(p.project_id); return; }
@@ -383,11 +386,14 @@ function paintCmdk(q) {
   const projItems = cachedProjects
     .filter((p) => !ql || p.title.toLowerCase().includes(ql) || p.step_name.toLowerCase().includes(ql))
     .map((p) => ({ label: p.title, meta: p.step_name, go: () => { location.href = toStudio(p.project_id); } }));
-  const actions = [
+  // 静态只读站不提供任何创建/上传入口（不发写请求）
+  const actions = (readOnly ? [
+    { label: '接入 MCP / API', meta: '命令', go: () => $('#dlg-integrate').showModal() },
+  ] : [
     { label: '新建工程 / 上传 STEP', meta: '命令', go: openUploadIdle },
     { label: '载入示例 · 行星齿轮减速器', meta: '命令', go: () => startExample('gearbox') },
     { label: '接入 MCP / API', meta: '命令', go: () => $('#dlg-integrate').showModal() },
-  ].filter((a) => !ql || a.label.toLowerCase().includes(ql));
+  ]).filter((a) => !ql || a.label.toLowerCase().includes(ql));
   cmdkItems = [...projItems, ...actions];
   cmdkIdx = Math.min(cmdkIdx, Math.max(0, cmdkItems.length - 1));
   $('#cmdk-list').innerHTML = cmdkItems.map((it, i) => `<li class="${i === cmdkIdx ? 'on' : ''}" data-i="${i}">
@@ -449,7 +455,8 @@ function initDialogs() {
     else $(`#dlg-${b.dataset.open}`).showModal();
   }));
   $('#no-step').addEventListener('click', () => $('#dlg-nostep').showModal());
-  $('#nostep-example').addEventListener('click', () => { $('#dlg-nostep').close(); startExample('gearbox'); });
+  if (readOnly) $('#nostep-example')?.remove();   // 静态站不提供「先用示例跑一遍」的创建入口
+  $('#nostep-example')?.addEventListener('click', () => { $('#dlg-nostep').close(); startExample('gearbox'); });
   $('#form-settings [data-save]')?.addEventListener('click', saveSettings);
   $('#form-settings [data-test]')?.addEventListener('click', testSettings);
   $('#upload-close').addEventListener('click', closeUpload);

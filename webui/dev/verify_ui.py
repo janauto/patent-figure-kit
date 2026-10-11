@@ -147,6 +147,81 @@ def test_upload_retry(pg):
           f"posts={len(posts)} pageerr={pe[:1]} contentOK={content_ok}")
 
 
+def test_concurrent_flush(pg):
+    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    r = pg.evaluate("""async () => {
+        const st = await import('/js/state.js');
+        st.mutate(p => { p.terms[0].term = 'CF-1'; });
+        const f1 = st.flush();                       // 两个并发 flush
+        const f2 = st.flush();
+        st.mutate(p => { p.terms[0].term = 'CF-2'; });   // 保存期间第三次编辑
+        await Promise.all([f1, f2]);
+        await st.flush();
+        const sameLoop = f1 === f2;                  // 共享同一个保存循环 Promise
+        const res = await (await fetch('/v1/projects/gearbox/plan')).json();
+        return { term: res.plan.terms[0].term, sameLoop, saved: st.state.savedVersion, edit: st.state.editVersion };
+    }""")
+    check("并发 flush：共享单循环、服务端最终为最新版、版本号自洽",
+          r["term"] == "CF-2" and r["sameLoop"] and r["saved"] >= r["edit"],
+          f"term={r['term']} sameLoop={r['sameLoop']} saved={r['saved']} edit={r['edit']}")
+
+
+def test_unsaved_lock(pg):
+    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2500)
+    reason = pg.evaluate("""async () => {
+        const st = await import('/js/state.js');
+        st.mutate(p => { p.terms[0].term = 'UNSAVED-' + Date.now(); });   // 改了但没 flush
+        return st.renderStaleReason();                                    // 应立即判 unsaved（不等保存）
+    }""")
+    check("未保存编辑：有未落盘改动时结果立即判过期（unsaved）", reason == "unsaved", f"reason={reason}")
+
+
+def test_candidate_bad_member(pg):
+    pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
+    pg.wait_for_timeout(2600)
+    r = pg.evaluate("""async () => {
+        const st = await import('/js/state.js');
+        // 给第一个候选引用的组（g-motor）塞一个 assembly 里不存在的成员
+        const g = (st.state.structure.groups||[]).find(x=>x.id==='g-motor');
+        g.parts.push('SYN-MISSING-XYZ'); st.bus.emit('structure');
+        const before = st.state.plan.figures.length;
+        document.querySelector('[data-accept]')?.click();
+        await new Promise(x=>setTimeout(x,300));
+        return { added: st.state.plan.figures.length > before };
+    }""")
+    check("候选失效成员：组内含不存在的零件时整个接受被阻止（不建图）", not r["added"], f"figureAdded={r['added']}")
+
+
+def test_static_write_guard(ctx):
+    pg = ctx.new_page()
+    writes = []
+    pg.on("request", lambda r: writes.append(r.method + " " + r.url) if r.method in ("POST", "PUT", "DELETE") else None)
+    try:
+        pg.goto(f"{STATIC}/home.html", wait_until="networkidle"); pg.wait_for_timeout(1000)
+        # 命令面板：静态站不应出现「新建/上传」「载入示例」入口
+        cmd = pg.evaluate("""() => { document.querySelector('#cmd-open').click();
+            return [...document.querySelectorAll('#cmdk-list li')].map(li=>li.textContent); }""")
+        has_create = any(('上传' in c or '载入示例' in c or '新建' in c) for c in cmd)
+        # 统一请求层拒绝写：直接调 api 写方法应抛错且不发网络请求
+        guard = pg.evaluate("""async () => {
+            const m = await import('./js/api.js');
+            let threw = false;
+            try { await m.api.createProject({file:null, title:'x'}); } catch(e){ threw = (e.code==='read_only'); }
+            let threw2 = false;
+            try { await m.api.render('gearbox', {}); } catch(e){ threw2 = (e.code==='read_only'); }
+            return { threw, threw2 };
+        }""")
+        pg.wait_for_timeout(300)
+        check("静态站：命令面板无创建/上传入口 + 请求层拒绝写 + 零写请求",
+              (not has_create) and guard["threw"] and guard["threw2"] and len(writes) == 0,
+              f"cmdCreate={has_create} guard={guard} writes={writes[:2]}")
+    except Exception as exc:
+        check("静态站：命令面板无创建/上传入口 + 请求层拒绝写 + 零写请求", False, f"（需先起 8808 静态站）{exc!r}")
+    pg.close()
+
+
 def test_static_no_write(ctx):
     pg = ctx.new_page()
     writes = []
@@ -165,7 +240,8 @@ def main():
     with sync_playwright() as p:
         b = p.chromium.launch()
         ctx = b.new_context(viewport={"width": 1440, "height": 900})
-        for fn in (test_xss, test_save_race, test_candidate_resolve, test_keyboard_continuous, test_upload_retry):
+        for fn in (test_xss, test_save_race, test_concurrent_flush, test_unsaved_lock,
+                   test_candidate_resolve, test_candidate_bad_member, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:
                 fn(pg)
@@ -176,6 +252,7 @@ def main():
             test_new_session_lock(ctx)
         except Exception as exc:
             check("test_new_session_lock", False, f"异常 {exc!r}")
+        test_static_write_guard(ctx)
         test_static_no_write(ctx)
         b.close()
     ok = all(r[1] for r in results)

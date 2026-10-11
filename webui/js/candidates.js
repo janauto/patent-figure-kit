@@ -7,22 +7,26 @@ import { esc } from './esc.js';
 
 let root;
 
-// 把候选的稳定成员引用（{group}/{part}）解析成真实零件名；返回 {parts, display, unresolved}。
+// 把候选的稳定成员引用（{group}/{part}）**展开后逐一**校验在 assembly 中存在；返回 {parts, display, unresolved}。
+// 组存在不等于组内成员都存在——结构数据失效/契约不一致时，组内的失效零件也要被挡下（Codex R3d #5）。
 function resolveCandidate(c) {
   const groups = state.structure?.groups || [];
   const parts = []; const unresolved = [];
+  const existsInAssembly = (name) => !!partByName(name) || resolveMembers({ members: [name] }).size > 0;
+  const take = (name, label) => { if (existsInAssembly(name)) parts.push(name); else unresolved.push(label || name); };
   (c.members || []).forEach((m) => {
     if (typeof m === 'string') {                 // 兼容旧形态：当作组名或零件名
       const g = groups.find((x) => x.name === m || x.id === m);
-      if (g) parts.push(...g.parts);
-      else if (partByName(m) || resolveMembers({ members: [m] }).size) parts.push(m);
-      else unresolved.push(m);
+      if (g) g.parts.forEach((p) => take(p, `${m}/${p}`));
+      else take(m);
     } else if (m.group) {
       const g = groups.find((x) => x.id === m.group);
-      if (g) parts.push(...g.parts); else unresolved.push(`组:${m.group}`);
+      if (g) g.parts.forEach((p) => take(p, `${m.group}/${p}`));
+      else unresolved.push(`组:${m.group}`);
     } else if (m.part) {
-      if (partByName(m.part) || resolveMembers({ members: [m.part] }).size) parts.push(m.part);
-      else unresolved.push(m.part);
+      take(m.part);
+    } else {
+      unresolved.push(`非法引用:${JSON.stringify(m)}`);   // 既非 group 也非 part → 非法
     }
   });
   return { parts: [...new Set(parts)], display: c.members_display || c.members || [], unresolved };

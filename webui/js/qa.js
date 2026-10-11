@@ -147,15 +147,17 @@ function render() {
   const stale = !!staleReason;
   const staleMsg = staleReason === 'no-proof'
     ? '无法证明这张图对应当前计划——请重新出图以解锁导出。'
-    : '计划已修改，下面的预览可能过期——请重新出图后再导出。';
+    : (staleReason === 'unsaved'
+      ? '计划有改动还没保存好——保存并重新出图后再导出。'
+      : '计划已修改，下面的预览可能过期——请重新出图后再导出。');
   host.innerHTML = `
     ${stale ? `<div class="stale-bar">${staleMsg}
-      <button class="btn sm" id="rerender-stale">重新出图</button></div>` : ''}
+      <button class="btn sm" id="rerender-stale" ${rendering ? 'disabled' : ''}>${rendering ? '出图中…' : '重新出图'}</button></div>` : ''}
     <div class="qa-top">
       <div class="qa-tabs">${tabs}</div>
       ${seg}
       <div class="qa-top-right">
-        <button class="btn ghost sm" id="rerender">↻ 重新出图</button>
+        <button class="btn ghost sm" id="rerender" ${rendering ? 'disabled' : ''}>${rendering ? '<i class="spin"></i> 出图中…' : '↻ 重新出图'}</button>
         <label class="switch sm"><input type="checkbox" id="only-fail" ${onlyFail ? 'checked' : ''}> 仅看失败项</label>
         <span class="qa-gate ${allPass && !stale ? 'ok' : 'bad'}">
           ${stale ? '结果已过期，需重新出图'
@@ -218,7 +220,8 @@ async function loadSvg(fig) {
   } catch { pane.innerHTML = '<p class="hint pad">预览加载失败</p>'; }
 }
 
-async function applyResult(d) {
+// evidence：本次渲染作业「启动成功时」捕获的输入证据（{etag,digest}），只属于这一个作业。
+async function applyResult(d, evidence) {
   // 读权威结果：优先作业 done 带回的 result，否则回工程/状态取一次
   let result = (d && d.result && d.result.figures) ? d.result : null;
   if (!result) {
@@ -226,11 +229,10 @@ async function applyResult(d) {
     catch (err) { rendering = false; toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return; }
   }
   state.render = result || null;
-  // 绑定「渲染输入的版本证据」：live 用后端结果携带的 plan_etag；legacy 用渲染时输入摘要并持久化。
+  // 绑定版本证据，只用「该作业自己的 evidence」——绝不读共享可变量，避免被后来的点击/被拒作业篡改。
   if (result && (result.figures || []).length) {
-    // live：只认后端结果携带的 inputs.plan_etag——缺失则 null（→ no-proof → 锁定），绝不用当前 etag 补造
-    if (state.planEtag) state.renderInputs = { etag: result.inputs?.plan_etag || null, digest: null };
-    else { state.renderInputs = { etag: null, digest: renderDigestAtRender }; digestStoreSet(state.projectId, renderDigestAtRender); }
+    if (state.planEtag) state.renderInputs = { etag: result.inputs?.plan_etag || null, digest: null };  // live：只认后端 ETag
+    else { state.renderInputs = { etag: null, digest: evidence.digest }; digestStoreSet(state.projectId, evidence.digest); }  // legacy：该作业输入摘要
   } else {
     state.renderInputs = { etag: null, digest: null };
     if (!state.planEtag) digestStoreSet(state.projectId, null);
@@ -249,33 +251,35 @@ async function applyResult(d) {
   render();
 }
 
-let renderDigestAtRender = null;
 async function startRender() {
-  if (api.readOnly) { toast('静态演示站只读，不能出图', ''); return; }   // 不向静态服务器发写请求
-  // 先把本地改动落盘成功，确保渲染用的是当前这份 plan（Codex #2）
-  await flush();
+  if (rendering) return;                 // 重入锁：渲染在途时不再启动第二次（按钮也禁用）
+  if (api.readOnly) { toast('静态演示站只读，不能出图', ''); return; }
+  rendering = true; render();            // 先锁，再 await（任何 await 之前就已置位）
+  await flush();                         // 先把本地改动落盘成功，确保渲染用的是当前这份 plan
   if (state.saveState === 'error' || state.saveState === 'conflict') {
-    toast('计划没能保存，未渲染——请先解决保存问题（可能是与他处的冲突）。', 'bad');
-    return;
+    rendering = false; toast('计划没能保存，未渲染——请先解决保存问题（可能是与他处的冲突）。', 'bad'); render(); return;
   }
-  renderDigestAtRender = planDigest();   // 记下这次渲染绑定的 plan 摘要
-  rendering = true; logs.length = 0; render();
+  let job;
   try {
-    const { job_id } = await api.render(state.projectId, { etag: state.planEtag, fail: params.get('rfail') });
-    sub = api.jobEvents(job_id, {
-      log(d) { logs.push(d.line); render(); },
-      stage(d) { if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
-      done(d) { applyResult(d); },
-      fail(d) {                       // 作业失败（崩溃/异常）：尝试载入失败结果，给具体原因
-        rendering = false;
-        toast('出图未完成：' + (d.message || '渲染进程失败'), 'bad');
-        api.getRenderResult(state.projectId).then((r) => { if (r) { state.render = r; bus.emit('rendered'); } render(); }).catch(() => render());
-      },
-      disconnect() {                  // 传输断线：不当作失败，用 getJob 校准终态
-        api.getJob(job_id).then((j) => { if (j.state === 'succeeded') applyResult({ result: j.result }); }).catch(() => {});
-      },
-    });
-  } catch (err) { rendering = false; toast('无法开始渲染：' + (err.hint || err.message), 'bad'); render(); }
+    job = await api.render(state.projectId, { etag: state.planEtag, fail: params.get('rfail') });
+  } catch (err) {                        // 被拒绝（409 等）：不碰任何共享证据，直接退出
+    rendering = false; toast('无法开始渲染：' + (err.hint || err.message), 'bad'); render(); return;
+  }
+  const evidence = { digest: planDigest(), etag: state.planEtag };   // 作业启动成功后才捕获，封闭在闭包里
+  logs.length = 0; render();
+  sub = api.jobEvents(job.job_id, {
+    log(d) { logs.push(d.line); render(); },
+    stage(d) { if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
+    done(d) { applyResult(d, evidence); },
+    fail(d) {
+      rendering = false;
+      toast('出图未完成：' + (d.message || '渲染进程失败'), 'bad');
+      api.getRenderResult(state.projectId).then((r) => { if (r) { state.render = r; bus.emit('rendered'); } render(); }).catch(() => render());
+    },
+    disconnect() {
+      api.getJob(job.job_id).then((j) => { if (j.state === 'succeeded') applyResult({ result: j.result }, evidence); }).catch(() => {});
+    },
+  });
 }
 
 export function mountQa(el) {
