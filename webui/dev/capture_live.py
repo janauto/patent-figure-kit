@@ -182,7 +182,7 @@ def capture(browser, be, nopdf, ai, fresh):
     pg.goto(f"{B}/p/{uploaded}/?stage=qa", wait_until="networkidle")
     E.studio_ready(pg)
     pg.wait_for_selector("#qa-render")
-    shot(pg, "04-qa-empty", "④ 出图与 QA", "空", "还没出过图：渲染入口与说明")
+    shot(pg, "04-qa-empty", "④ 出图与 QA", "空", "上传后还没出过图：渲染入口；计划还没过校验（零件未起名）时给白话提示并直达术语页")
     ctx.close()
 
     # ⑤ 的空态要在这个工程出图之前拍
@@ -214,7 +214,7 @@ def capture(browser, be, nopdf, ai, fresh):
     pg.click("#qa-render")
     pg.wait_for_selector(".qa-blank .stamp-run .spin", timeout=10000)
     pg.wait_for_timeout(400)
-    shot(pg, "04-qa-loading", "④ 出图与 QA", "加载", "渲染作业已提交（202）并在后端运行：页面显示进度、禁用再次出图")
+    shot(pg, "04-qa-loading", "④ 出图与 QA", "加载", "渲染作业已提交（202）并在后端运行：页面显示进度、禁用再次出图（截图时把该作业的 SSE 在浏览器里挂起，拍完放行）")
     for r in held:
         r.continue_()
     pg.unroute("**/v1/jobs/*/events*")
