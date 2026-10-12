@@ -76,6 +76,7 @@ def check(name, ok, extra=""):
 FAKE_NAMES = {"PGB-MOTOR-SHAFT": "电机轴", "PGB-OIL-SEAL": "油封", "PGB-SUN-GEAR": "太阳轮",
               "PGB-END-COVER": "端盖", "PGB-RING-GEAR": "内齿圈"}
 FAKE_CALLS = []
+FAKE_MODE = {"structure_fail": False}     # True：结构识别请求回 401（模拟通道 / 密钥失效）
 
 
 class FakeLLM(BaseHTTPRequestHandler):
@@ -88,6 +89,14 @@ class FakeLLM(BaseHTTPRequestHandler):
         system = body["messages"][0]["content"]
         if "结构工程师" in system:          # 上传 / 示例准备后的自动结构识别：给一个空分组（全部归「其他零件」）
             FAKE_CALLS.append({"kind": "structure", "parts": []})
+            if FAKE_MODE["structure_fail"]:
+                out = b'{"error": {"message": "invalid api key (e2e)"}}'
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+                return None
             return self._reply({"groups": [], "parts": {}})
         user = json.loads(body["messages"][-1]["content"])
         parts = next((v for k, v in user.items() if k.startswith("产品零件")), [])
@@ -707,6 +716,40 @@ def ai_configured(browser, be):
         ctx.close()
 
 
+def ai_structure_fail_no_hang(browser, be):
+    """已接入 AI、但通道失效（结构识别 401）时上传 STEP：后端准备作业会一直等到 30 分钟超时（工程其实已就绪，
+    失败原因留在工程消息里）——前端看到「已就绪 + …未完成」就往下走并提示原因，不让用户干等。"""
+    name = "ai_structure_fail_no_hang"
+    stp = be.data / "examples" / EXM.EXAMPLES["gearbox"]["step"]
+    FAKE_MODE["structure_fail"] = True
+    ctx = new_ctx(browser, be)
+    pg, w = page(ctx)
+    pid = None
+    try:
+        pg.goto(f"{be.base}/", wait_until="networkidle")
+        pg.click("#drop")
+        pg.fill("#up-title", "e2e 结构识别失败")
+        t0 = time.time()
+        pg.set_input_files("#up-file", str(stp))
+        pg.wait_for_selector("#up-enter", timeout=120000)
+        t = time.time() - t0
+        toast = toast_text(pg)
+        pg.click("#up-enter")
+        pg.wait_for_url(re.compile(r".*/p/p-\d{8}-[0-9a-f]{6}/.*"), timeout=30000)
+        pid = re.search(r"/p/([^/]+)/", pg.url).group(1)
+        studio_ready(pg)
+        _, summ, _ = be.rest("GET", f"/v1/projects/{pid}")
+        check(f"AI 通道失效时上传不干等：工程就绪 + 结构识别失败 → 前端照常进入候选分图与规划台（{t:.1f}s，后端作业仍在等）",
+              t < 90 and "未完成" in (summ.get("message") or "") and "结构识别" in toast,
+              f"message={summ.get('message')!r} toast={toast[:40]!r}")
+    finally:
+        FAKE_MODE["structure_fail"] = False
+        w.zero(name)
+        ctx.close()
+        if pid:
+            be.rest("DELETE", f"/api/wb/projects/{pid}")
+
+
 def sse_reconnect(browser, be):
     name = "sse_reconnect"
     pid = "example-gearbox"
@@ -966,7 +1009,7 @@ def pdf_unverified(browser, be):
 
 CASES = ["first_run_example", "golden_gearbox", "golden_vise", "golden_valve", "empty_candidates", "vise_blocked_fix",
          "ai_not_configured", "sse_reconnect", "refresh_resume", "etag_409", "cookie_only",
-         "dwg_conservative_note", "ai_configured", "pdf_unverified"]
+         "dwg_conservative_note", "ai_configured", "ai_structure_fail_no_hang", "pdf_unverified"]
 
 
 def main():
@@ -985,7 +1028,7 @@ def main():
                        {"provider": "none"}, {"PFK_PDF_RENDERER": "none"})
     fresh_be = Backend("fresh", 8814, SCRATCH / ("fresh-%d" % int(time.time())), SCRATCH / "fresh-config",
                        {"provider": "none"}, serve_args=["--no-example"])
-    need = {"main": True, "ai": "ai_configured" in only, "nopdf": "pdf_unverified" in only,
+    need = {"main": True, "ai": "ai_configured" in only or "ai_structure_fail_no_hang" in only, "nopdf": "pdf_unverified" in only,
             "fresh": "first_run_example" in only}
     fake = start_fake_llm() if need["ai"] else None
     started = []
@@ -1006,6 +1049,8 @@ def main():
                         golden(browser, main_be, case.split("_", 1)[1])
                     elif case == "ai_configured":
                         ai_configured(browser, ai_be)
+                    elif case == "ai_structure_fail_no_hang":
+                        ai_structure_fail_no_hang(browser, ai_be)
                     elif case == "pdf_unverified":
                         pdf_unverified(browser, nopdf_be)
                     elif case == "first_run_example":

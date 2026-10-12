@@ -43,13 +43,13 @@ applyBrand();
   });
 })();
 
-function toast(msg, kind = '') {
+function toast(msg, kind = '', ms = 3600) {
   const box = $('#toast');
   box.className = `toast ${kind}`;
   box.textContent = msg;
   box.hidden = false;
   clearTimeout(box._t);
-  box._t = setTimeout(() => { box.hidden = true; }, 3600);
+  box._t = setTimeout(() => { box.hidden = true; }, ms);
 }
 
 // ---------------------------------------------------------------- AI 徽标（中性，不报错）
@@ -367,8 +367,23 @@ function runImportJob(jobId, projectId, title, { example = false, uploadSeconds 
     });
   };
   let settledA = false;
-  const doneA = () => { if (settledA) return; settledA = true; try { uploadSub?.close(); } catch { /* */ } startSuggest(); };
-  const failA = (d) => { if (settledA) return; settledA = true; try { uploadSub?.close(); } catch { /* */ } failAt(tl.stages[1]?.state === 'run' ? 1 : 0, d, false); };
+  let watchTimer = null;
+  const doneA = () => { if (settledA) return; settledA = true; clearInterval(watchTimer); try { uploadSub?.close(); } catch { /* */ } startSuggest(); };
+  const failA = (d) => { if (settledA) return; settledA = true; clearInterval(watchTimer); try { uploadSub?.close(); } catch { /* */ } failAt(tl.stages[1]?.state === 'run' ? 1 : 0, d, false); };
+  // 准备作业要等工程「就绪且没有后台消息」才算完成；已接入 AI 时这包括后台结构识别。识别失败时后端把失败原因
+  // 留在工程消息里，作业会一直等到 30 分钟超时——这里同时看工程摘要：已就绪且消息是「…未完成」就照常往下走，
+  // 并把原因告诉用户（结构识别是可选的，不挡金路径）。
+  watchTimer = setInterval(async () => {
+    if (settledA) { clearInterval(watchTimer); return; }
+    let p;
+    try { p = (await api.getSummary(projectId)) || null; } catch { return; }
+    if (!p || settledA) return;
+    if (p.status === 'ready' && p.message) {
+      tl.stages[1] = { ...(tl.stages[1] || {}), state: 'run', detail: p.message };
+      paint();
+      if (/未完成/.test(p.message)) { toast(p.message, '', 6000); doneA(); }
+    }
+  }, 2500);
   uploadSub = api.jobEvents(jobId, {
     stage(d) {
       if (d.stage === 'from-example') setRun(0, d.label || '生成演示模型 STEP');

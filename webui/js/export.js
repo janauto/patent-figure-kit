@@ -211,8 +211,19 @@ function exportView(job) {
     ok: r.ok !== false && !bad.length, rows, fmts, groups, items, docs, bad, notes: r.notes || [], note: r.note || '',
     reasons: r.reasons || {}, spec: r.spec || {} };
 }
-// 后端给的下载地址可能是绝对地址（基于 public-url），也可能是相对的
-const hrefOf = (u) => (/^https?:\/\//i.test(u || '') ? u : api.previewUrl(u || '#'));
+// 后端给的下载地址可能是绝对地址（基于 public-url），也可能是相对的。本机实例的绝对地址固定写 127.0.0.1：
+// 用户若从 localhost 打开页面，会话 Cookie 只属于 localhost，跨到 127.0.0.1 下载会 401——两边都是本机回环且
+// 端口相同时改用同源相对地址。
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+const hrefOf = (u) => {
+  if (!/^https?:\/\//i.test(u || '')) return api.previewUrl(u || '#');
+  try {
+    const t = new URL(u);
+    if (t.origin !== location.origin && LOOPBACK.has(t.hostname) && LOOPBACK.has(location.hostname)
+      && (t.port || '80') === (location.port || '80')) return `${t.pathname}${t.search}`;
+  } catch { /* 原样 */ }
+  return u;
+};
 
 function renderDone() {
   const v = exportView(result);

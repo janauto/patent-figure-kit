@@ -314,6 +314,12 @@ export const api = {
     return { ...d, projects: (d.projects || []).map(normSummary), llm: capsLlm(caps), data_dir: d.data_dir || '' };
   },
 
+  // 工程摘要（只读 GET /v1/projects/{id}；导入进度里看后台消息用）
+  async getSummary(id) {
+    if (MODE !== 'live') return null;
+    return normSummary((await call('GET', `${root}v1/projects/${encodeURIComponent(id)}`)).body);
+  },
+
   // 工程详情（WP3b #3）：摘要 + 子应用状态（已发布 render / 版本 / 本次作业 / 装配体 / 结构）+ 候选作业
   async getProject(id) {
     currentPid = id || currentPid;
