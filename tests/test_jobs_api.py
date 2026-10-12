@@ -256,7 +256,11 @@ def test_export_async_then_download(client):
     dxf_items = {k: v for k, v in manifest.items() if k.endswith("/dxf")}
     pdf_items = {k: v for k, v in manifest.items() if k.endswith("/pdf")}
     assert dxf_items and all(v == "ok" for v in dxf_items.values()), manifest
-    assert pdf_items and all(v == "ok" for v in pdf_items.values()), j["result"]["reasons"]
+    # R2j ruling: a PDF passes only after an independent render; without one it is unverified
+    from patent_figure import deliverable_check as _C
+    want = "ok" if _C.render_checker_available() else "unverified"
+    assert pdf_items and all(v == want for v in pdf_items.values()), j["result"]["reasons"]
+    assert j["result"]["sha256"] and "核验报告.json" not in j["result"]["sha256"]
     docx_items = {k: v for k, v in manifest.items() if k.endswith("/docx")}
     assert {k.split("/")[1] for k in docx_items} == {"交底版", "递交版"}
     assert all(v == "ok" for v in docx_items.values()), j["result"]["reasons"]

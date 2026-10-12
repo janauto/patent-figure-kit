@@ -38,7 +38,11 @@ def export_capabilities() -> Dict[str, Any]:
     from patent_figure import deliverable_check as _C
     route = dwg_route()
     docx_ok = _D.docx_available()
-    pdf_check = _C.pdf_checker_available()
+    # R2j ruling: a PDF can PASS only after an independent render, so "the PDF can be checked"
+    # needs pypdf (structure) AND a renderer (visibility); otherwise PDFs come out ``unverified``
+    pdf_parse = _C.pdf_checker_available()
+    renderer = _C.render_backend()
+    pdf_check = pdf_parse and renderer is not None
     return {
         "formats": ["pdf", "docx", "dxf", "dwg"],
         "primary_formats": ["pdf", "docx"],
@@ -47,8 +51,9 @@ def export_capabilities() -> Dict[str, Any]:
                      "both": "两版"},
         "pdf_available": True,
         "pdf_check_available": pdf_check,
-        "pdf_render_check_available": _C.render_checker_available(),
-        "pdf_renderer": _C.render_backend(),
+        "pdf_render_check_available": renderer is not None,
+        "pdf_renderer": renderer,
+        "pdf_render_required": True,
         "docx_available": docx_ok,
         "dwg_available": route is not None,
         "dwg_route": route,
@@ -57,7 +62,10 @@ def export_capabilities() -> Dict[str, Any]:
                 ("dwg", None if route else "未检测到 DWG 转换器（AutoCAD Core Console 或 LibreDWG）"),
                 ("docx", None if docx_ok else "未安装 python-docx（pip install python-docx）"),
                 ("pdf", None if pdf_check else
-                 "未安装 pypdf：PDF 能生成但无法逐页核验，按规则会报不通过（pip install pypdf）"),
+                 "未安装 pypdf：PDF 能生成但无法逐页核验，导出结果为「未核验」、不报通过"
+                 "（pip install pypdf）" if not pdf_parse else
+                 _C.UNVERIFIED_PDF_REASON + "：PDF 能生成，但导出结果为「未核验」、不报通过"
+                 "（python3 -m pip install pypdfium2）"),
             ) if v},
         "sheet_presets": {k: {"area_mm": list(v["area_mm"]), "label": v["label"]}
                           for k, v in _D.SHEET_PRESETS.items()},
@@ -69,6 +77,8 @@ def export_capabilities() -> Dict[str, Any]:
         "note": _D.CNIPA_NOTE,
         "layout_verification": {"pdf": "file-geometry", "docx": "structural",
                                 "docx_note": _C.WORD_LAYOUT_NOTE},
+        "statuses": ["ok", "skip", "fail", "unverified"],
+        "integrity": {"algorithm": "sha256", "note": "核验只对导出包原文件有效"},
         "files": ["说明书附图_递交版.pdf", "说明书附图_递交版.docx", "说明书附图_交底版.pdf",
                   "说明书附图_交底版.docx", "附图说明.txt", "核对清单.txt", "核验报告.json"],
     }

@@ -89,8 +89,10 @@ components:
         export_id: {type: string}
         manifest:
           type: object
-          additionalProperties: {type: string, enum: [ok, skip, fail]}
-          description: 每种格式的结果（ok/skip/fail）。dwg 在无转换器时为 skip。
+          additionalProperties: {type: string, enum: [ok, skip, fail, unverified]}
+          description: >
+            每种格式的结果（ok/skip/fail/unverified）。dwg 在无转换器时为 skip；PDF 在没有独立渲染器
+            （pypdfium2）时为 unverified——不是 ok、不是通过。
         files: {type: array, items: {type: string}}
         download_url: {type: string}
     RenderJobDiag:
@@ -345,14 +347,30 @@ components:
         render_check:
           type: string
           enum: [pypdfium2, pymupdf, unavailable]
-          description: 仅 PDF：用哪个独立渲染器逐页渲染核验图号可见（推荐 pypdfium2；PyMuPDF 为 AGPL，仅已安装时备选）
+          description: >
+            仅 PDF：用哪个独立渲染器逐页渲染核验可见性（推荐 pypdfium2；PyMuPDF 为 AGPL，仅已安装时备选）。
+            R2j 裁决起是 PDF 通过的必要条件：unavailable 时 status=unverified、ok=false
+        status:
+          type: string
+          enum: [ok, fail, unverified]
+          description: >
+            ok = 全部核验通过（PDF 含独立渲染）；fail = 有核验不通过，或文件与导出时记录的 sha256 不符；
+            unverified = 没有不通过项，但缺独立渲染器（或缺 pypdf）无法确认可见性——不是通过
+        sha256: {type: string, nullable: true, description: 被核验文件的 sha256（写出时即记录；读不了为 null）}
+        sha256_verified:
+          type: boolean
+          nullable: true
+          description: true = 与导出记录的 sha256 一致；false = 不一致（文件已被修改，未做其余核验）；null = 未给出预期值
     ExportItem:
       description: 导出屏的逐「版本 × 格式」汇总行。
       type: object
       properties:
         variant: {type: string, enum: [递交版, 交底版, 原始]}
         format: {type: string, enum: [pdf, docx, dxf, dwg, png, svg]}
-        status: {type: string, enum: [ok, skip, fail]}
+        status:
+          type: string
+          enum: [ok, skip, fail, unverified]
+          description: 组内有 fail → fail；否则有 unverified → unverified；全 ok → ok；否则 skip
         reason: {type: string}
         figures: {type: integer}
         file: {type: string, nullable: true}
@@ -364,11 +382,11 @@ components:
         export_id: {type: string}
         render_job_id: {type: string}
         render_plan_etag: {type: string}
-        ok: {type: boolean, description: 没有任何请求项 fail}
+        ok: {type: boolean, description: 没有任何请求项 fail 或 unverified}
         manifest:
           type: object
-          additionalProperties: {type: string, enum: [ok, skip, fail]}
-          description: 键 "图号/版本/格式"（版本为 交底版/递交版）
+          additionalProperties: {type: string, enum: [ok, skip, fail, unverified]}
+          description: 键 "图号/版本/格式"（版本为 交底版/递交版）；unverified = PDF 缺独立渲染器无法核验可见性
         reasons:
           type: object
           additionalProperties: {type: string}
@@ -379,6 +397,13 @@ components:
           additionalProperties: {$ref: '#/components/schemas/DocumentCheck'}
         missing_files: {type: array, items: {type: string}}
         files: {type: array, items: {type: string}}
+        sha256:
+          type: object
+          additionalProperties: {type: string}
+          description: >
+            哈希封印（R2j 裁决）：包内相对路径 → 写出时的 sha256（《核验报告.json》自身除外）。这是权威记录；
+            复核导出包里的文件时先比对，不一致即判「文件已被修改，请使用导出包原文件」且不做其余核验。
+            核验只对导出包原文件有效
         spec: {type: object, description: 本次版式（页幅、页边、图区预设、dpi、字高阈值）}
         note: {type: string, example: 精确图片参数以当期《电子申请文件格式要求说明》为准}
         notes: {type: array, items: {type: string}}
@@ -396,9 +421,18 @@ components:
             source_formats: {type: array, items: {type: string}, example: [dxf, dwg]}
             variants: {type: object}
             pdf_available: {type: boolean}
-            pdf_check_available: {type: boolean, description: false = 缺 pypdf，PDF 会被如实报 fail}
-            pdf_render_check_available: {type: boolean, description: 是否有可选的独立渲染器（第二道核验）}
+            pdf_check_available:
+              type: boolean
+              description: >
+                true = 有 pypdf 且有独立渲染器（pypdfium2 / PyMuPDF），PDF 可判通过；false = 缺其一，导出的
+                PDF 一律为 unverified（不是通过），原因见 unavailable_reasons.pdf
+            pdf_render_check_available: {type: boolean, description: 是否有独立渲染器（R2j 裁决起是 PDF 通过的必要条件）}
             pdf_renderer: {type: string, nullable: true, enum: [pypdfium2, pymupdf, null]}
+            pdf_render_required: {type: boolean, description: 恒为 true：PDF 通过须经独立渲染}
+            statuses: {type: array, items: {type: string}, example: [ok, skip, fail, unverified]}
+            integrity:
+              type: object
+              description: 哈希封印说明（algorithm=sha256；核验只对导出包原文件有效）
             docx_available: {type: boolean}
             dwg_available: {type: boolean, description: false 时前端事前禁选 DWG；后端对 DWG 一律 skip 并给原因}
             dwg_route: {type: string, nullable: true, enum: [autocad, libredwg, null]}

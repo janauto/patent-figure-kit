@@ -24,13 +24,16 @@ pytest==8.4.2
 # 而把它们写成硬依赖会让只想跑 CLI 的人被迫安装一个 Web 框架。
 # 安装： python3 -m pip install fastapi uvicorn httpx openpyxl python-docx
 # 注意：acceptance/run_acceptance.py 的 N12、N14 会用到它们，跑验收前请先装。
+# 导出包（F1）：python3 -m pip install pypdf pypdfium2——导出 PDF 要判「通过」两者都必需
+#   （N17 验收需要它们）；不装时 PDF 照样生成，但判「未核验」、导出结果 ok=false。
 #
 #   fastapi / uvicorn  本地服务器（只绑 127.0.0.1）
 #   httpx              AI 起草零件名时调用大模型接口
 #   openpyxl           «导入 BOM» 读 .xlsx；只用 .csv 的话可以不装
 #   python-docx        旧界面辅助；导出包的「说明书附图」Word 自 WP2 起由内置固定模板写出，不再需要它
-#   pypdf              导出包 PDF 的逐页核验（F1）；缺它 PDF 能生成但会被如实报「无法核验 → 不通过」
+#   pypdf              导出包 PDF 的逐页结构核验（F1）；缺它 PDF 能生成但会被如实报「未核验」（不是通过）
 #                      安装：python3 -m pip install pypdf   （doctor 的 deliverable-pdf-check 会提示）
-#   pypdfium2          导出包 PDF 的第二道独立渲染核验（推荐，BSD-3-Clause / Apache-2.0）；不装也能核验
+#   pypdfium2          【导出 PDF 必需】独立渲染核验可见性（BSD-3-Clause / Apache-2.0）——R2j 裁决起是 PDF
+#                      「通过」的必要条件；缺它导出的 PDF 一律判「未核验」、导出结果 ok=false。出图链路不依赖它
 #                      安装：python3 -m pip install pypdfium2（doctor 的 deliverable-pdf-render 会提示）
 #                      注：PyMuPDF 为 AGPL 许可，不推荐；已装时仅作备选渲染器

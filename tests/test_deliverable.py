@@ -65,6 +65,23 @@ def _check(path, rows, sp):
     return C.check_document(path, C.sources_from(rows, sp["area_mm"]), sp)
 
 
+def _passes(rep):
+    """A GOOD document. With an independent renderer it is ``ok``. Without one (R2j ruling) a PDF
+    is ``unverified``: every structural and page check passed, only the visibility is unconfirmed
+    — and that is NOT ok (the one error is the missing-renderer reason)."""
+    if rep["format"] == "pdf" and rep.get("render_check") == "unavailable":
+        return (rep["status"] == C.STATUS_UNVERIFIED and rep["ok"] is False
+                and len(rep["errors"]) == 1
+                and rep["errors"][0].startswith(C.UNVERIFIED_PDF_REASON)
+                and all(p["ok"] for p in rep["page_checks"]))
+    return rep["ok"] is True and rep["status"] == C.STATUS_OK
+
+
+def _refused(rep):
+    """A BAD document: ``fail`` — never merely ``unverified``, with or without a renderer."""
+    return rep["ok"] is False and rep["status"] == C.STATUS_FAIL
+
+
 # --------------------------------------------------------------------------- happy path
 
 
@@ -79,7 +96,7 @@ def test_good_document_passes_every_page_check(two, fmt):
     out = tmp / ("doc." + fmt)
     _build(rows, sp, out, fmt)
     rep = _check(out, rows, sp)
-    assert rep["ok"], (rep["errors"], [p["errors"] for p in rep["page_checks"]])
+    assert _passes(rep), (rep["errors"], [p["errors"] for p in rep["page_checks"]])
     assert rep["pages"] == rep["expected_pages"] == 2
     p1, p2 = rep["page_checks"]
     assert p1["caption"] == "图1" and p2["caption"] == "图2"
@@ -152,7 +169,7 @@ def test_conservative_preset_shrinks_tall_sheets_and_the_check_says_so(tmp_path,
     assert any("缩放后最小字高" in e for e in pc["errors"])
     sp2 = D.spec("standard", 300)                       # the same sheet fits 1:1 in 170×257
     _build(rows, sp2, tmp_path / "s.pdf", "pdf")
-    assert _check(tmp_path / "s.pdf", rows, sp2)["ok"]
+    assert _passes(_check(tmp_path / "s.pdf", rows, sp2))
 
 
 def test_page_count_must_equal_figure_count(two, renderer):
@@ -234,6 +251,7 @@ def test_missing_pypdf_is_reported_as_unverifiable_never_ok(two, monkeypatch):
     monkeypatch.setattr(C, "pdf_checker_available", lambda: False)
     rep = _check(tmp / "x.pdf", rows, sp)
     assert rep["ok"] is False and "pypdf" in rep["errors"][0]
+    assert rep["status"] == C.STATUS_UNVERIFIED
 
 
 def _rewrite_docx(src: Path, dst: Path, fn, part: str = "word/document.xml"):
@@ -516,9 +534,11 @@ def _publish(store, rid, tmp):
     return vd
 
 
-def test_export_service_builds_checks_and_quarantines(tmp_path):
+def test_export_service_builds_checks_and_quarantines(tmp_path, monkeypatch):
     pytest.importorskip("docx")
     pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")                 # a PDF passes only after a render (R2j)
+    monkeypatch.setenv("PFK_PDF_RENDERER", "pypdfium2")
     store = V.VersionStore(tmp_path / "ws")
     _publish(store, "r1", tmp_path)
     with EX.acquire(store.root) as pin:
@@ -700,12 +720,12 @@ def test_pdf_image_transparency_masks_and_overpaint_are_refused(two, renderer, m
     sp = D.spec("standard", 300)
     good = tmp / "good.pdf"
     _build(rows, sp, good, "pdf")
-    assert _check(good, rows, sp)["ok"]
+    assert _passes(_check(good, rows, sp))
     bad = tmp / "bad.pdf"
     _pdf_mutate(good, bad, mutate)
     assert bad.read_bytes() != good.read_bytes()
     rep = _check(bad, rows, sp)
-    assert not rep["ok"], rep
+    assert _refused(rep), rep
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert expect in msgs, msgs
 
@@ -836,11 +856,11 @@ def test_pdf_tree_references_and_operand_types_fail_without_a_renderer(two, rend
     good = tmp / "good.pdf"
     _build(rows, sp, good, "pdf")
     ok = _check(good, rows, sp)
-    assert ok["ok"] and ok["render_check"] == ("unavailable" if renderer == "none" else renderer)
+    assert _passes(ok) and ok["render_check"] == ("unavailable" if renderer == "none" else renderer)
     bad = tmp / "bad.pdf"
     _pdf_mutate(good, bad, mutate)
     rep = _check(bad, rows, sp)
-    assert not rep["ok"]
+    assert _refused(rep)
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert expect in msgs, msgs
     if renderer != "none" and mutate is not _pdf_offtree_parent:
@@ -869,11 +889,11 @@ def test_pdf_is_a_closed_set(two, renderer, mutate, expect, invisible):
     good = tmp / "good.pdf"
     _build(rows, sp, good, "pdf")
     ok = _check(good, rows, sp)
-    assert ok["ok"], (ok["errors"], [p["errors"] for p in ok["page_checks"]])
+    assert _passes(ok), (ok["errors"], [p["errors"] for p in ok["page_checks"]])
     bad = tmp / "bad.pdf"
     _pdf_mutate(good, bad, mutate)
     rep = _check(bad, rows, sp)
-    assert not rep["ok"]
+    assert _refused(rep)
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert expect in msgs, msgs
     if renderer == "none":
@@ -955,12 +975,12 @@ def test_pdf_object_values_are_checked_by_pdf_type(two, renderer, mutate, expect
     good = tmp / "good.pdf"
     _build(rows, sp, good, "pdf")
     ok = _check(good, rows, sp)
-    assert ok["ok"], (ok["errors"], [p["errors"] for p in ok["page_checks"]])
+    assert _passes(ok), (ok["errors"], [p["errors"] for p in ok["page_checks"]])
     bad = tmp / "bad.pdf"
     _pdf_mutate(good, bad, mutate)
     assert bad.read_bytes() != good.read_bytes()
     rep = _check(bad, rows, sp)
-    assert not rep["ok"]
+    assert _refused(rep)
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert expect in msgs, msgs
     if renderer == "none":
@@ -991,7 +1011,7 @@ def test_pdf_stream_length_must_be_a_pdf_integer(two, renderer, kind):
     bad = tmp / "bad.pdf"
     bad.write_bytes(data[:m.start(1)] + new + data[m.end(1):])
     rep = _check(bad, rows, sp)
-    assert not rep["ok"]
+    assert _refused(rep)
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert "无法按写出端的固定结构解释" in msgs, msgs
 
@@ -1040,7 +1060,7 @@ def test_pdf_duplicate_dictionary_keys_fail_without_a_renderer(two, renderer, ca
     sp = D.spec("standard", 300)
     good = tmp / "good.pdf"
     _build(rows, sp, good, "pdf")
-    assert _check(good, rows, sp)["ok"]
+    assert _passes(_check(good, rows, sp))
     gs, img, width = _pdf_targets(good)
     obj, old, new = {"ca": (gs, b"/ca 1", b"/ca 1 /ca 0"),
                      "filter": (img, b"/Filter /FlateDecode",
@@ -1049,7 +1069,7 @@ def test_pdf_duplicate_dictionary_keys_fail_without_a_renderer(two, renderer, ca
     bad = tmp / "bad.pdf"
     bad.write_bytes(_pdf_patch_bytes(good.read_bytes(), obj, old, new))
     rep = _check(bad, rows, sp)
-    assert not rep["ok"]
+    assert _refused(rep)
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert "重复的键" in msgs, msgs
     if renderer == "none":
@@ -1071,7 +1091,7 @@ def test_pdf_byte_patch_keeps_the_file_legal(two, renderer, old, new):
     edited.write_bytes(_pdf_patch_bytes(good.read_bytes(), gs if b"ca" in old else img, old, new))
     assert edited.read_bytes() != good.read_bytes()
     rep = _check(edited, rows, sp)
-    assert rep["ok"], (rep["errors"], [p["errors"] for p in rep["page_checks"]])
+    assert _passes(rep), (rep["errors"], [p["errors"] for p in rep["page_checks"]])
 
 
 def test_writer_pdf_parses_strictly_object_by_object(two):
@@ -1101,3 +1121,137 @@ def test_writer_pdf_parses_strictly_object_by_object(two):
     finally:
         logging.getLogger("pypdf").removeHandler(h)
     assert records == [], records
+
+
+# --------------------------------------------------------------------------- R2j ruling
+
+
+def _pdf_duplicate_xref(data: bytes, obj: int, body: bytes) -> bytes:
+    """R2j: append a second ``obj 0 obj`` with ``body`` before the xref table and register it in
+    an EXTRA xref subsection for the same object number (startxref corrected). pypdf keeps the
+    first registration, PDFium the later one — a parser differential no structural check sees."""
+    import re as _re
+    sx = _re.search(rb"startxref\s+(\d+)\s+%%EOF\s*$", data)
+    xref_at = int(sx.group(1))
+    assert data[xref_at:xref_at + 5] == b"xref\n"
+    trailer_at = data.index(b"trailer", xref_at)
+    head = data[:xref_at] + b"%d 0 obj\n%s\nendobj\n" % (obj, body)
+    xref = data[xref_at:trailer_at] + b"%d 1\n%010d 00000 n \n" % (obj, xref_at)
+    return head + xref + data[trailer_at:sx.start(1)] + b"%d" % len(head) + data[sx.end(1):]
+
+
+@pytest.mark.parametrize("ca, harmful", [(b"0", True), (b"1", False)])
+def test_duplicate_xref_entry_is_never_a_pass_without_a_render(two, renderer, ca, harmful):
+    """R2j: the graphics state registered twice in the xref, the later copy with ``/ca 0``.
+    No structural check sees it (pypdf keeps the first entry) — and under the ruling it does not
+    have to: with NO renderer the PDF is ``unverified`` (never ok); with pypdfium2 the render
+    shows the blank page and it FAILS. The harmless control (later copy ``/ca 1``) is the same
+    injection: unverified without a renderer, ok with one — so the file is otherwise legal."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    gs, _img, _w = _pdf_targets(good)
+    bad = tmp / "dupx.pdf"
+    bad.write_bytes(_pdf_duplicate_xref(good.read_bytes(), gs,
+                                        b"<< /A1 << /Type /ExtGState /CA 1 /ca %s >> >>" % ca))
+    rep = _check(bad, rows, sp)
+    if renderer == "none":
+        assert rep["ok"] is False and rep["status"] == C.STATUS_UNVERIFIED
+        assert rep["render_check"] == "unavailable"
+        assert C.UNVERIFIED_PDF_REASON in rep["errors"][-1]
+    elif harmful:
+        assert _refused(rep)
+        assert all(p["render_caption_ink"] < C.INK_FRACTION_MIN for p in rep["page_checks"])
+    else:
+        assert _passes(rep), rep["errors"]
+
+
+def _flip_byte(path: Path, at: int) -> None:
+    data = bytearray(path.read_bytes())
+    data[at] ^= 0x01
+    path.write_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("fmt", ["pdf", "docx"])
+def test_hash_seal_refuses_a_modified_export_file_before_any_other_check(two, renderer, fmt):
+    """R2j ruling — hash seal: a file from an export is checked against the sha256 recorded when
+    it was written. ONE flipped byte (in the PDF's binary header comment, or a byte of the Word
+    zip) → ``fail`` 「文件已被修改，请使用导出包原文件」 and no page / structure check runs. The PDF
+    byte keeps the file valid: without the seal it is still checked as a good file — the seal,
+    not the parser, refuses it. The untouched original with its digest is checked in full."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / ("good." + fmt)
+    _build(rows, sp, good, fmt)
+    digest = C.sha256_of(good)
+    srcs = C.sources_from(rows, sp["area_mm"])
+    sealed = C.check_document(good, srcs, sp, expected_sha256=digest)
+    assert _passes(sealed) and sealed["sha256_verified"] is True and sealed["sha256"] == digest
+    bad = tmp / ("bad." + fmt)
+    bad.write_bytes(good.read_bytes())
+    _flip_byte(bad, 10 if fmt == "pdf" else len(bad.read_bytes()) // 2)
+    rep = C.check_document(bad, srcs, sp, expected_sha256=digest)
+    assert _refused(rep) and rep["sha256_verified"] is False
+    assert rep["errors"][0].startswith(C.TAMPERED_REASON) and rep["page_checks"] == []
+    if fmt == "pdf":                       # the same bytes without the seal: a "good" PDF
+        assert _passes(_check(bad, rows, sp))
+
+
+def _bundle(tmp_path, name):
+    store = V.VersionStore(tmp_path / "ws")
+    _publish(store, "r1", tmp_path)
+    with EX.acquire(store.root) as pin:
+        return EX.build_bundle(pin, tmp_path / name, variants=("filing",),
+                               formats=("pdf", "docx", "dxf"), dpi=300, description_txt=True,
+                               checklist_txt=True)
+
+
+def test_without_a_renderer_exported_pdfs_are_unverified_not_ok(tmp_path, monkeypatch):
+    """R2j ruling, the N17 sample shape (an exported 递交版 PDF + Word + DXF) with NO renderer:
+    every PDF item is ``unverified`` with 「缺少 pypdfium2，无法核验 PDF 可见性」, the PDF is held
+    in _未通过核验/, the export is ``ok=false``; Word and DXF are unaffected; the checklist says
+    「未核验」. The hash seal covers every file but the report and matches the files."""
+    pytest.importorskip("pypdf")
+    monkeypatch.setenv("PFK_PDF_RENDERER", "none")
+    out = _bundle(tmp_path, "none")
+    assert out["ok"] is False
+    pdf = {k: v for k, v in out["manifest"].items() if k.endswith("/pdf")}
+    assert pdf and set(pdf.values()) == {"unverified"}
+    assert all(C.UNVERIFIED_PDF_REASON in out["reasons"][k] for k in pdf)
+    assert all(v == "ok" for k, v in out["manifest"].items() if not k.endswith("/pdf"))
+    item = next(i for i in out["items"] if i["format"] == "pdf")
+    assert item["status"] == "unverified" and item["file"] == "_未通过核验/说明书附图_递交版.pdf"
+    doc = out["documents"]["说明书附图_递交版.pdf"]
+    assert doc["status"] == "unverified" and doc["render_check"] == "unavailable"
+    assert all(p["ok"] for p in doc["page_checks"])                  # nothing FAILED
+    checklist = (tmp_path / "none" / "核对清单.txt").read_text(encoding="utf-8")
+    assert "[未核验]" in checklist and "核验只对导出包原文件有效" in checklist
+    files = [f for f in out["files"] if f != EX.REPORT_NAME]
+    assert sorted(out["sha256"]) == files
+    assert all(C.sha256_of(tmp_path / "none" / f) == h for f, h in out["sha256"].items())
+    report = json.loads((tmp_path / "none" / EX.REPORT_NAME).read_text(encoding="utf-8"))
+    assert report["sha256"] == out["sha256"]
+
+
+def test_an_exported_file_is_rechecked_against_the_seal(tmp_path, monkeypatch):
+    """R2j ruling end to end: with pypdfium2 the export passes and seals every file; re-checking
+    the bundled PDF with the recorded digest passes, and after one changed byte it fails with
+    「文件已被修改，请使用导出包原文件」 before any other check."""
+    pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    monkeypatch.setenv("PFK_PDF_RENDERER", "pypdfium2")
+    out = _bundle(tmp_path, "ok")
+    assert out["ok"] is True, out["reasons"]
+    pdf = tmp_path / "ok" / "说明书附图_递交版.pdf"
+    assert out["documents"][pdf.name]["sha256"] == out["sha256"][pdf.name] == C.sha256_of(pdf)
+    rows = [{"figure": "fig%d" % k, "number": k,
+             "dxf": tmp_path / "ok" / "递交版_仅图号" / ("fig%d_filing.dxf" % k)} for k in (1, 2)]
+    sp = out["spec"]
+    srcs = C.sources_from(rows, sp["area_mm"])
+    assert C.check_document(pdf, srcs, sp, expected_sha256=out["sha256"][pdf.name])["ok"]
+    _flip_byte(pdf, 10)
+    rep = C.check_document(pdf, srcs, sp, expected_sha256=out["sha256"][pdf.name])
+    assert _refused(rep) and rep["errors"][0].startswith(C.TAMPERED_REASON)

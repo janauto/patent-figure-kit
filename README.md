@@ -79,6 +79,7 @@
 | `requirements-pinned.txt` 中的包 | ✅ | STEP 解析、DXF 读写等，版本已锁定 | `python3 scripts/doctor.py` |
 | `fastapi` `uvicorn` `httpx` `openpyxl` `python-docx` | 可选 | 浏览器界面与 Word 导出需要，出图链路不依赖。**跑验收前请先装** | `python3 scripts/doctor.py` |
 | AutoCAD 或 LibreDWG | 可选 | 转 DWG；都没有时仍可输出 DXF | `python3 scripts/doctor.py` |
+| `pypdf` `pypdfium2` | 导出 PDF 必需 | 导出包 PDF 的逐页核验与独立渲染核验；不装时 PDF 照样生成，但判「未核验」（不是通过）。核验只对导出包原文件有效：每个文件写出时记 sha256，改动一个字节即判「文件已被修改」 | `python3 scripts/doctor.py` |
 
 已在 macOS（Python 3.9.6）上验证。Linux 与 Windows 尚未验证，欢迎反馈。
 

@@ -406,8 +406,8 @@ def check_dwgread() -> dict:
 
 def check_deliverable() -> dict:
     """F1 附图导出包（WP2）：PDF 由 matplotlib（必需项）生成，**逐页核验 PDF 需要可选包 pypdf**——
-    没有它，导出包里的 PDF 会被如实报「无法核验 → 不通过」，而不是假装通过。Word 由 python-docx
-    生成（见 plan-studio-deps）。都不在出图链路上。"""
+    没有它，导出包里的 PDF 会被如实报「未核验」（不是通过）。Word 由 python-docx 生成（见
+    plan-studio-deps）。都不在出图链路上。"""
     try:
         import pypdf  # noqa: F401
         version = _dist_version("pypdf") or "?"
@@ -416,31 +416,33 @@ def check_deliverable() -> dict:
                       required=False)
     except Exception as exc:  # noqa: BLE001
         return _check("deliverable-pdf-check", STATUS_MISSING,
-                      "缺 pypdf（%s）—— 导出包里的 PDF 能生成，但无法逐页核验，会被报不通过"
+                      "缺 pypdf（%s）—— 导出包里的 PDF 能生成，但无法逐页核验，导出结果为「未核验」"
                       % _import_error(exc),
                       _pip_fix("pypdf"), required=False)
 
 
 def check_deliverable_render() -> dict:
-    """可选的第二道核验（WP2 R2f/R2g）：导出包 PDF 每页用独立渲染器渲染，在图号位置统计看得见的墨迹。
-    推荐 pypdfium2（BSD-3-Clause / Apache-2.0）；PyMuPDF 是 AGPL 许可，**不推荐**，只在已经装了时作为备选。
-    两者都没有时报告标 render_check="unavailable"——核心核验（固定结构 + 像素）不依赖任何渲染器。"""
+    """**导出 PDF 必需**（WP2 R2j 裁决）：导出包 PDF 每页用独立渲染器渲染，在图号位置与图片区域统计
+    看得见的墨迹——这是 PDF「通过」的必要条件。推荐 pypdfium2（BSD-3-Clause / Apache-2.0）；PyMuPDF
+    是 AGPL 许可，**不推荐**，只在已经装了时作为备选。两者都没有时 PDF 一律判「未核验」（不是通过），
+    导出结果 ok=false。它只决定导出 PDF 的判定，不在出图链路上，所以仍按可选项计（不影响退出码）。"""
     try:
         import pypdfium2  # noqa: F401
         return _check("deliverable-pdf-render", STATUS_OK,
-                      "pypdfium2 %s（BSD/Apache）—— 导出包 PDF 逐页独立渲染核验图号可见"
+                      "pypdfium2 %s（BSD/Apache）—— 导出 PDF 必需：逐页独立渲染核验可见性"
                       % (_dist_version("pypdfium2") or "?"), required=False)
     except Exception as exc:  # noqa: BLE001
         reason = _import_error(exc)
     try:
         import fitz  # noqa: F401
         return _check("deliverable-pdf-render", STATUS_OK,
-                      "未装推荐的 pypdfium2；已装的 PyMuPDF（AGPL 许可，不推荐）将作为备选渲染器",
+                      "导出 PDF 必需：未装推荐的 pypdfium2；已装的 PyMuPDF（AGPL 许可，不推荐）将作为备选渲染器",
                       "python3 -m pip install pypdfium2", required=False)
     except Exception:  # noqa: BLE001
         pass
     return _check("deliverable-pdf-render", STATUS_MISSING,
-                  "缺 pypdfium2（%s）—— PDF 仍按固定结构逐页核验，只是少了独立渲染这一道" % reason,
+                  "导出 PDF 必需：缺 pypdfium2（%s）—— 没有独立渲染，导出的 PDF 一律判「未核验」"
+                  "（不是通过），导出结果 ok=false" % reason,
                   "python3 -m pip install pypdfium2（BSD/Apache 许可）", required=False)
 
 

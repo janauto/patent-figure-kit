@@ -1434,6 +1434,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                         "reasons": bundle["reasons"], "items": bundle["items"],
                         "documents": bundle["documents"],
                         "missing_files": bundle["missing_files"], "files": bundle["files"],
+                        "sha256": bundle["sha256"],
                         "spec": bundle["spec"], "note": DELIV.CNIPA_NOTE,
                         "notes": bundle["notes"], "dwg_log": bundle["dwg_log"],
                         "download_url": base + "/v1/exports/%s/download" % j.id}

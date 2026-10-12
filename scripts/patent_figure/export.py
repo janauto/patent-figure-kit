@@ -188,7 +188,7 @@ def _build_document(variant: str, fmt: str, rows: List[Dict[str, Any]], sp: Dict
     layout = {"layout_verified": "structural" if fmt == "docx" else "file-geometry"}
 
     def failed(errors: List[str]) -> Dict[str, Any]:
-        return dict({"file": name, "format": fmt, "ok": False, "pages": 0,
+        return dict({"file": name, "format": fmt, "ok": False, "status": "fail", "pages": 0,
                      "expected_pages": len(rows), "page_checks": [], "errors": errors}, **layout)
 
     missing = [r for r in rows if not _nonempty(Path(r["dxf"]))]
@@ -208,11 +208,19 @@ def _build_document(variant: str, fmt: str, rows: List[Dict[str, Any]], sp: Dict
         except Exception as exc:
             report = failed(["生成失败：%s" % exc])
         if report is None:
+            # R2j ruling — HASH SEAL: the digest is taken the moment the file is written and the
+            # check runs against it, so the file checked is the file written (and the digest
+            # recorded in the export result is the one every later re-check must match)
+            sha = _C.sha256_of(out)
             try:
-                report = _C.check_document(out, _C.sources_from(rows, sp["area_mm"]), sp)
+                report = _C.check_document(out, _C.sources_from(rows, sp["area_mm"]), sp,
+                                           expected_sha256=sha)
             except Exception as exc:                # an unverifiable document is a failed one
                 report = failed(["核验程序异常，无法确认这份文件合格：%s: %s"
                                  % (type(exc).__name__, exc)])
+            report["sha256"] = sha
+    # only a PASSING document stays at the root: ``fail`` and ``unverified`` (no renderer — R2j
+    # ruling) both go to _未通过核验/, with the reason
     report["path"] = name if report.get("ok") else None
     if not report.get("ok") and out.exists():
         (dest / FAILED_DIR).mkdir(parents=True, exist_ok=True)
@@ -249,13 +257,15 @@ def checklist_text(result: Dict[str, Any], bundle: Dict[str, Any], sp: Optional[
     if any(r.get("layout_verified") == "structural" for r in docs.values()):
         lines.append("  注：Word 按文档结构核验，实际排版以 Word 打开为准（PDF 按文件里的页面几何核验）。")
     for name, rep in sorted(docs.items()):
+        unverified = rep.get("status") == "unverified"
         lines.append("  %s %s：%d/%d 页%s" % (
-            "[通过]" if rep.get("ok") else "[不通过]", name, max(rep.get("pages", 0), 0),
-            rep.get("expected_pages", 0),
-            "" if rep.get("ok") else "——已移到 %s/，不要递交。原因：%s" % (
-                FAILED_DIR, "；".join((rep.get("errors") or [])[:2]
-                                     + [e for p in rep.get("page_checks", [])
-                                        for e in p.get("errors", [])][:2]))))
+            "[通过]" if rep.get("ok") else ("[未核验]" if unverified else "[不通过]"), name,
+            max(rep.get("pages", 0), 0), rep.get("expected_pages", 0),
+            "" if rep.get("ok") else "——已移到 %s/，%s。原因：%s" % (
+                FAILED_DIR, "未经可见性核验，不要递交" if unverified else "不要递交",
+                "；".join((rep.get("errors") or [])[:2]
+                         + [e for p in rep.get("page_checks", [])
+                            for e in p.get("errors", [])][:2]))))
     skipped = ["%s：%s" % (k, v) for k, v in sorted((bundle.get("reasons") or {}).items())
                if (bundle.get("manifest") or {}).get(k) == "skip"]
     if skipped:
@@ -267,6 +277,8 @@ def checklist_text(result: Dict[str, Any], bundle: Dict[str, Any], sp: Optional[
               "  [ ] 递交用的是「递交版」（仅图号）；「交底版」带件号表，只用于内部交底",
               "  [ ] DXF/DWG 是源文件，供再编辑；递交请用 PDF 或 Word", "",
               "三、提示", "  %s。" % (sp or {}).get("note", "精确图片参数以当期《电子申请文件格式要求说明》为准"),
+              "  核验只对导出包原文件有效：每个文件的 sha256 记在《核验报告.json》与导出记录里，"
+              "文件被改动（哪怕一个字节）即判「文件已被修改」，须用导出包原文件递交。",
               "  本工具按 CNIPA 形式要求排版，最终以受理为准，不构成法律意见。", ""]
     return "\n".join(lines)
 
@@ -289,12 +301,17 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
     F1 (WP2): ``pdf`` / ``docx`` are the PRIMARY deliverables — one document per numbered variant
     (``说明书附图_递交版.pdf`` …), A4 pages at ``dpi`` under ``sheet_preset``, each checked page by
     page from the written file (``deliverable_check``); a failing document goes to
-    ``_未通过核验/`` and its items are ``fail`` with the reason. DWG is ``skip`` (with reason) when
-    no converter is available (``dwg_available``; probed when None).
+    ``_未通过核验/`` and its items are ``fail`` with the reason. A PDF passes only after an
+    independent render (R2j ruling); with no renderer it is ``unverified`` — also moved to
+    ``_未通过核验/``, never ok. DWG is ``skip`` (with reason) when no converter is available
+    (``dwg_available``; probed when None).
 
     Returns ``{manifest, reasons, items, documents, files, notes, dwg_log, figure_descriptions,
-    spec, ok}`` where ``manifest`` maps ``<fig>/<版本>/<fmt>`` → ``ok`` / ``skip`` / ``fail``
-    (``reasons`` explains every skip/fail) and ``ok`` is True iff no requested item failed."""
+    spec, sha256, ok}`` where ``manifest`` maps ``<fig>/<版本>/<fmt>`` → ``ok`` / ``skip`` /
+    ``fail`` / ``unverified`` (``reasons`` explains every non-ok item), ``sha256`` maps every
+    bundle file except 《核验报告.json》 to its digest as written (the HASH SEAL: a later re-check
+    of a bundle file compares against it first) and ``ok`` is True iff no requested item failed
+    or is unverified."""
     vdir, result = pin.vdir, pin.result
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -404,7 +421,9 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
                 page = next((p for p in rep.get("page_checks", [])
                              if p.get("figure") == str(f["id"])), None)
                 good = rep["ok"] and page is not None and page.get("ok")
-                put(k, "ok" if good else "fail", "" if good else _doc_reason(rep, str(f["id"])))
+                status = "ok" if good else (
+                    "unverified" if rep.get("status") == "unverified" else "fail")
+                put(k, status, "" if good else _doc_reason(rep, str(f["id"])))
     pages_cache.clear()
 
     flows = [(fid, Path(odir), res or {}) for fid, odir, res in flows]
@@ -464,9 +483,19 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
         if v == "ok" and f in missing_files:
             put(k, "fail", "包内缺文件或为空：%s" % f)
 
+    # ---- HASH SEAL (R2j ruling): sha256 of every delivered file, as written ---------------
+    # (the report cannot hold its own digest; every other file of the bundle is in the map)
+    sha256 = seal_files(dest)
+    for name, rep in documents.items():
+        at = rep.get("path") or ("%s/%s" % (FAILED_DIR, name))
+        if rep.get("sha256") and sha256.get(at) != rep["sha256"]:
+            for k in [k for k in manifest if k.endswith("/" + rep["format"])
+                      and DOC_BASENAME % (k.split("/")[1], rep["format"]) == name]:
+                put(k, "fail", "%s 在打包过程中被改动（sha256 与写出时不符）" % name)
     report = {"schema": "patent-figure-export-check/1", "render_job_id": pin.rid,
               "spec": sp, "documents": documents, "missing_files": missing_files,
-              "manifest": manifest, "reasons": reasons}
+              "manifest": manifest, "reasons": reasons, "sha256": sha256,
+              "sha256_note": SHA256_NOTE}
     (dest / REPORT_NAME).write_text(json.dumps(report, ensure_ascii=False, indent=2,
                                                default=str), encoding="utf-8")
     files = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
@@ -474,8 +503,24 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
             "items": items_of(manifest, reasons, documents),
             "documents": documents, "missing_files": missing_files, "files": files,
             "notes": notes, "dwg_log": dwg_log, "figure_descriptions": desc,
-            "render_job_id": pin.rid, "spec": sp,
-            "ok": not any(v == "fail" for v in manifest.values())}
+            "render_job_id": pin.rid, "spec": sp, "sha256": sha256,
+            "ok": not any(v in ("fail", "unverified") for v in manifest.values())}
+
+
+SHA256_NOTE = ("核验只对导出包原文件有效：sha256 在写出每个文件时记录（本报告自身除外）；"
+               "复核时先比对，不一致即判「文件已被修改，请使用导出包原文件」，不再做其余核验。"
+               "权威记录是服务端导出结果（result.sha256），包内本报告仅供对照。")
+
+
+def seal_files(dest: Path) -> Dict[str, str]:
+    """``{bundle-relative path: sha256}`` of every file under ``dest`` except 《核验报告.json》."""
+    from patent_figure import deliverable_check as _C
+    out: Dict[str, str] = {}
+    for p in sorted(Path(dest).rglob("*")):
+        rel = p.relative_to(dest).as_posix()
+        if p.is_file() and rel != REPORT_NAME:
+            out[rel] = _C.sha256_of(p) or ""
+    return out
 
 
 def items_of(manifest: Dict[str, str], reasons: Dict[str, str],
@@ -489,7 +534,8 @@ def items_of(manifest: Dict[str, str], reasons: Dict[str, str],
     out = []
     for (label, fmt), keys in sorted(groups.items()):
         sts = [manifest[k] for k in keys]
-        status = "fail" if "fail" in sts else ("ok" if all(s == "ok" for s in sts) else "skip")
+        status = ("fail" if "fail" in sts else "unverified" if "unverified" in sts else
+                  "ok" if all(s == "ok" for s in sts) else "skip")
         reason = next((reasons[k] for k in keys if manifest[k] == status and k in reasons), "")
         doc = DOC_BASENAME % (label, fmt) if fmt in ("pdf", "docx") else None
         if doc is not None:                      # where the file really is (failed → 未通过核验/)

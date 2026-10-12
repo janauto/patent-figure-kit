@@ -114,6 +114,9 @@ def _poll(c, job_id, timeout=600):
 
 @pytest.fixture(scope="module")
 def export_job(live):
+    from patent_figure import deliverable_check as _C
+    if not _C.render_checker_available():           # R2j ruling: a PDF passes only after a render
+        pytest.skip("导出 PDF 需要独立渲染器（pypdfium2）才能判通过")
     _W, _reg, c = live
     r = c.post("/v1/projects/%s/export" % PID, headers=BEARER,
                json={"variant": "both", "formats": ["pdf", "docx", "dxf"]})
@@ -137,6 +140,10 @@ def test_export_package_is_checked_page_by_page(live, export_job):
             assert pg["min_text_mm"] >= 3.5 and pg["min_text_px"] >= 24
         assert name in res["files"]
     assert {"附图说明.txt", "核对清单.txt", "核验报告.json"} <= set(res["files"])
+    # R2j ruling — hash seal: every file but the report, each document's digest as written
+    assert sorted(res["sha256"]) == [f for f in res["files"] if f != "核验报告.json"]
+    for name, doc in res["documents"].items():
+        assert doc["status"] == "ok" and res["sha256"][doc["path"]] == doc["sha256"]
     rows = {(i["variant"], i["format"]): i for i in res["items"]}
     assert rows[("递交版", "pdf")]["role"] == "主交付" and rows[("递交版", "dxf")]["status"] == "ok"
     assert res["note"].startswith("精确图片参数")

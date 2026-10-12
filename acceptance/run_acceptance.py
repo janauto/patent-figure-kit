@@ -624,14 +624,26 @@ def _wp2_env(ctx):
 
 def _recheck_zip(env, export_job, dest):
     """Independent re-check from the DOWNLOADED zip: every PDF/Word in it is checked again by
-    deliverable_check against the variant DXFs shipped in the same zip (not the server's report)."""
+    deliverable_check against the variant DXFs shipped in the same zip (not the server's report).
+    R2j ruling — hash seal: every file of the zip must match the sha256 the SERVER recorded for it
+    (result.sha256; the in-zip 核验报告.json must agree), and each document is re-checked with
+    that digest as ``expected_sha256``; a PDF must pass the independent render (status ok)."""
     import io as _io
     import zipfile as _zip
     from patent_figure import deliverable as _D
     from patent_figure import deliverable_check as _C
+    from patent_figure import export as _EXPORT
     r = env["c"].get("/v1/exports/%s/download" % export_job["id"], headers=env["H"])
     assert r.status_code == 200, "下载失败 %d" % r.status_code
     _zip.ZipFile(_io.BytesIO(r.content)).extractall(str(dest))
+    sealed = export_job["result"]["sha256"]
+    in_zip = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    assert sorted(sealed) == [n for n in in_zip if n != _EXPORT.REPORT_NAME], \
+        "导出记录的 sha256 与包内文件不一致：%s" % sorted(set(sealed) ^ set(in_zip))
+    for name, digest in sealed.items():
+        assert _C.sha256_of(dest / name) == digest, "%s 与导出时记录的 sha256 不符" % name
+    zrep = json.loads((dest / _EXPORT.REPORT_NAME).read_text(encoding="utf-8"))
+    assert zrep["sha256"] == sealed, "包内《核验报告.json》的 sha256 与服务端记录不一致"
     sp = env["c"].get("/v1/capabilities", headers=env["H"]).json()["export"]
     spec = _D.spec(export_job["result"]["spec"]["preset"], export_job["result"]["spec"]["dpi"])
     assert spec["min_text_mm"] == sp["min_text_mm"]
@@ -648,9 +660,11 @@ def _recheck_zip(env, export_job, dest):
         for fmt in ("pdf", "docx"):
             doc = dest / ("说明书附图_%s.%s" % (label, fmt))
             assert doc.is_file(), "包内缺 %s" % doc.name
-            rep = _C.check_document(doc, _C.sources_from(rows, spec["area_mm"]), spec)
-            assert rep["ok"], "%s 复核不通过：%s %s" % (doc.name, rep["errors"],
-                                                     [p["errors"] for p in rep["page_checks"]])
+            rep = _C.check_document(doc, _C.sources_from(rows, spec["area_mm"]), spec,
+                                    expected_sha256=sealed[doc.name])
+            assert rep["ok"] and rep["status"] == "ok" and rep["sha256_verified"] is True, \
+                "%s 复核不通过：%s %s" % (doc.name, rep["errors"],
+                                     [p["errors"] for p in rep["page_checks"]])
             pages += rep["pages"]
             if fmt == "pdf":            # R2i: the writer's own PDF parses STRICTLY, every object
                 from pypdf import PdfReader
@@ -670,6 +684,10 @@ def n17(ctx):
     _未通过核验/，DXF 照常 ok——不得报成功。"""
     env = _wp2_env(ctx)
     c, H, poll = env["c"], env["H"], env["poll"]
+    caps = c.get("/v1/capabilities", headers=H).json()["export"]
+    # R2j ruling: a PDF passes only after an independent render — N17 runs WITH a renderer
+    assert caps["pdf_check_available"] and caps["pdf_renderer"], \
+        "N17 需要 pypdf + 独立渲染器（pypdfium2）：%s" % caps.get("unavailable_reasons")
     total_pages = 0
     for ex, info in env["projects"].items():
         pid = info["pid"]
@@ -685,6 +703,8 @@ def n17(ctx):
         for name, doc in res["documents"].items():
             assert doc["ok"] and doc["pages"] == doc["expected_pages"] == nfig, \
                 "%s %s：%d/%d 页 %s" % (ex, name, doc["pages"], nfig, doc["errors"])
+            assert doc["status"] == "ok" and doc["sha256"] == res["sha256"][doc["path"]]
+            assert name.endswith(".docx") or doc["render_check"] == caps["pdf_renderer"]
         total_pages += _recheck_zip(env, j, ctx["tmp"] / ("wp2-zip-" + ex))
         r72 = poll(c.post("/v1/projects/%s/export" % pid, headers=H,
                           json={"variant": "both", "formats": ["pdf", "docx", "dxf"],
@@ -701,10 +721,10 @@ def n17(ctx):
                 "%s %s：%s" % (ex, name, doc["errors"])
         assert all(v == "ok" for k, v in res72["manifest"].items() if k.endswith("/dxf"))
         assert not any(f.startswith("说明书附图_") for f in res72["files"]), res72["files"]
-    return ("3 个模型 × 两版 × PDF/Word 服务端核验 + 下载包独立复核共 %d 页全部通过；"
-            "%d 份 PDF 逐对象严格解析（pypdf strict）无误；"
+    return ("3 个模型 × 两版 × PDF/Word 服务端核验 + 下载包按服务端 sha256 封印比对后独立复核共 %d 页"
+            "全部通过（PDF 经 %s 渲染）；%d 份 PDF 逐对象严格解析（pypdf strict）无误；"
             "dpi 72 时 PDF/Word 全部判 fail（栅格字高 < 24 px）并隔离"
-            % (total_pages, len(env.get("strict_pdfs", []))))
+            % (total_pages, caps["pdf_renderer"], len(env.get("strict_pdfs", []))))
 
 
 @node("N18", "候选分图 · 三个公开模型至少各一张过闸；台虎钳整机被拦并给建议")

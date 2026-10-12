@@ -2292,8 +2292,9 @@ ezdxf matplotlib 后端（面向对象 API，不碰 pyplot 全局状态），灰
 5. 文件齐全：清单里每个 ok 项对应的文件都在包里且非空。
 
 任一不满足 → 该文件 `ok=false`，移到包内 `_未通过核验/`，对应「图号/版本/格式」项 `fail` 并在 `reasons` 写原因
-（同一文件里本页通过、别页不通过的，原因写「同一文件未通过核验」）。PDF 解析用可选包 **pypdf**（缺失 → 如实报
-「无法核验」→ fail，不得报 ok）；Word 用标准库 zipfile + ElementTree **只读**打开；像素解码用 Pillow（matplotlib 的
+（同一文件里本页通过、别页不通过的，原因写「同一文件未通过核验」）。PDF 解析用可选包 **pypdf**，可见性用独立渲染器
+**pypdfium2**（修复轮 10 起两者缺一 → 该 PDF `unverified`，不得报 ok，见 §14.17；导出包文件另有 sha256 封印）；
+Word 用标准库 zipfile + ElementTree **只读**打开；像素解码用 Pillow（matplotlib 的
 必需依赖）。`conservative` 预设下需要缩小的图（取景窗高 > 245 mm）若含 3.5 mm 字，会被如实判不通过——这是设计行为
 （提示：换 `standard` 或拆图）。
 
@@ -2520,3 +2521,31 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
 - **回归**：`test_pdf_duplicate_dictionary_keys_fail_without_a_renderer`——在原始字节里注入重复 `/ca`、`/Filter`、`/Width`
   并修正 xref / startxref（合法文件），`none` 与 `pypdfium2` 两种配置下均不通过；`test_pdf_byte_patch_keeps_the_file_legal`
   用同一改写手法做无害改动（同值换写法）仍通过，证明失败来自重复键而非文件损坏。
+
+### 14.17 修复轮 10（Codex R2j → 架构裁决）：哈希封印 + PDF 渲染核验必需
+
+- **裁决依据**：R2f–R2j 连续五轮都是同一类问题——pypdf（核验端）与 PDFium（阅读端）对同一份 PDF 字节的解释不同
+  （字符串冒充名称、重复字典键、重复 xref 条目……），逐项补解析规则是在追一个开放集合，永远追不完。结构核验只能证明
+  「pypdf 看到的是写出端的结构」，不能证明「阅读器看到的是同一页面」。因此不再逐项补规则，改为两道结构性防线；前几轮
+  的结构核验保留为纵深防御。
+- **哈希封印**：`export.build_bundle` 写出每个交付文件即取 sha256；PDF / Word 用写出那一刻的摘要作为 `expected_sha256`
+  去核验（核验的就是写出的那份字节）；包内除《核验报告.json》外的每个文件（PDF / Word / DXF / DWG / txt / json …）
+  的摘要记进导出结果 `sha256: {包内路径: 摘要}`（服务端导出作业结果，权威记录）与《核验报告.json》（包内对照）。
+  `deliverable_check.check_document(..., expected_sha256=)`：给出预期摘要时**先比对**，不一致 → `fail`
+  「文件已被修改，请使用导出包原文件」，**不做任何其余核验**；一致只说明是原文件，完整核验照常进行；报告带 `sha256`
+  与 `sha256_verified`。CLI `deliverable_check.py --sha256`。核对清单与 README：「核验只对导出包原文件有效」。
+- **渲染核验必需**：独立渲染（pypdfium2 推荐；PyMuPDF 已装则备选）是 PDF「通过」的必要条件。核验报告新增
+  `status`：`ok`（全部通过，PDF 含渲染）/ `fail`（有不通过项，或哈希不符）/ `unverified`（无不通过项，但缺渲染器或缺
+  pypdf，无法确认可见性）。判定次序：任一结构 / 页面 / 渲染错误 → `fail`；否则无渲染器 → `unverified`；否则 `ok`。
+  `unverified` 的 PDF 不是通过：清单项状态 `unverified`、原因「缺少 pypdfium2，无法核验 PDF 可见性」，文件同不通过的
+  一样移进 `_未通过核验/`（包根目录只放通过的主交付），导出结果 `ok=false`；`items` 组状态次序 fail > unverified >
+  ok > skip。能力接口 `pdf_check_available` = 有 pypdf **且**有渲染器，新增 `pdf_render_required: true`、`statuses`、
+  `integrity`；doctor 把 pypdfium2 标为「导出 PDF 必需」（仍按可选项计：它只决定导出 PDF 的判定，不在出图链路上）；
+  requirements 导出段写明 `pip install pypdf pypdfium2`。Word 保持整包逐字节模板比对 + 哈希封印，不受渲染器影响。
+- **验收与回归**：N17 要求有渲染器（能力接口自检），服务端核验的每份文件 `status=ok`、摘要与 `result.sha256` 一致；
+  下载包里每个文件先按服务端 `result.sha256` 比对（包内报告须与之一致），再带 `expected_sha256` 复核。单元测试：重复
+  xref 条目（R2j 原样注入，`/ca 0`）——无渲染器 `unverified`、pypdfium2 `fail`，无害对照（`/ca 1`）——无渲染器
+  `unverified`、pypdfium2 `ok`；PDF / Word 改一个字节 → 哈希 `fail` 且不做其余核验（PDF 那一字节不破坏文件，不带封印
+  时仍按好文件判）；无渲染器时 N17 形态的导出包 PDF 全部 `unverified`、导出 `ok=false`、Word / DXF 不受影响；导出后
+  按封印复核：原文件通过、改一字节失败。原有 PDF 回归在两种配置下：好文件 `none` 为 `unverified`、`pypdfium2` 为 `ok`，
+  坏文件两种配置下都必须是 `fail`（不是 `unverified`）。

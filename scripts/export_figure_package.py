@@ -151,7 +151,8 @@ def main(argv=None) -> int:
     if args.zip:
         _EX.zip_dir(out, Path(args.zip).resolve())
     for it in bundle["items"]:
-        print("  [%s] %s %s%s" % ({"ok": "通过", "skip": "跳过", "fail": "不通过"}[it["status"]],
+        print("  [%s] %s %s%s" % ({"ok": "通过", "skip": "跳过", "fail": "不通过",
+                                  "unverified": "未核验"}[it["status"]],
                                  it["variant"], it["format"],
                                  ("：" + it["reason"]) if it["reason"] else ""))
     print("导出包：%s（%s）" % (out, "全部通过" if bundle["ok"] else "有不通过项，见 核对清单.txt"))
@@ -159,7 +160,8 @@ def main(argv=None) -> int:
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(
             {k: bundle[k] for k in ("ok", "manifest", "reasons", "items", "documents",
-                                    "missing_files", "files", "spec", "render_job_id")},
+                                    "missing_files", "files", "spec", "render_job_id",
+                                    "sha256")},
             ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return EXIT_OK if bundle["ok"] else EXIT_FAIL
 

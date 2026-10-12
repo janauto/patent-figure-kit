@@ -30,6 +30,15 @@ TOL_MM = 0.5
 SCALE_TOL = 0.01          # relative mismatch allowed between the x and y scale of a picture
 INK_FRACTION_MIN = 0.015  # share of dark pixels inside the caption box that counts as "drawn"
 
+#: Verdicts of a checked document (WP2 R2j ruling). ``ok`` — every check passed, INCLUDING, for a
+#: PDF, an independent render; ``fail`` — some check failed (or the file is not the exported
+#: original); ``unverified`` — nothing failed, but a PDF could not be rendered (no renderer
+#: installed) or not be parsed at all (no pypdf): never ``ok``, never a pass.
+STATUS_OK, STATUS_FAIL, STATUS_UNVERIFIED = "ok", "fail", "unverified"
+UNVERIFIED_PDF_REASON = "缺少 pypdfium2，无法核验 PDF 可见性"
+UNVERIFIED_PDF_HINT = "（python3 -m pip install pypdfium2 后重新导出）"
+TAMPERED_REASON = "文件已被修改，请使用导出包原文件"
+
 PT_PER_MM = 72.0 / 25.4
 EMU_PER_MM = 36000.0
 TWIP_PER_MM = 1440.0 / 25.4
@@ -234,8 +243,9 @@ def _report(path: Path, fmt: str, sources: Sequence[Source], pages: List[dict],
     if n_pages >= 0 and n_pages != len(sources):     # n_pages < 0: the file was unreadable
         errors.insert(0, "页数 %d ≠ 图数 %d" % (n_pages, len(sources)))
     ok = not errors and all(p["ok"] for p in pages) and n_pages == len(sources)
-    return {"file": Path(path).name, "format": fmt, "ok": ok, "pages": max(n_pages, 0),
-            "expected_pages": len(sources), "errors": errors, "page_checks": pages}
+    return {"file": Path(path).name, "format": fmt, "ok": ok, "status": STATUS_OK if ok else
+            STATUS_FAIL, "pages": max(n_pages, 0), "expected_pages": len(sources),
+            "errors": errors, "page_checks": pages}
 
 
 # --------------------------------------------------------------------------- PDF
@@ -949,8 +959,10 @@ def _pdf_parse_all(reader) -> List[str]:
 def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict[str, Any]:
     path = Path(path)
     if not pdf_checker_available():
-        return _report(path, "pdf", sources, [], ["未安装 pypdf，无法逐页核验 PDF（pip install pypdf）"
-                                                   "——按规则不得报通过"], -1)
+        rep = _report(path, "pdf", sources, [], ["未安装 pypdf，无法逐页核验 PDF（pip install pypdf）"
+                                                  "——按规则不得报通过"], -1)
+        rep.update(status=STATUS_UNVERIFIED, render_check=render_backend() or "unavailable")
+        return rep
     from pypdf import PdfReader
     try:
         # R2i: STRICT parsing — the tolerant default keeps the first of duplicated dictionary keys
@@ -980,8 +992,15 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
     rep = _report(path, "pdf", sources, pages, doc_errors, len(pdf_pages))
     rep.update(layout_verified="file-geometry",
                layout_note="PDF 的页幅与图片位置取自文件里的绘制指令（CTM）与图片像素；"
-                           "内容流与对象结构须与写出端固定结构一致",
+                           "内容流与对象结构须与写出端固定结构一致；须经独立渲染确认可见",
                render_check=render)
+    if rep["ok"] and render == "unavailable":
+        # R2j ruling: the independent render is a NECESSARY condition of a PDF pass. The
+        # structural checks above are defence in depth; they cannot prove what a reader SEES
+        # (parser differentials: duplicate keys, duplicate xref entries …), so without a renderer
+        # a structurally clean PDF is ``unverified`` — not ok, not a pass.
+        rep["errors"].append(UNVERIFIED_PDF_REASON + UNVERIFIED_PDF_HINT)
+        rep.update(ok=False, status=STATUS_UNVERIFIED)
     return rep
 
 
@@ -1485,13 +1504,42 @@ def check_files(dest: Path, expected: Sequence[str]) -> List[str]:
     return missing
 
 
-def check_document(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict[str, Any]:
-    suffix = Path(path).suffix.lower()
-    if suffix == ".pdf":
-        return check_pdf(path, sources, sp)
-    if suffix == ".docx":
-        return check_docx(path, sources, sp)
-    raise ValueError("只核验 .pdf / .docx：%s" % path)
+def sha256_of(path: Path) -> Optional[str]:
+    """Hex sha256 of a file's bytes (None if it cannot be read)."""
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(str(path), "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                h.update(block)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def check_document(path: Path, sources: Sequence[Source], sp: Dict[str, Any],
+                   expected_sha256: Optional[str] = None) -> Dict[str, Any]:
+    """Check one final document. ``expected_sha256`` (WP2 R2j ruling — the HASH SEAL): the digest
+    the export recorded for this file when it wrote it. A file from an export bundle is checked
+    against it FIRST; any difference (one byte) → ``fail`` 「文件已被修改，请使用导出包原文件」 and
+    NO structural check runs — a modified file gets no chance to pass. A match only proves it is
+    the original: the full check still runs. Without ``expected_sha256`` (a file of unknown
+    origin) the full check runs as before. The report always carries the file's ``sha256``."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix not in (".pdf", ".docx"):
+        raise ValueError("只核验 .pdf / .docx：%s" % path)
+    fmt = suffix[1:]
+    actual = sha256_of(path)
+    if expected_sha256 is not None and (actual is None
+                                        or actual != str(expected_sha256).strip().lower()):
+        rep = _report(path, fmt, sources, [], ["%s（sha256 应为 %s…，实为 %s）" % (
+            TAMPERED_REASON, str(expected_sha256)[:12], (actual or "读不了")[:12])], -1)
+        rep.update(sha256=actual, sha256_verified=False)
+        return rep
+    rep = check_pdf(path, sources, sp) if fmt == "pdf" else check_docx(path, sources, sp)
+    rep.update(sha256=actual, sha256_verified=None if expected_sha256 is None else True)
+    return rep
 
 
 def main(argv=None) -> int:
@@ -1510,6 +1558,9 @@ def main(argv=None) -> int:
     ap.add_argument("--min-text-mm", type=float, default=_D.MIN_TEXT_MM)
     ap.add_argument("--min-text-px", type=float, default=_D.MIN_TEXT_PX)
     ap.add_argument("--json", dest="json_out", default=None)
+    ap.add_argument("--sha256", default=None,
+                    help="导出时记录的该文件 sha256（服务端导出结果 result.sha256，或导出包《核验报告.json》"
+                         "的 sha256）：给出时先比对，不一致即判「文件已被修改」且不做其余核验")
     args = ap.parse_args(argv)
     from patent_figure import pathguard
     problem = pathguard.check_outputs([("--json", args.json_out)],
@@ -1521,7 +1572,7 @@ def main(argv=None) -> int:
     sp["min_text_mm"], sp["min_text_px"] = args.min_text_mm, args.min_text_px
     srcs = [Source(Path(p).stem, i, Path(p), sp["area_mm"])
             for i, p in enumerate(args.sources, start=1)]
-    rep = check_document(Path(args.document), srcs, sp)
+    rep = check_document(Path(args.document), srcs, sp, expected_sha256=args.sha256)
     for pg in rep["page_checks"]:
         print("第 %d 页 %s %s：字高 %s mm / %s px，%s dpi，缩放 %s%s" % (
             pg["page"], pg.get("figure"), "通过" if pg["ok"] else "不通过",
@@ -1529,8 +1580,10 @@ def main(argv=None) -> int:
             pg.get("scale"), ("；" + "；".join(pg["errors"])) if pg["errors"] else ""))
     for e in rep["errors"]:
         print("文件：%s" % e)
-    print("%s：%s（%d/%d 页）" % (rep["file"], "通过" if rep["ok"] else "不通过",
-                              rep["pages"], rep["expected_pages"]))
+    verdict = {STATUS_OK: "通过", STATUS_UNVERIFIED: "未核验（不是通过）"}.get(rep.get("status"),
+                                                                       "不通过")
+    print("%s：%s（%d/%d 页）sha256=%s" % (rep["file"], verdict, rep["pages"],
+                                        rep["expected_pages"], rep.get("sha256")))
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(rep, ensure_ascii=False, indent=2),
                                        encoding="utf-8")
