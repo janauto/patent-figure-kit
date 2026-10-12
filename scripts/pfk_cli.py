@@ -110,7 +110,8 @@ def cmd_doctor(argv: Sequence[str]) -> int:
     as_json = "--json" in argv
     args = ap.parse_args([a for a in argv if a != "--json"])
     proc = subprocess.run([_py(), str(_script("doctor.py")), "--json"], capture_output=True,
-                          text=True, encoding="utf-8", errors="replace")
+                          text=True, encoding="utf-8", errors="replace",
+                          env=dict(os.environ, PYTHONIOENCODING="utf-8"))
     try:
         report = json.loads(proc.stdout)
     except ValueError:
@@ -217,10 +218,22 @@ def _token_for_probe() -> str:
 
 
 def _is_our_workbench(port: int, token: str) -> bool:
-    """端口上已经是本机这份工作台（同一 token）？是就直接打开它，不再起第二个实例抢同一数据目录。"""
+    """端口上已经是本机这份工作台（同一 token）？是就直接打开它，不再起第二个实例抢同一数据目录。
+
+    先不带 token 看「像不像工作台」（未授权的数据接口应答 401），像才带 token 确认——别的程序占着
+    端口时不把 token 发给它。"""
     if not token:
         return False
+    import urllib.error
     import urllib.request
+    try:
+        urllib.request.urlopen("http://127.0.0.1:%d/v1/capabilities" % port, timeout=3)
+        return False                                   # 不要 token 就给数据：不是工作台
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            return False
+    except Exception:  # noqa: BLE001
+        return False
     req = urllib.request.Request("http://127.0.0.1:%d/v1/capabilities" % port,
                                  headers={"Authorization": "Bearer " + token})
     try:

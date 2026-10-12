@@ -21,7 +21,9 @@ param(
     [switch]$NoBrowser
 )
 
-$ErrorActionPreference = 'Stop'
+# 不用 'Stop'：Windows PowerShell 5.1 在 Stop 下会把原生程序（pip）写到 stderr 的警告当成终止错误；
+# 每个原生调用之后都显式检查 $LASTEXITCODE。
+$ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONUTF8 = '1'
