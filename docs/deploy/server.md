@@ -6,13 +6,16 @@
 
 企业私有化按**一个租户（一家客户 / 一个团队）一套 compose**部署：一个数据卷、一个 token、一组 Basic Auth 账号。不要在同一实例里混放多家客户的模型——工作台内没有租户隔离，持有 token 的人能看到这个实例里的全部工程。
 
+- `.env` 里的 `PFK_TENANT` **必填且每个租户不同**：它决定 compose 项目名（`pfk-<租户>`），也就是容器、数据卷（`pfk-<租户>_pfk-data`）与网络的名字前缀。两个租户若用同一个项目名，第二次 `up` 会接管第一个租户的容器并复用它的数据卷，`down -v` 也会删掉共用数据。
+- 同一宿主机放多个租户时，还要给每个租户不同的 `PFK_SUBNET / PFK_PROXY_IP / PFK_APP_IP`（网段不能重叠）和不同的 `PFK_HTTP_PORT / PFK_HTTPS_PORT`（或在前面放一个统一网关按域名分流）。更简单的做法是一台虚拟机一个租户。
+
 ## 部署
 
 ```bash
 cp .env.example .env
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"      # 填进 WORKBENCH_TOKEN
 docker run --rm caddy:2.8.4-alpine caddy hash-password --plaintext '浏览器登录密码'   # 填进 PFK_BASIC_HASH（单引号括起）
-# 填 PFK_PUBLIC_URL=https://你的域名、PFK_SITE_ADDRESS=你的域名、PFK_BASIC_USER
+# 填 PFK_TENANT（租户标识）、PFK_PUBLIC_URL=https://你的域名、PFK_SITE_ADDRESS=你的域名、PFK_BASIC_USER
 docker compose up -d
 docker compose ps          # app 显示 healthy 后 Caddy 才启动
 ```
@@ -33,7 +36,7 @@ docker compose ps          # app 显示 healthy 后 Caddy 才启动
 
 ## 数据卷与保密声明
 
-- `pfk-data`（容器内 `/data`）：工程（STEP 副本、解析结果、GLB、plan、各版本渲染产物、导出包）在 `/data/workbench`；配置（AI 通道密钥，若在界面里设置）在 `/data/config`（0700 / 0600）。**这是客户的保密资料**：按客户资料的保管规定备份与销毁；删除租户 = `docker compose down -v`（连同卷删除，不可恢复）。
+- `pfk-data`（容器内 `/data`）：工程（STEP 副本、解析结果、GLB、plan、各版本渲染产物、导出包）在 `/data/workbench`；配置（AI 通道密钥，若在界面里设置）在 `/data/config`（0700 / 0600）。**这是客户的保密资料**：按客户资料的保管规定备份与销毁；删除租户 = 在该租户目录（对应的 `PFK_TENANT`）里 `docker compose down -v`（连同卷删除，不可恢复；先 `docker compose config | head -1` 确认项目名）。
 - 作业记录与导出包目前**只增不删**（无 TTL / 自动清理，M2）：长期运行请定期清理或按项目归档后重建卷。
 - 出图、导出全部在容器内完成，不访问外网；唯一可能的外发是可选的 AI 起名（`DEEPSEEK_API_KEY` 或界面里配置），外发前界面明示字段。
 - `caddy-data`：TLS 证书与私钥。

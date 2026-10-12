@@ -70,7 +70,7 @@ jobs:
             caddy:2.8.4-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: compose 校验
         run: |
-          WORKBENCH_TOKEN=x PFK_PUBLIC_URL=https://localhost PFK_SITE_ADDRESS=localhost \
+          PFK_TENANT=lint WORKBENCH_TOKEN=x PFK_PUBLIC_URL=https://localhost PFK_SITE_ADDRESS=localhost \
           PFK_BASIC_USER=pfk PFK_BASIC_HASH=x docker compose config --quiet
       - name: PowerShell 脚本语法（UTF-8 BOM + 解析）
         shell: pwsh

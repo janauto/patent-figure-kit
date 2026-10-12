@@ -93,7 +93,8 @@ exclude = [
 "" = "patent_figure_kit"
 
 [tool.hatch.build.targets.wheel.force-include]
-# sources 前缀对 force-include 同样生效，所以这里写包内相对路径。
+# sources 前缀对 force-include 同样生效，所以这里写包内相对路径。wheel 里 scripts/pfk_cli.py 只出现在这一处
+# （hatch 对同一源文件只收一次）：入口点、`python -m`/测试都经包 patent_figure_kit 找到它。
 "scripts/pfk_cli.py" = "__init__.py"
 
 [tool.hatch.build.targets.sdist]

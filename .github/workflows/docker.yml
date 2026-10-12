@@ -33,7 +33,6 @@ jobs:
     timeout-minutes: 60
     env:
       PFK_IMAGE: patent-figure-kit:ci
-      COMPOSE_PROJECT_NAME: pfkci
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -59,6 +58,7 @@ jobs:
           echo "::add-mask::$PASS"
           HASH="$(docker run --rm caddy:2.8.4-alpine caddy hash-password --plaintext "$PASS")"
           {
+            echo "PFK_TENANT=ci"
             echo "WORKBENCH_TOKEN=$TOKEN"
             echo "PFK_PUBLIC_URL=https://localhost:8443"
             echo "PFK_SITE_ADDRESS=localhost"
@@ -86,7 +86,7 @@ jobs:
           test -s caddy-root.crt
       - name: 后端端口不可绕过代理直连（非可信对端 → 403）
         run: |
-          code="$(docker run --rm --network pfkci_pfk curlimages/curl:8.10.1 -s -o /dev/null -w '%{http_code}' http://app:8790/healthz)"
+          code="$(docker run --rm --network pfk-ci_pfk curlimages/curl:8.10.1 -s -o /dev/null -w '%{http_code}' http://app:8790/healthz)"
           echo "直连后端：HTTP $code"
           test "$code" = "403"
       - name: 服务以非 root 运行

@@ -15,8 +15,14 @@ _SCRIPTS = _ROOT / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import build_static_site as B  # noqa: E402
-import pfk_cli as P  # noqa: E402
 import verified_envs as V  # noqa: E402
+
+try:
+    import pfk_cli as P  # noqa: E402
+    _CLI = _SCRIPTS / "pfk_cli.py"
+except ImportError:      # wheel：scripts/pfk_cli.py 装成了包 patent_figure_kit 的 __init__.py
+    import patent_figure_kit as P  # noqa: E402
+    _CLI = Path(P.__file__)
 
 
 #: wheel 里不带 pyproject.toml（装进包目录后 pfk acceptance 在那里跑本文件）：读它的测试只在源码检出里跑。
@@ -34,7 +40,7 @@ def test_pfk_root_resolves_from_scripts_and_resources_exist():
 
 
 def test_pfk_cli_version_paths_and_unknown_command():
-    run = lambda *a: subprocess.run([sys.executable, str(_SCRIPTS / "pfk_cli.py")] + list(a),  # noqa: E731
+    run = lambda *a: subprocess.run([sys.executable, str(_CLI)] + list(a),  # noqa: E731
                                     capture_output=True, text=True, encoding="utf-8")
     v = run("version")
     assert v.returncode == 0 and P.__version__ in v.stdout

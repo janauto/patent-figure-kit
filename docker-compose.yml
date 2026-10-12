@@ -5,7 +5,10 @@
 #
 # 只支持 linux/amd64。企业私有化：一租户一容器（一份 compose / 一个数据卷 / 一个 token），不在同一实例里混放
 # 多家客户的模型。详见 docs/deploy/server.md。
-name: patent-figure-kit
+#
+# 项目名（= 容器、数据卷、网络名的前缀）必须按租户区分：同一宿主机上两个租户若共用项目名，第二次 up 会接管
+# 第一个租户的容器并复用它的数据卷，down -v 也会删掉共用数据。所以这里强制从 .env 读 PFK_TENANT。
+name: pfk-${PFK_TENANT:?在 .env 里设置 PFK_TENANT（租户标识，小写字母 / 数字 / 连字符；决定容器、数据卷与网络名）}
 
 services:
   app:
