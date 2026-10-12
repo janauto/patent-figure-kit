@@ -52,6 +52,7 @@ from fastapi.responses import (FileResponse, JSONResponse,  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from patent_figure import capabilities as CAPS  # noqa: E402
+from patent_figure import deploy_opts as DEPLOY  # noqa: E402
 from patent_figure import examples as EXM  # noqa: E402
 from patent_figure import deliverable as DELIV  # noqa: E402
 from patent_figure import export as EXPORT  # noqa: E402
@@ -705,8 +706,9 @@ def auth_via(request: Request, token: str) -> Optional[str]:
     return None
 
 
-def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
-    base = "http://127.0.0.1:%d" % port
+def build_workbench(reg: Registry, token: str, port: int,
+                    public_url: Optional[str] = None) -> FastAPI:
+    base = DEPLOY.public_base(port, public_url)   # WP4：下载 / MCP 地址基于 --public-url
     tools = Tools(reg, base)
     app = FastAPI(title="专利附图工作台 API", version="1.0.0", docs_url="/docs",
                   openapi_url="/openapi.json", redoc_url=None,
@@ -2040,6 +2042,7 @@ def main(argv=None) -> int:
     run.add_argument("--port", type=int, default=DEFAULT_PORT)
     run.add_argument("--no-browser", action="store_true")
     run.add_argument("--no-example", action="store_true", help="不自动创建合成示例工程")
+    DEPLOY.add_arguments(run)   # WP4：--host/--allow-remote/--public-url/--trusted-proxy/--allowed-host
     seed = sub.add_parser("seed", help="从 STEP 建一个工程（可标为示例并立即出图）")
     seed.add_argument("--step", required=True)
     seed.add_argument("--title", required=True)
@@ -2057,19 +2060,19 @@ def main(argv=None) -> int:
     if args.cmd == "seed":
         return cmd_seed(args)
     port = getattr(args, "port", DEFAULT_PORT)
+    deploy = DEPLOY.from_args_or_exit(args)          # WP4：默认即改前的本机形态
     token = ensure_token()
     reg = Registry(Path(args.data).expanduser(), token)
     _work_in(reg.data)
     if not getattr(args, "no_example", False):
         ensure_synthetic(reg)
-    app = Dispatcher(build_workbench(reg, token, port), reg)
-    url = "http://127.0.0.1:%d/?token=%s" % (port, token)
-    print("\n专利附图工作台已启动：\n  %s\n数据目录：%s\nREST 文档：http://127.0.0.1:%d/docs\n"
-          "MCP 端点：http://127.0.0.1:%d/mcp（Bearer token）\n" % (url, reg.data, port, port),
-          flush=True)
-    if not getattr(args, "no_browser", False):
+    app = DEPLOY.wrap(Dispatcher(build_workbench(reg, token, port, deploy.public_url), reg), deploy,
+                      token=token)
+    banner, url = DEPLOY.startup_banner(deploy, port, token, str(reg.data))
+    print(banner, flush=True)
+    if url and not getattr(args, "no_browser", False):
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, **DEPLOY.uvicorn_kwargs(deploy, port))
     return 0
 
 

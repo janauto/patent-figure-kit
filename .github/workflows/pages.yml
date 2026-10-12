@@ -1,0 +1,69 @@
+# T0 在线演示站（架构 §4）：CI 从三个公开示例真实出图 → 静态站 → 资产审计 → 子路径实测。
+# 只手动触发。默认只构建、审计、实测并上传构件供人工核对；勾选 deploy 且仓库变量
+# PFK_OUTBOUND_GATE=passed（架构 §7.4 首次外发门禁：产品名与署名确认、商标检索留证、资产逐项核对、用户确认）
+# 时才发布到 GitHub Pages。
+name: pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "发布到 GitHub Pages（外发：须先过架构 §7.4 首次外发门禁）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 生成 + 审计 + 子路径实测
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 系统依赖（OCP 的 libGL / libX11、中文字体）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libx11-6 fonts-noto-cjk
+      - name: 安装锁定依赖 + Playwright
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements-pinned.txt -r requirements-web.txt playwright==1.58.0
+          python -m playwright install --with-deps chromium
+      - name: 三个公开示例真实出图 → 静态站 → 资产审计（失败即停）
+        run: python scripts/build_static_site.py -o static-site
+      - name: 子路径实测（python -m http.server，无路由重写）
+        run: python scripts/verify_static_site.py static-site --shots static-shots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-site-review
+          path: |
+            static-site/
+            static-shots/
+      - uses: actions/upload-pages-artifact@v3
+        if: inputs.deploy
+        with:
+          path: static-site/patent-figure-kit
+
+  deploy:
+    name: 发布到 GitHub Pages（手动 + 外发门禁）
+    needs: build
+    if: inputs.deploy && vars.PFK_OUTBOUND_GATE == 'passed'
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

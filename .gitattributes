@@ -1,0 +1,7 @@
+# 安装脚本的换行与编码要按平台固定，不随检出平台变：
+# PowerShell 5.1 需要 UTF-8 BOM + CRLF，原样保存（不做换行转换）；shell 脚本必须是 LF。
+*.ps1 -text
+*.sh text eol=lf
+*.command text eol=lf
+Dockerfile text eol=lf
+Caddyfile text eol=lf
