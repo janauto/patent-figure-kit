@@ -854,9 +854,17 @@ def _render_gray(path: Path, k: int, dpi: int, backend: str):
             return arr.reshape(arr.shape[0], arr.shape[1]) if arr.ndim == 3 else arr
         import fitz
         with fitz.open(str(path)) as doc:
-            pix = doc[k - 1].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
-            return np.frombuffer(bytes(pix.samples), dtype=np.uint8).reshape(
-                pix.height, pix.width).copy()
+            page = doc[k - 1]
+            pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
+            try:
+                arr = np.frombuffer(bytes(pix.samples), dtype=np.uint8).reshape(
+                    pix.height, pix.width).copy()
+            finally:
+                # R2m: release MuPDF objects HERE, under the lock — not whenever the garbage
+                # collector gets to them (possibly in another thread, outside the lock)
+                del pix
+                del page
+        return arr
 
 
 def _render_page(path: Path, k: int, dpi: int, backend: str):

@@ -1511,3 +1511,189 @@ def test_a_renderer_error_in_an_export_is_unverified_not_fail(tmp_path, monkeypa
     assert pdf and set(pdf.values()) == {"unverified"}, out["reasons"]
     assert all("独立渲染器出错" in out["reasons"][k] for k in pdf)
     assert all(v == "ok" for k, v in out["manifest"].items() if k.endswith("/docx"))
+
+
+# --------------------------------------------------------------------------- R2m: one matplotlib lock
+
+
+def _blocked_while_locked(lock, fn):
+    """Run ``fn`` in a thread while THIS thread holds ``lock``: it must not finish until the lock
+    is released (it entered matplotlib only under the lock), and then finish without error."""
+    import threading
+    done, errors = threading.Event(), []
+
+    def run():
+        try:
+            fn()
+        except Exception as exc:                           # noqa: BLE001
+            errors.append(exc)
+        finally:
+            done.set()
+    with lock:
+        t = threading.Thread(target=run)
+        t.start()
+        blocked = not done.wait(0.6)
+    t.join(120)
+    return blocked, errors
+
+
+def test_every_matplotlib_entry_takes_the_one_process_lock(tmp_path):
+    """R2m: the lock is shared by EVERY matplotlib entry — not only the export's PNG. While
+    another thread holds ``mpl_lock.MPL_LOCK``: ``sheet.render_preview`` (the lazy PNG of
+    ``studio_ext.ensure_preview_png``, the workbench's project-less MCP flowchart, the export
+    PNG), ``deliverable.rasterize`` and ``deliverable.write_pdf`` all wait, then succeed."""
+    import shutil
+    import studio_ext as EXT
+    from patent_figure import mpl_lock, sheet as SH
+    assert D.MPL_LOCK is mpl_lock.MPL_LOCK
+    dxf = sheet(tmp_path / "fig1_filing.dxf", 1)
+    sp = D.spec("standard", 150)
+    page = D.rasterize(dxf, sp, "fig1", 1)
+    shutil.copy(str(dxf), str(tmp_path / "lazy.dxf"))
+    def lazy(tag):
+        shutil.copy(str(dxf), str(tmp_path / ("lazy%s.dxf" % tag)))
+        assert EXT.ensure_preview_png(tmp_path / ("lazy%s.png" % tag))
+    entries = {
+        "sheet.render_preview": lambda tag: SH.render_preview(dxf, tmp_path / ("p%s.png" % tag)),
+        "studio_ext.ensure_preview_png": lazy,
+        "export._png": lambda tag: EX._png(dxf, tmp_path / ("e%s.png" % tag), 100),
+        "deliverable.rasterize": lambda tag: D.rasterize(dxf, sp, "fig1", 1),
+        "deliverable.write_pdf": lambda tag: D.write_pdf([page], tmp_path / ("w%s.pdf" % tag)),
+    }
+    for name, fn in entries.items():
+        fn("warm")                    # imports / font set-up done: unlocked, this takes < 0.6 s
+        blocked, errors = _blocked_while_locked(mpl_lock.MPL_LOCK, lambda: fn("probe"))
+        assert blocked, "%s entered matplotlib without the process lock" % name
+        assert errors == [], (name, errors)
+    assert (tmp_path / "lazyprobe.png").is_file() and (tmp_path / "wprobe.pdf").is_file()
+
+
+def test_mcp_flowchart_waits_for_the_matplotlib_lock(tmp_path):
+    """R2m: the workbench's project-less MCP ``render_flowchart`` (scratch DXF → PNG) goes
+    through the same lock — held elsewhere, the request waits; released, it returns the PNG."""
+    pytest.importorskip("fastapi")
+    import workbench as W
+    import workbench_mcp as M
+    from starlette.testclient import TestClient
+    from patent_figure import mpl_lock
+    reg = W.Registry(tmp_path / "data", "t" * 32)
+    c = TestClient(W.Dispatcher(W.build_workbench(reg, "t" * 32, 8802), reg),
+                   base_url="http://127.0.0.1:8802")
+    H = {"Authorization": "Bearer " + "t" * 32}
+    out = {}
+
+    def call():
+        r = c.post("/mcp", headers=H, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                            "params": {"name": "render_flowchart",
+                                                       "arguments": {"spec": M.FLOW_GUIDE["example"]}}})
+        out["res"] = r.json()["result"]
+    call()                            # warm-up: unlocked, the request returns in < 0.6 s
+    blocked, errors = _blocked_while_locked(mpl_lock.MPL_LOCK, call)
+    assert blocked and errors == [], errors
+    assert any(x["type"] == "image" for x in out["res"]["content"])
+
+
+def test_exports_lazy_pngs_and_flowcharts_run_concurrently(tmp_path, monkeypatch):
+    """R2m: the three in-process matplotlib users at once — 3 export threads (PDF + Word with
+    the independent render), 3 lazy-PNG threads × 3 previews, 2 project-less MCP flowchart
+    threads × 2 — every one succeeds."""
+    pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("fastapi")
+    import shutil
+    import threading
+    import studio_ext as EXT
+    import workbench as W
+    import workbench_mcp as M
+    from starlette.testclient import TestClient
+    monkeypatch.setenv("PFK_PDF_RENDERER", "pypdfium2")
+    store = V.VersionStore(tmp_path / "ws")
+    _publish(store, "r1", tmp_path)
+    src = sheet(tmp_path / "src.dxf", 1)
+    reg = W.Registry(tmp_path / "data", "t" * 32)
+    app = W.Dispatcher(W.build_workbench(reg, "t" * 32, 8802), reg)
+    H = {"Authorization": "Bearer " + "t" * 32}
+    problems = []
+
+    def export(i):
+        with EX.acquire(store.root) as pin:
+            out = EX.build_bundle(pin, tmp_path / ("b%d" % i), variants=("filing",),
+                                  formats=("pdf", "docx", "png"), dpi=300)
+        if not out["ok"]:
+            problems.append(("export", out["reasons"]))
+
+    def lazy(i):
+        for n in range(3):
+            stem = tmp_path / ("lazy%d_%d" % (i, n))
+            shutil.copy(str(src), str(stem) + ".dxf")
+            if not EXT.ensure_preview_png(Path(str(stem) + ".png")):
+                problems.append(("lazy", i, n))
+
+    def flow(i):
+        c = TestClient(app, base_url="http://127.0.0.1:8802")
+        for n in range(2):
+            r = c.post("/mcp", headers=H, json={
+                "jsonrpc": "2.0", "id": n, "method": "tools/call",
+                "params": {"name": "render_flowchart",
+                           "arguments": {"spec": M.FLOW_GUIDE["example"]}}})
+            res = r.json().get("result") or {}
+            if not any(x.get("type") == "image" for x in res.get("content", [])):
+                problems.append(("flow", i, n, r.text[:200]))
+
+    def guard(fn, *a):
+        def run():
+            try:
+                fn(*a)
+            except Exception as exc:                       # noqa: BLE001
+                problems.append((fn.__name__, "%s: %s" % (type(exc).__name__, exc)))
+        return run
+    threads = ([threading.Thread(target=guard(export, i)) for i in range(3)]
+               + [threading.Thread(target=guard(lazy, i)) for i in range(3)]
+               + [threading.Thread(target=guard(flow, i)) for i in range(2)])
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(600)
+    assert problems == [], problems[:3]
+
+
+def test_pymupdf_objects_are_released_under_the_render_lock(two, monkeypatch):
+    """R2m: with the PyMuPDF fallback, the Pixmap and the page are released INSIDE the renderer
+    lock (explicit ``del``, not whenever the garbage collector runs — possibly in another thread,
+    outside it). A stand-in ``fitz`` records the lock state at each release."""
+    import sys
+    import types
+    tmp, rows = two
+    seen = []
+
+    class Pixmap:
+        def __init__(self, w, h):
+            self.width, self.height, self.samples = w, h, bytes([255]) * (w * h)
+
+        def __del__(self):
+            seen.append(("pixmap", C._RENDER_LOCK.locked()))
+
+    class Page:
+        def get_pixmap(self, dpi, colorspace, alpha):
+            return Pixmap(8, 11)
+
+        def __del__(self):
+            seen.append(("page", C._RENDER_LOCK.locked()))
+
+    class Doc:
+        def __getitem__(self, k):
+            return Page()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            seen.append(("doc", C._RENDER_LOCK.locked()))
+            return False
+    fake = types.ModuleType("fitz")
+    fake.open = lambda path: Doc()
+    fake.csGRAY = "gray"
+    monkeypatch.setitem(sys.modules, "fitz", fake)
+    arr = C._render_gray(tmp / "whatever.pdf", 1, 72, "pymupdf")
+    assert arr.shape == (11, 8)
+    assert sorted(seen) == [("doc", True), ("page", True), ("pixmap", True)], seen

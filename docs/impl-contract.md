@@ -2590,3 +2590,18 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
 - **回归**：8 线程 × 60 次渲染无错误、位图逐像素一致；8 个导出作业并发（各自线程，PDF + Word，独立渲染核验）全部通过；
   渲染器每次都抛错 → `unverified`（每页恰好尝试 2 次），只错一次 → 重试后通过，72 dpi 的真实不通过文件仍为 `fail`；导出层
   渲染器出错 → PDF 项 `unverified`、Word 不受影响。
+
+### 14.20 修复轮 13（Codex R2m）：matplotlib 锁下沉到所有入口；PyMuPDF 对象锁内释放
+
+- **问题**：修复轮 12 的 matplotlib 锁只包住导出的 PNG（`export._png`）、`rasterize`、`write_pdf`；懒加载 PNG
+  （`studio_ext.ensure_preview_png`）与工作台无工程 MCP 流程图仍直接调 `sheet.render_preview`（`qsave` 会切换 backend、走
+  pyplot），可与导出线程同时进入 matplotlib。
+- **一把锁、所有入口**：锁对象移到无依赖的公共模块 `patent_figure.mpl_lock.MPL_LOCK`（`threading.RLock`，避免 sheet ↔
+  deliverable 循环导入）；`sheet.render_preview` 在**函数内部**持锁（懒加载 PNG、流程图预览、导出 PNG、各 CLI 都经过它），
+  `deliverable.rasterize` / `write_pdf` 持同一把锁（`deliverable.MPL_LOCK` 即同一对象）；`export._png` 不再自己加锁。
+  进程内 matplotlib 的使用只剩这三个入口。与 PDF 渲染器锁从不嵌套。
+- **PyMuPDF 备选**：页面与 Pixmap 在渲染器锁内显式 `del`（像素先复制出来），文档在锁内关闭，不依赖析构时机。
+- **回归**：另一线程持有 `MPL_LOCK` 时，`sheet.render_preview`、`ensure_preview_png`、`export._png`、`rasterize`、`write_pdf`
+  与 MCP `render_flowchart`（无工程）都等待、释放后成功（先预热，未加锁的实现 0.6 s 内即完成，本测试能区分）；3 个导出线程
+  （PDF + Word + PNG，独立渲染）、3 个懒加载 PNG 线程 × 3、2 个 MCP 流程图线程 × 2 同时运行全部成功；替身 `fitz` 记录到
+  页面、Pixmap、文档三者都在锁内释放。

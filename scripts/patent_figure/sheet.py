@@ -364,14 +364,19 @@ def render_preview(dxf: Path, png: Path, dpi: int = 150) -> None:
     """
     dxf = Path(dxf)
     png = Path(png)
-    # Imported lazily so that writing a DXF and hashing it never needs matplotlib.
-    from ezdxf.addons.drawing.matplotlib import qsave
+    # WP2 R2m: qsave switches the matplotlib backend and drives pyplot — process-global state.
+    # Every caller (lazy PNG, flowchart previews, export PNG, the CLIs) goes through here, so the
+    # ONE process-wide matplotlib lock is taken here, shared with the export's rasteriser.
+    from patent_figure.mpl_lock import MPL_LOCK
+    with MPL_LOCK:
+        # Imported lazily so that writing a DXF and hashing it never needs matplotlib.
+        from ezdxf.addons.drawing.matplotlib import qsave
 
-    _preview_cjk_font()
-    doc = ezdxf.readfile(str(dxf))
-    png.parent.mkdir(parents=True, exist_ok=True)
-    qsave(doc.modelspace(), str(png), bg=PREVIEW_BG, fg=PREVIEW_FG,
-          dpi=int(dpi), backend="agg")
+        _preview_cjk_font()
+        doc = ezdxf.readfile(str(dxf))
+        png.parent.mkdir(parents=True, exist_ok=True)
+        qsave(doc.modelspace(), str(png), bg=PREVIEW_BG, fg=PREVIEW_FG,
+              dpi=int(dpi), backend="agg")
 
 
 def _r(value: Any) -> float:

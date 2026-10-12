@@ -21,11 +21,11 @@
 from __future__ import annotations
 
 import io
-import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from patent_figure import layout as _layout
+from patent_figure.mpl_lock import MPL_LOCK as _MPL_LOCK
 
 PAGE_MM = (210.0, 297.0)
 MARGINS_MM = {"top": 25.0, "left": 25.0, "bottom": 15.0, "right": 15.0}
@@ -170,12 +170,11 @@ class Page:
         return buf.getvalue()
 
 
-#: R2l: matplotlib (figures, Agg canvases, colormaps, the PDF backend, rcParams set by the CJK
-#: font hook) is not thread-safe, and every export job runs in its own thread — concurrent
-#: exports failed at random ("生成失败：cmap"). Every matplotlib use of the export path holds this
-#: ONE process-wide lock: ``rasterize`` (writer and checker alike), ``write_pdf``, and the PNG
-#: preview of ``export``. Reentrant, never nested with the checker's renderer lock.
-MPL_LOCK = threading.RLock()
+#: R2l / R2m: matplotlib is not thread-safe and the service runs exports, lazy PNG previews and
+#: MCP flowchart renders in concurrent threads (concurrent exports failed at random with
+#: "生成失败：cmap"). ``rasterize`` and ``write_pdf`` hold the ONE process-wide lock that
+#: ``sheet.render_preview`` holds too (``patent_figure.mpl_lock``).
+MPL_LOCK = _MPL_LOCK
 
 
 def rasterize(dxf: Path, sp: Dict[str, Any], figure: str = "", number: int = 0) -> Page:
