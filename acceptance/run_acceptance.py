@@ -35,6 +35,37 @@ PY = sys.executable or "python3"
 RESULTS: list = []
 _T0 = time.time()
 
+# ------------------------------------------------------------------ 大模型通道隔离（WP2b 修复轮 1）
+# 验收在任何机器上都不得外发大模型调用：不论本机配置了 DeepSeek 密钥、设了 DEEPSEEK_* 环境变量，还是装了会被
+# provider=auto 自动探测到的本机 CodeBuddy CLI。main() 一开始就关掉通道（PFK_AI_PROVIDER=none）、把工作台配置
+# 指向本次运行的临时目录、清掉 DEEPSEEK_*——同进程起的工作台（N17/N18）与子进程（N14 的 pytest、各 CLI）都继承；
+# 再在同进程的大模型客户端（workbench_llm.chat_json）装哨兵：一被调用就记下并抛错，起工作台的节点结束时、以及
+# 整次验收结束时都断言调用次数为 0。
+LLM_CALLS: list = []
+
+
+def isolate_llm(tmp: Path) -> None:
+    import os as _os
+    _os.environ["PFK_AI_PROVIDER"] = "none"
+    cfg = tmp / "llm-config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    _os.environ["PATENT_WORKBENCH_CONFIG"] = str(cfg)
+    for k in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
+        _os.environ.pop(k, None)
+    sys.path.insert(0, str(SCRIPTS))
+    import workbench_llm as _L
+
+    def sentinel(provider, purpose):
+        LLM_CALLS.append((provider, purpose))
+        raise _L.LLMError("验收期间禁止调用大模型客户端（哨兵）")
+    _L.OUTBOUND_HOOKS.append(sentinel)
+    assert _L.public_settings()["provider"] == "none", "大模型通道未能关闭"
+
+
+def assert_no_llm_calls(where: str) -> None:
+    assert not LLM_CALLS, "%s：验收期间调用了大模型客户端 %d 次：%r" % (
+        where, len(LLM_CALLS), LLM_CALLS[:3])
+
 
 class Skip(Exception):
     """节点不适用于本环境（例如没装 AutoCAD），不算失败。"""
@@ -594,6 +625,7 @@ def _wp2_env(ctx):
         from starlette.testclient import TestClient
     except ImportError as exc:
         raise Skip("缺工作台依赖（fastapi/starlette/httpx）：%s" % exc)
+    assert W.LLM.public_settings()["provider"] == "none", "N17/N18 的工作台必须在大模型通道关闭时启动"
     reg = W.Registry(ctx["tmp"] / "wp2-data", _WP2_TOKEN)
     c = TestClient(W.Dispatcher(W.build_workbench(reg, _WP2_TOKEN, 8802), reg),
                    base_url="http://127.0.0.1:8802")
@@ -684,6 +716,7 @@ def n17(ctx):
     _未通过核验/，DXF 照常 ok——不得报成功。"""
     env = _wp2_env(ctx)
     c, H, poll = env["c"], env["H"], env["poll"]
+    assert_no_llm_calls("N17 起工作台与示例准备")
     caps = c.get("/v1/capabilities", headers=H).json()["export"]
     # R2j ruling: a PDF passes only after an independent render — N17 runs WITH a renderer
     assert caps["pdf_check_available"] and caps["pdf_renderer"], \
@@ -766,6 +799,7 @@ def n18(ctx):
                 "台虎钳整机候选未被拦下：%s" % whole
             out.append("台虎钳整机被拦：%s" % whole["reason"][:30])
         out.append("%s %d/%d 过闸" % (ex, len(passed), len(cands)))
+    assert_no_llm_calls("N18")
     return "；".join(out)
 
 
@@ -788,6 +822,7 @@ def main() -> int:
 
     tmp = Path(tempfile.mkdtemp(prefix="acceptance-"))
     ctx = {"tmp": tmp}
+    isolate_llm(tmp)
     print("专利附图工具链 · 自动验收")
     print("仓库：%s" % REPO)
     print("产物：%s\n" % tmp)
@@ -804,6 +839,7 @@ def main() -> int:
             print("\n  %s 是后续节点的前提，已中止。" % node_id)
             break
 
+    print("\n外发哨兵：验收期间大模型客户端被调用 %d 次（通道 PFK_AI_PROVIDER=none）" % len(LLM_CALLS))
     passed = sum(1 for r in RESULTS if r["ok"] is True)
     failed = [r for r in RESULTS if r["ok"] is False]
     skipped = sum(1 for r in RESULTS if r["ok"] is None)
@@ -838,7 +874,7 @@ def main() -> int:
 
     if not args.keep:
         shutil.rmtree(tmp, ignore_errors=True)
-    return 1 if failed else 0
+    return 1 if failed or LLM_CALLS else 0
 
 
 if __name__ == "__main__":

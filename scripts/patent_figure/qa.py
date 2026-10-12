@@ -603,6 +603,89 @@ def plain_fields(check_id: str, figure: str) -> Dict[str, Any]:
     return {"title_zh": title, "hint_plain": plain, "fix_action": action}
 
 
+# ===========================================================================
+# WP2b F4: the same plain-language layer for failures that happen BEFORE the 13 checks run —
+# layout-stage errors from the renderer (``E_LAYOUT_UNSOLVABLE`` / ``E_LABELS_UNPLACEABLE`` …)
+# and plan-validation errors. Where an error means the same thing as one of the checks above,
+# its plain text and fix action are TAKEN FROM that check's CHECK_PLAIN row (so the two tables
+# cannot drift apart); only errors with no equivalent check get their own row. ``fix_action``
+# keeps the frozen four kinds; ``None`` = not something the user can fix (report it).
+# ===========================================================================
+_LAYOUT_TEXT_RE = re.compile(r"最大可用字高 ([0-9.]+) mm < 交付下限 ([0-9.]+) mm")
+_LAYOUT_FILL_RE = re.compile(r"页面填充 ([0-9.]+) < ([0-9.]+)")
+
+#: error code → (title_zh, the QA check whose plain text + fix action it shares).
+ERROR_AS_CHECK: Dict[str, Tuple[str, str]] = {
+    "E_LABELS_UNPLACEABLE": ("标号放不下", "label_overlap_pairs"),
+    "E_TOO_MANY_LABELS": ("标号数量", "labels_per_figure"),
+    "E_TERM_LOOKS_LIKE_PART_CODE": ("禁用文字", "forbidden_text"),
+}
+#: error codes with no equivalent check → (title_zh, hint_plain, fix kind, target extras).
+ERROR_PLAIN: Dict[str, Tuple[str, str, Optional[str], Dict[str, Any]]] = {
+    "E_MEMBER_NO_MATCH": (
+        "分图零件无效", "这张图里选的零件在装配体里找不到。到图纸页重新给这张图选零件。",
+        "split_figure", {}),
+    "E_NO_CURVES": (
+        "没有可画的线条", "这张图里有零件投影不出任何线条（可能被完全挡住，或是退化件）。"
+        "换一个视角，或到图纸页把它移出这张图。", "change_view", {}),
+    "E_AXIS_PARALLEL": (
+        "分解方向", "分解方向正好朝着视线，图上看不出分解效果。换一个视角。", "change_view", {}),
+    "E_SELECTOR_NO_MATCH": (
+        "术语指向不存在的零件", "术语表里有一行指向的零件在装配体里找不到。到术语页改正或删掉这一行。",
+        "open_terms", {"focus": "names"}),
+    "E_DUPLICATE_FIGURE_ID": (
+        "图号重复", "计划里有两张图用了同一个编号。到图纸页删掉或改掉重复的那张。",
+        "split_figure", {}),
+}
+#: Writer-side failures (renderer / OCC / sheet internals) — not the user's to fix.
+ERROR_WRITER_SIDE = ("出图程序出错", "出图程序在这张图上出了错——不是你的操作问题，"
+                     "请把这张图反馈给维护者。")
+
+
+def _num(text: str) -> str:
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def error_plain_fields(code: str, figure: str, message: str = "") -> Dict[str, Any]:
+    """``{title_zh, hint_plain, fix_action, check}`` for a renderer / plan error of one figure.
+
+    ``check`` names the QA check whose CHECK_PLAIN row was reused (or ``None``). The measured
+    numbers of a layout error (字高 / 填充) are put in front of the shared plain text."""
+    code = str(code or "")
+    message = str(message or "")
+    if code == "E_LAYOUT_UNSOLVABLE":
+        m = _LAYOUT_TEXT_RE.search(message)
+        if m:
+            row = plain_fields("text_height_mm", figure)
+            row.update(title_zh="排版放不下：字太小", check="text_height_mm",
+                       hint_plain="标号字高最多只能到%s毫米（要求不低于%s毫米）。%s"
+                       % (_num(m.group(1)), _num(m.group(2)), row["hint_plain"]))
+            return row
+        m = _LAYOUT_FILL_RE.search(message)
+        row = plain_fields("sheet_fill", figure)
+        if m:
+            row.update(title_zh="排版放不下：铺不满纸面", check="sheet_fill",
+                       hint_plain="图形只铺满了纸面的%s（要求不低于%s）。%s"
+                       % (_num(m.group(1)), _num(m.group(2)), row["hint_plain"]))
+        else:
+            row.update(title_zh="排版放不下", check="sheet_fill",
+                       hint_plain="这张图的零件在纸上排不开。换一个视角，或把零件拆到两张图里。")
+        return row
+    if code in ERROR_AS_CHECK:
+        title, check_id = ERROR_AS_CHECK[code]
+        row = plain_fields(check_id, figure)
+        row.update(title_zh=title, check=check_id)
+        return row
+    if code in ERROR_PLAIN:
+        title, plain, kind, extra = ERROR_PLAIN[code]
+        target = {"figure": figure}
+        target.update(extra)
+        return {"title_zh": title, "hint_plain": plain, "check": None,
+                "fix_action": {"kind": kind, "target": target} if kind else None}
+    title, plain = ERROR_WRITER_SIDE
+    return {"title_zh": title, "hint_plain": plain, "fix_action": None, "check": None}
+
+
 def _report(dxf: Path, checks: List[Check]) -> Dict[str, Any]:
     passed = sum(1 for c in checks if c.passed)
     rows = []

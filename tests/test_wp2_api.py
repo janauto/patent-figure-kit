@@ -90,16 +90,31 @@ def test_from_example_unknown_is_404(tmp_path):
 def live(tmp_path_factory):
     if not _HAS_OCP:
         pytest.skip("需要 cadquery-ocp")
-    W, reg, c = _app(tmp_path_factory.mktemp("wp2api"))
-    W.ensure_synthetic(reg)
-    t0 = time.time()
-    while True:
-        st = c.get("/api/wb/projects/%s" % PID, headers=BEARER).json()
-        if st["status"] == "ready" and not st["message"]:
-            break
-        assert time.time() - t0 < 300, "示例工程准备超时"
-        time.sleep(1)
-    return W, reg, c
+    import workbench_llm as L
+    # WP2b: the example's preparation must never reach a real model (not even the
+    # auto-detected local CodeBuddy CLI); AI tests below patch their own fake channel.
+    mp = pytest.MonkeyPatch()
+    cfg = tmp_path_factory.mktemp("wp2api-cfg")
+    mp.setattr(L, "CONFIG_DIR", cfg)
+    mp.setattr(L, "CONFIG_FILE", cfg / "config.json")
+    mp.delenv("DEEPSEEK_API_KEY", raising=False)
+    mp.setattr(L, "_codebuddy_path", lambda: None)
+    try:
+        assert L.public_settings()["provider"] == "none"          # no channel reachable
+        W, reg, c = _app(tmp_path_factory.mktemp("wp2api"))
+        W.ensure_synthetic(reg)
+        t0 = time.time()
+        while True:
+            # WP2b F1: prepared = ready AND the preparation thread finished (not "message empty")
+            st = c.get("/api/wb/projects/%s" % PID, headers=BEARER).json()
+            assert st["status"] != "error", st
+            if st["status"] == "ready" and not reg.is_preparing(PID):
+                break
+            assert time.time() - t0 < 300, "示例工程准备超时"
+            time.sleep(1)
+        yield W, reg, c
+    finally:
+        mp.undo()
 
 
 def _poll(c, job_id, timeout=600):
@@ -152,6 +167,22 @@ def test_export_package_is_checked_page_by_page(live, export_job):
     rows = {(i["variant"], i["format"]): i for i in res["items"]}
     assert rows[("递交版", "pdf")]["role"] == "主交付" and rows[("递交版", "dxf")]["status"] == "ok"
     assert res["note"].startswith("精确图片参数")
+
+
+def test_download_works_from_localhost_and_127_with_the_session_cookie(live, export_job):
+    """WP2b F2: the download URL used to be hard-wired to 127.0.0.1, so a page opened from
+    localhost got 401 (its session cookie belongs to localhost). Without a public URL it is now
+    same-origin relative (修复轮 1): both entries download the real export with the cookie alone."""
+    from starlette.testclient import TestClient
+    _W, _reg, c = live
+    for host in ("localhost", "127.0.0.1"):
+        b = TestClient(c.app, base_url="http://%s:8802" % host)
+        assert b.get("/?token=" + TOKEN).status_code == 200            # session cookie only
+        res = b.get("/v1/exports/%s" % export_job["id"]).json()["result"]
+        assert res["download_url"] == "/v1/exports/%s/download" % export_job["id"]
+        d = b.get(res["download_url"])
+        assert d.status_code == 200 and d.content[:2] == b"PK", d.status_code
+        assert b.get(res["download_path"]).status_code == 200
 
 
 def test_a_tampered_export_is_not_served(live):
@@ -334,6 +365,12 @@ def test_accept_writes_exact_selectors_and_returns_the_new_etag(live, suggestion
     fig = next(f for f in plan["figures"] if f["id"] == out["added_figures"][0])
     assert fig["members"] == sorted(m["part"] for m in passed["members"])
     assert fig["caption"] == passed["caption"] and fig["kind"] == passed["kind"]
+    # WP2b F5 negative case: the synthetic example's whole-machine candidate passes the gate, so
+    # its 整体结构示意图 (same shape as the upload fallback) is kept.
+    whole = [x for x in j["result"]["candidates"] if x["source"]["kind"] == "whole"]
+    if whole and all(x["status"] == "pass" for x in whole):
+        assert out["removed_default_figure"] is False
+        assert any(f["id"] == "fig1" for f in plan["figures"])
 
 
 # ---- AI 起名接力

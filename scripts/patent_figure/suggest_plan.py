@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from patent_figure import plan as _plan
+from patent_figure import qa as _qa
 
 SCHEMA_ID = "patent-figure-candidates/1"
 
@@ -463,6 +464,17 @@ def _qa_failed(qa: Optional[dict]) -> List[dict]:
     return rows
 
 
+def _for_candidate(action: Optional[dict], candidate: dict) -> Optional[dict]:
+    """A candidate is not in the user's plan yet, so its fix actions point at the CANDIDATE
+    (``target.figure`` = candidate id), never at the trial plan's ``fig1`` — which would name an
+    unrelated figure of the user's own plan (WP2b F4)."""
+    if not isinstance(action, dict):
+        return None
+    target = dict(action.get("target") or {})
+    target["figure"] = str(candidate.get("id"))
+    return {"kind": action.get("kind"), "target": target}
+
+
 _ERROR_ADVICE = {
     "E_LAYOUT_UNSOLVABLE": "一张图放不下这些零件（字太小或图形太扁）：改用分组更小的候选，"
                            "或在 3D 里框选分组；标准件已默认不标号。",
@@ -500,6 +512,7 @@ def verdict(candidate: dict, report: Optional[dict]) -> None:
             len((fig.get("qa") or {}).get("checks") or []), fig.get("text_height_mm"),
             int(fig.get("labels") or 0))
         candidate["suggestion"] = None
+        candidate["fix_action"] = None
         candidate["qa"] = {"pass": True, "failed": [],
                            "text_height_mm": fig.get("text_height_mm"),
                            "labels": fig.get("labels")}
@@ -507,6 +520,8 @@ def verdict(candidate: dict, report: Optional[dict]) -> None:
     candidate["status"] = "fail"
     if fig is not None:
         failed = _qa_failed(fig.get("qa"))
+        for row in failed:                           # WP2b F4: target the CANDIDATE, not fig1
+            row["fix_action"] = _for_candidate(row.get("fix_action"), candidate)
         dropped = sum(int(x) for x in (fig.get("hlr_dropped") or [0, 0]))
         titles = "、".join(r["title_zh"] for r in failed) or ("消隐丢边 %d 条" % dropped)
         candidate["reason"] = "未过闸：%s" % titles
@@ -515,6 +530,8 @@ def verdict(candidate: dict, report: Optional[dict]) -> None:
         candidate["qa"] = {"pass": False, "failed": failed,
                            "text_height_mm": fig.get("text_height_mm"),
                            "labels": fig.get("labels")}
+        candidate["fix_action"] = failed[0]["fix_action"] if failed else \
+            {"kind": "change_view", "target": {"figure": candidate.get("id")}}
         return
     if errs:
         e = errs[0]
@@ -523,10 +540,15 @@ def verdict(candidate: dict, report: Optional[dict]) -> None:
         candidate["detail"] = msg
         candidate["suggestion"] = _ERROR_ADVICE.get(str(e.get("code")),
                                                     "改用分组更小的候选，或在 3D 里框选分组。")
-        candidate["qa"] = {"pass": False, "failed": [], "error_code": e.get("code")}
+        plain = _qa.error_plain_fields(str(e.get("code") or ""), str(candidate.get("id")), msg)
+        candidate["fix_action"] = plain["fix_action"]          # WP2b F4: same table as qa.py
+        candidate["qa"] = {"pass": False, "failed": [], "error_code": e.get("code"),
+                           "title_zh": plain["title_zh"], "hint_plain": plain["hint_plain"],
+                           "fix_action": plain["fix_action"]}
         return
     candidate["reason"] = "渲染没有产出这张图（见日志）"
     candidate["suggestion"] = "重试；仍失败请把日志反馈给维护者。"
+    candidate["fix_action"] = None
 
 
 def run_candidates(doc: dict, *, ws_root: Path, cache: Path, job_id: str, assembly_path: Path,
@@ -559,6 +581,9 @@ def run_candidates(doc: dict, *, ws_root: Path, cache: Path, job_id: str, assemb
                 c["detail"] = "；".join(e["message"] for e in c["plan_errors"][:3])
                 c["suggestion"] = _ERROR_ADVICE.get(c["plan_errors"][0]["code"],
                                                     "改用分组更小的候选，或在 3D 里框选分组。")
+                c["fix_action"] = _qa.error_plain_fields(
+                    c["plan_errors"][0]["code"], str(c.get("id")),
+                    c["plan_errors"][0].get("message", ""))["fix_action"]
                 continue
             current = rids[i]
             out = _pub.render_candidate(ws_root, cache, current, c["_trial_plan"],
@@ -665,6 +690,74 @@ def resolve_members(members: Sequence[Any], assembly: dict, plan: dict,
         for n in group_names:
             take(n, m)
     return sorted(names), bad
+
+
+#: The fallback figure ``plan_studio.blank_plan`` gives every freshly uploaded model (WP2b F5
+#: identifies it by exact equality; a test pins the two together).
+DEFAULT_FIGURE = {"id": "fig1", "caption": "整体结构示意图", "kind": "assembly", "members": ["*"]}
+
+
+def is_default_figure(fig: Any) -> bool:
+    """Is ``fig`` the untouched initial fallback figure (same id, caption, kind, members and no
+    other keys)? A figure the user edited in any way is theirs and never matches."""
+    return isinstance(fig, dict) and fig == DEFAULT_FIGURE
+
+
+def default_figure_inputs(plan: Any, assembly: Any) -> Optional[str]:
+    """Fingerprint (sha256) of everything that decides how the untouched fallback figure renders
+    (WP2b R2b1 #1): the figure, its EFFECTIVE layout (global layout + defaults — view, density,
+    explode axis, angle, label cap, engineering table), the source selection, the assembly, the
+    term rows that match a selected part (position, selector, label mode) and which row governs
+    each member part — i.e. which parts carry numerals, and in what order.
+    Term TEXT is deliberately left out — it is never drawn on the gated figure, so naming parts
+    after a suggestion must not keep a fallback whose failure the suggestion already showed.
+    ``None`` when the plan has no untouched fallback figure (or cannot be read)."""
+    import hashlib
+    if not isinstance(plan, dict) or not isinstance(assembly, dict):
+        return None
+    figs = [f for f in (plan.get("figures") or []) if is_default_figure(f)]
+    if not figs:
+        return None
+    fig = figs[0]
+    try:
+        selected = _plan.selected_part_names(plan, assembly)
+        members = _plan.figure_members(fig, selected)
+        layout = _plan.figure_layout(plan, fig)
+    except Exception:  # noqa: BLE001 — an unreadable plan has no comparable fingerprint
+        return None
+    # Numbering without term text (the numbering module refuses blank terms, and a freshly
+    # uploaded model is all blank): numerals follow the order of the term rows that match a
+    # selected part, so the rows' (position, selector, label) + which row governs each member
+    # pin which parts carry numerals and in what order.
+    rows = _term_rows(plan)
+    live_rows = [[i, str(r.get("selector")), str(r.get("label") or "once")]
+                 for i, r in enumerate(rows)
+                 if isinstance(r.get("selector"), str)
+                 and any(fnmatchcase(n, r["selector"]) for n in selected)]
+    governs = {}
+    for n in members:
+        row = winning_row(plan, n)
+        governs[n] = None if row is None else rows.index(row)
+    src = plan.get("source") if isinstance(plan.get("source"), dict) else {}
+    doc = {"figure": fig, "layout": layout,
+           "source": {"include": src.get("include") or [], "exclude": src.get("exclude") or []},
+           "assembly": (assembly.get("source") or {}).get("sha256", ""),
+           "term_rows": live_rows, "members": governs}
+    return hashlib.sha256(json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                                     default=str).encode("utf-8")).hexdigest()
+
+
+def drop_default_figure(plan: dict) -> bool:
+    """Remove the untouched initial fallback figure from ``plan`` (in place) when at least one
+    other figure remains. Returns True if it was removed (WP2b F5)."""
+    figs = plan.get("figures") if isinstance(plan, dict) else None
+    if not isinstance(figs, list):
+        return False
+    kept = [f for f in figs if not is_default_figure(f)]
+    if len(kept) == len(figs) or not kept:
+        return False
+    plan["figures"] = kept
+    return True
 
 
 def next_figure_id(plan: dict) -> Callable[[], str]:
