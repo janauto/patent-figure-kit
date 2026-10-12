@@ -1,0 +1,68 @@
+# patent-figure-kit 服务器部署（WP4 · T2）：app（工作台，非 root）+ Caddy（自动 HTTPS + Basic Auth）。
+#
+#   cp .env.example .env   # 填域名、token、Basic Auth 用户与密码哈希
+#   docker compose up -d
+#
+# 只支持 linux/amd64。企业私有化：一租户一容器（一份 compose / 一个数据卷 / 一个 token），不在同一实例里混放
+# 多家客户的模型。详见 docs/deploy/server.md。
+name: patent-figure-kit
+
+services:
+  app:
+    image: ${PFK_IMAGE:-patent-figure-kit:local}
+    build:
+      context: .
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      # 浏览器首次进入与 Agent（MCP / REST）共用的后端 token；只放在 .env，不进镜像、不进日志
+      WORKBENCH_TOKEN: ${WORKBENCH_TOKEN:?在 .env 里设置 WORKBENCH_TOKEN（至少 32 个随机字符）}
+      # 对外根地址：导出包下载地址、MCP 地址都以它为准；主机名自动进入允许 Host 列表
+      PFK_PUBLIC_URL: ${PFK_PUBLIC_URL:?在 .env 里设置 PFK_PUBLIC_URL，如 https://pfk.example.com}
+      # 只接受来自 Caddy 的连接（以及容器内回环的健康检查）
+      PFK_TRUSTED_PROXY: ${PFK_PROXY_IP:-172.30.57.10}
+      # 可选：AI 起名通道。不设置 = 不外发任何内容
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      - pfk-data:/data
+    networks:
+      pfk:
+        ipv4_address: ${PFK_APP_IP:-172.30.57.20}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # 后端端口不对宿主机发布：所有访问都经 Caddy
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${PFK_HTTP_PORT:-80}:80"
+      - "${PFK_HTTPS_PORT:-443}:443"
+    environment:
+      PFK_SITE_ADDRESS: ${PFK_SITE_ADDRESS:?在 .env 里设置 PFK_SITE_ADDRESS（你的域名，如 pfk.example.com）}
+      PFK_UPSTREAM: app:8790
+      PFK_BASIC_USER: ${PFK_BASIC_USER:?在 .env 里设置 PFK_BASIC_USER}
+      PFK_BASIC_HASH: ${PFK_BASIC_HASH:?在 .env 里设置 PFK_BASIC_HASH（caddy hash-password 的输出，用单引号括起）}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      pfk:
+        ipv4_address: ${PFK_PROXY_IP:-172.30.57.10}
+
+networks:
+  pfk:
+    ipam:
+      config:
+        - subnet: ${PFK_SUBNET:-172.30.57.0/24}
+
+volumes:
+  pfk-data:
+  caddy-data:
+  caddy-config:

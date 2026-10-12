@@ -1,0 +1,103 @@
+# patent-figure-kit 打包配置（WP4 · T1）。
+#
+# wheel 布局：把仓库树（scripts/ webui/ schemas/ examples/ references/ acceptance/ tests/ docs/openapi.yaml）
+# 原样装进包目录 patent_figure_kit/，所有资源仍按「脚本文件位置」定位，代码零改动；scripts/pfk_cli.py
+# 同时作为包的 __init__.py，提供入口点。webui/dev/（开发脚手架与截图，约 10 MB）不进 wheel。
+#
+# 依赖：核心六项与 requirements-pinned.txt 逐字一致（doctor.py 的 PINNED 表是同一份数据）；
+# Web 工作台与导出包为 extras [web]，版本与 requirements-web.txt 一致。改版本时三处同步。
+# PyPI 不发布（M1 默认）：wheel 走 GitHub Release，受首次外发门禁（架构 §7.4）。
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "patent-figure-kit"
+dynamic = ["version"]
+description = "把 3D 装配体（STEP）变成按 CNIPA 形式要求排版的专利说明书附图：标号、引线、版面由程序确定性计算，本地出图。"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9,<3.13"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "cadquery-ocp==7.7.2",
+    "ezdxf==1.4.2",
+    "numpy==2.0.2",
+    "jsonschema==4.25.1",
+    "matplotlib==3.9.4",
+    "pytest==8.4.2",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi==0.128.8",
+    "uvicorn==0.39.0",
+    "httpx==0.28.1",
+    "openpyxl==3.1.5",
+    "python-docx==1.2.0",
+    "pypdf==6.7.4",
+    "pypdfium2==5.10.1",
+]
+# 验收 N14 跑完整 pytest；openapi 契约测试需要 PyYAML（缺它时那几条会被跳过而不是失败）。
+test = ["pyyaml==6.0.3"]
+
+[project.scripts]
+patent-figure-kit = "patent_figure_kit:start_main"
+pfk = "patent_figure_kit:main"
+
+[project.urls]
+Repository = "https://github.com/janauto/patent-figure-kit"
+
+[tool.hatch.version]
+path = "scripts/pfk_cli.py"
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "scripts",
+    "webui",
+    "schemas",
+    "examples",
+    "references",
+    "acceptance",
+    "tests",
+    "docs/openapi.yaml",
+    "requirements-pinned.txt",
+    "requirements-web.txt",
+    "SKILL.md",
+    "AGENTS.md",
+    "LICENSE",
+]
+exclude = [
+    "webui/dev",
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/.pytest_cache",
+    "**/.DS_Store",
+    "examples/**/*.stp",
+    "examples/**/out",
+]
+
+[tool.hatch.build.targets.wheel.sources]
+"" = "patent_figure_kit"
+
+[tool.hatch.build.targets.wheel.force-include]
+# sources 前缀对 force-include 同样生效，所以这里写包内相对路径。
+"scripts/pfk_cli.py" = "__init__.py"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "webui/dev/screens",
+    "webui/dev/static-site",
+    "static-site",
+]

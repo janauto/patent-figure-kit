@@ -1,0 +1,47 @@
+# patent-figure-kit 反向代理（WP4 · T2）。环境变量由 docker-compose.yml 传入：
+#   PFK_SITE_ADDRESS  站点地址（域名 → 自动申请证书；localhost → Caddy 内部 CA，测试用）
+#   PFK_UPSTREAM      后端地址（compose 里是 app:8790；同机非容器部署可用 127.0.0.1:8790）
+#   PFK_BASIC_USER / PFK_BASIC_HASH   浏览器入口的 Basic Auth（PFK_BASIC_HASH 为 caddy hash-password 输出）
+#
+# 认证分工（与后端不争 Authorization）：
+#   · Agent / MCP：带 "Authorization: Bearer …" 的 /v1/* 与 /mcp 请求直通后端，由后端 token 校验；代理不碰这个头。
+#   · 浏览器：其余一切先过 Basic Auth；转发前删掉 Authorization（Basic 凭据不进后端），后端只认会话 Cookie。
+{
+	admin off
+	skip_install_trust
+}
+
+{$PFK_SITE_ADDRESS} {
+	# 不开 encode：SSE（/v1/jobs/{id}/events）不能被压缩缓冲
+	request_body {
+		max_size 512MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		# 首次进入的 ?token= 不随 Referer 外泄
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	@agent {
+		header Authorization "Bearer *"
+		path /v1/* /mcp /mcp/*
+	}
+	handle @agent {
+		reverse_proxy {$PFK_UPSTREAM} {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		basic_auth {
+			{$PFK_BASIC_USER} {$PFK_BASIC_HASH}
+		}
+		reverse_proxy {$PFK_UPSTREAM} {
+			header_up -Authorization
+			flush_interval -1
+		}
+	}
+}
