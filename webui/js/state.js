@@ -22,7 +22,8 @@ export const state = {
   // 旧版后端兼容模式（legacy）不建立任何证据：导出一律锁定（修复轮 7 架构裁决）。
   renderInputs: { etag: null, version: null, conflict: false },
   rendering: false,
-  candidates: [],       // F2-lite 候选分图
+  candidates: [],       // F2-lite 候选分图（openapi Candidate[]）
+  candidatesJob: null,  // 最近一次候选分图作业 {job_id, state, running, empty_reason, guide, summary, error}
   selection: new Set(), // 零件名集合（plan 以名字寻址，实例不单选）
   activeFigure: null,   // 当前操作的图 id
   saveState: 'clean',   // clean | dirty | saving | saved | error
@@ -128,6 +129,39 @@ export function termFor(name) {
   return null;
 }
 
+// AI 起名「写入空白件」（Codex R3b）：把用户**预览过的**建议写进计划，规则与后端 suggest_plan.fill_blank_terms 一致——
+//   管辖该零件的第一条术语行（发号优先级）已有名称 → kept_human（人填过的不覆盖）；
+//   没有行管辖 → 末尾追加一条精确行 → added；
+//   管辖行只覆盖这一个零件 → 原地填 → filled；
+//   管辖行是共享通配行（还覆盖别的零件）→ 不动它，在它前面插一条精确行（新行优先）→ filled。
+// 写入走普通保存循环（PUT /plan + If-Match），不再让后端重新生成名称。
+const globEscape = (n) => String(n).replace(/[*?[]/g, (c) => `[${c}]`);
+export function fillBlankTerms(plan, rows, names) {
+  const out = { filled: [], kept_human: [], added: [] };
+  plan.terms = plan.terms || [];
+  for (const r of rows || []) {
+    const sel = String(r?.selector || ''); const term = String(r?.term || '').trim();
+    if (!sel || !term) continue;
+    const label = ['once', 'none'].includes(r.label) ? r.label : null;
+    const row = plan.terms.find((t) => typeof t.selector === 'string' && t.selector && globToRegExp(t.selector).test(sel));
+    if (!row) {
+      plan.terms.push({ selector: globEscape(sel), term, label: label || 'once' });
+      out.added.push(sel);
+      continue;
+    }
+    if (String(row.term || '').trim()) { out.kept_human.push(sel); continue; }
+    const covered = (names || []).filter((n) => globToRegExp(row.selector).test(n));
+    if (covered.length === 1 && covered[0] === sel) {
+      row.term = term;
+      if (label) row.label = label;
+    } else {
+      plan.terms.splice(plan.terms.indexOf(row), 0, { selector: globEscape(sel), term, label: label || row.label || 'once' });
+    }
+    out.filled.push(sel);
+  }
+  return out;
+}
+
 // 前端预演的「本图有效标记数」——权威判定永远是服务器 validate；这里只为图卡上的 n/20 徽标。
 export function labelCount(fig) {
   const members = resolveMembers(fig);
@@ -196,14 +230,32 @@ async function doSave() {
     const res = await api.putPlan(state.projectId, state.plan, state.planEtag);
     if (res.etag) state.planEtag = res.etag;
     if (res.validate) { state.validate = res.validate; bus.emit('validate'); }
+    else scheduleValidate();                      // live：PUT 只回 {ok}，校验结果另读（子应用 api/state）
     state.savedVersion = Math.max(state.savedVersion, v);
     state.saveState = (state.editVersion === v) ? 'saved' : 'dirty';
   } catch (err) {
     state.saveState = (err.status === 409 || err.code === 'etag_conflict') ? 'conflict' : 'error';
-    console.error('保存失败', err);
+    // 冲突是已处理的业务状态（顶栏给「重载」），不算程序错误；其它保存失败才记 error
+    if (state.saveState === 'conflict') console.warn('保存冲突（计划已在别处修改）', err.message);
+    else console.error('保存失败', err);
   }
   bus.emit('save-state');
 }
+// live：保存成功后防抖回读服务端校验（validate_figure_plan.py 的结果），不阻塞保存循环
+let validateTimer = null; let validateSeq = 0;
+export function scheduleValidate(ms = 900) {
+  if (api.readOnly || api.isLegacy) return;
+  clearTimeout(validateTimer);
+  validateTimer = setTimeout(async () => {
+    const seq = ++validateSeq; const v = state.savedVersion;
+    try {
+      const val = await api.getValidate(state.projectId);
+      // 期间又保存过（新的回读会覆盖）或有更新的编辑在途：丢弃这次旧结果
+      if (val && seq === validateSeq && v === state.savedVersion) { state.validate = val; bus.emit('validate'); }
+    } catch { /* 校验回读失败不影响保存 */ }
+  }, ms);
+}
+
 // 全局唯一的保存循环：所有 flush() 调用共享同一个 Promise，只有这一个循环负责发送与清理，
 // 杜绝并发 flush 各自发 PUT（同 ETag → 409 / 丢编辑）。循环持续到最新编辑版本已落盘或保存失败。
 //
@@ -248,6 +300,7 @@ export function setActiveFigure(id) {
 
 export async function boot(projectId) {
   state.projectId = projectId;
+  api.setProject(projectId);
   const data = await api.getProject(projectId);
   state.title = data.title;
   state.step = data.step_name;
@@ -255,7 +308,9 @@ export async function boot(projectId) {
   state.render = data.render;
   state.rendering = false;
   state.candidates = data.candidates || [];
+  state.candidatesJob = data.candidates_job || null;
   state.candidatesUnsupported = !!data.candidates_unsupported;   // 旧后端无候选分图
+  state.caps = api.caps || null;
   state.homeUrl = data.home_url || null;
   state.llm = data.llm || null;
   state.structure = data.structure || null;

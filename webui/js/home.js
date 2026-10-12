@@ -1,4 +1,5 @@
-// 首页：工程列表（屏①）与新建/上传（屏②）。对 mock 开发；四态由数据与 ?scene/?upload 开关驱动。
+// 首页：工程列表（屏①）与新建/上传（屏②）。启动先 await api.init()（按能力接口判定 live / legacy，WP3b #1）。
+// 四态由真实数据驱动；?scene / ?upload 是开发截图开关（只有 mock 认 ?scene）。
 import { api, readOnly, isLegacy, token } from './api.js';
 import { applyBrand, DISPLAY_NAME } from './brand.js';
 
@@ -8,10 +9,24 @@ const params = new URLSearchParams(location.search);
 const scene = params.get('scene') || '';          // empty | loading | error | ''
 const keepStatic = params.has('static');
 let cookieSessionOk = false;   // 子应用确认接受 Cookie 会话后，链接不再带 token
-// 导航 URL 保留后端形态：legacy 走正式 /p/{id}/（子应用认 Cookie 前仍需带 token）；live/static 走开发入口。
-const toStudio = (id) => (isLegacy
-  ? `/p/${encodeURIComponent(id)}/${(token && !cookieSessionOk) ? `?token=${encodeURIComponent(token)}` : ''}`
-  : `./index.html?project=${encodeURIComponent(id)}${keepStatic ? '&static' : ''}`);
+// 导航 URL：静态站走开发入口 index.html?project=；live 与 legacy 都走工作台的 /p/{id}/ 子应用。
+// live 只用会话 Cookie，链接不带 token（WP3b #10）；legacy 的旧子应用不认 Cookie，仍随 URL 带 token。
+const toStudio = (id) => {
+  if (readOnly) return `./index.html?project=${encodeURIComponent(id)}${keepStatic ? '&static' : ''}`;
+  if (isLegacy) return `/p/${encodeURIComponent(id)}/${(token && !cookieSessionOk) ? `?token=${encodeURIComponent(token)}` : ''}`;
+  return `${api.root}p/${encodeURIComponent(id)}/`;
+};
+
+function notice(msg, id = 'page-notice') {
+  let bar = document.getElementById(id);
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = id; bar.className = 'page-notice'; bar.setAttribute('role', 'status');
+    document.body.prepend(bar);
+  }
+  bar.innerHTML = `<span>${esc(msg)}</span><button class="icon-btn" aria-label="关闭提示">✕</button>`;
+  bar.querySelector('button').addEventListener('click', () => bar.remove());
+}
 
 applyBrand();
 
@@ -28,13 +43,13 @@ applyBrand();
   });
 })();
 
-function toast(msg, kind = '') {
+function toast(msg, kind = '', ms = 3600) {
   const box = $('#toast');
   box.className = `toast ${kind}`;
   box.textContent = msg;
   box.hidden = false;
   clearTimeout(box._t);
-  box._t = setTimeout(() => { box.hidden = true; }, 3600);
+  box._t = setTimeout(() => { box.hidden = true; }, ms);
 }
 
 // ---------------------------------------------------------------- AI 徽标（中性，不报错）
@@ -129,12 +144,34 @@ function emptyState() {
   $('#empty-nostep').addEventListener('click', () => $('#dlg-nostep').showModal());
 }
 
-function errorState(msg, hint) {
+function errorState(msg, hint, code) {
+  // 401：新版工作台但还没有会话——不是「连接失败」，给出从终端完整地址进入的引导（WP3 接线清单 #4）
+  if (code === 'auth_required') {
+    $('#grid').innerHTML = `<div class="banner error" role="alert" id="auth-required">
+      <div><b>需要 token</b><p class="muted">这个工作台只接受本机会话。请从终端启动日志里打印的完整地址进入一次
+      （形如 <span class="mono">http://127.0.0.1:端口/?token=…</span>），之后浏览器会记住会话，链接里不再需要 token。</p>
+      <p class="hint">终端里找不到？重新运行 <span class="mono">python3 scripts/workbench.py</span>，它会打印完整地址。</p></div>
+      <button class="btn" id="retry">我已从完整地址进入，重试</button></div>`;
+    $('#retry').addEventListener('click', () => location.reload());
+    return;
+  }
   $('#grid').innerHTML = `<div class="banner error" role="alert">
     <div><b>连接不上工作台服务</b><p class="muted">${esc(msg)}</p>
     ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}</div>
     <button class="btn" id="retry">重试</button></div>`;
-  $('#retry').addEventListener('click', loadList);
+  $('#retry').addEventListener('click', retryConnect);
+}
+
+// 重试：重新探测能力接口（清掉上次的探测错误与缓存的 init），恢复后再取列表（Codex R3b）。
+// 重新探测得出的模式若变了（例如原来连不上、现在是旧后端），整页重载，让各模块按新模式初始化。
+async function retryConnect() {
+  const before = api.mode;
+  $('#grid').innerHTML = '';
+  skeletonGrid();
+  const mode = await api.reprobe();
+  if (mode !== before && before !== 'pending') { location.reload(); return; }
+  if (api.authRequired) { errorState('需要 token', '', 'auth_required'); return; }
+  await loadList();
 }
 
 function renderGrid(data) {
@@ -163,42 +200,74 @@ function bindGrid() {
       }
     }));
   }
-  document.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
-    if (window.confirm('删除这个工程？本机的工程目录（含出图结果）会一起删除。')) {
-      toast('（演示）已请求删除 ' + b.dataset.del);
-    }
+  document.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+    if (!window.confirm('删除这个工程？本机的工程目录（含出图结果）会一起删除。')) return;
+    try {
+      const r = await api.deleteProject(b.dataset.del);
+      if (r?.demo) toast('（演示）mock 不删除工程：' + b.dataset.del);
+      else { toast('已删除工程', 'ok'); loadList(); }
+    } catch (err) { toast('删除失败：' + (err.hint || err.message), 'bad'); }
   }));
 }
 
 async function loadList() {
   if (scene === 'loading') { skeletonGrid(); return; }
+  if (!cachedProjects.length) skeletonGrid();          // 真实加载态：列表回来之前先给骨架
   try {
     const data = await api.listProjects(scene);
     if (data.loading) { skeletonGrid(); return; }
     renderGrid(data);
   } catch (err) {
-    errorState(err.message, err.hint);
+    errorState(err.message, err.hint, err.code);
   }
 }
 
 // ---------------------------------------------------------------- ② 上传 / 新建
+// 时间线按后端作业的阶段走（WP3b #11）：新建 / 示例作业（stage = from-example / prepare）→ 自动接一个候选分图
+// 作业（stage = suggest，标签「生成候选分图」「试渲染候选 k/N：图题」）。每步耗时在前端按阶段切换实测。
 const UPLOAD_STAGES = [
-  ['接收', '接收 STEP 文件'],
-  ['解析', '解析装配层级'],
-  ['网格', '生成 3D 网格（GLB）'],
-  ['候选分图', '按结构给候选分图'],
-  ['试渲染', '逐候选试渲染并过 QA'],
+  ['receive', '接收 STEP 文件'],
+  ['prepare', '解析装配层级并生成 3D 网格'],
+  ['suggest', '按结构生成候选分图'],
+  ['trial', '逐候选试渲染并过 QA'],
 ];
-let uploadSub = null;
+// 每次导入一个独立的生命周期（Codex R3b）：它自己的 SSE 订阅、定时器与回调都挂在这里；关闭对话框、回到新建页
+// 或开始下一次导入时整体作废——旧导入迟到的事件 / 轮询结果一律不再绘制、不再关别人的订阅、不再起候选作业。
+let currentImport = null;
+let importGen = 0;          // 发起导入的代次：创建请求在途期间关闭或换了导入，回来的结果不再接管界面
+function newImport() {
+  if (currentImport) currentImport.dispose();
+  const imp = {
+    alive: true, subs: new Set(), timers: new Set(),
+    track(sub) { if (!this.alive) { try { sub.close(); } catch { /* */ } } else this.subs.add(sub); return sub; },
+    untrack(sub) { try { sub?.close(); } catch { /* */ } this.subs.delete(sub); },
+    every(fn, ms) { const t = setInterval(() => { if (this.alive) fn(); }, ms); this.timers.add(t); return t; },
+    clear(t) { clearInterval(t); this.timers.delete(t); },
+    dispose() {
+      this.alive = false;
+      this.subs.forEach((sub) => { try { sub.close(); } catch { /* */ } });
+      this.subs.clear();
+      this.timers.forEach((t) => clearInterval(t));
+      this.timers.clear();
+    },
+  };
+  currentImport = imp;
+  return imp;
+}
+function abandonImport() {
+  importGen += 1;
+  if (currentImport) { currentImport.dispose(); currentImport = null; }
+}
 
 function openUpload() { $('#upload').hidden = false; }
 function closeUpload() {
   $('#upload').hidden = true;
-  if (uploadSub) { uploadSub.close(); uploadSub = null; }
+  abandonImport();
 }
 
 function openUploadIdle(dragging) {
   if (readOnly) { toast('静态演示站只读，无法新建工程', ''); return; }
+  abandonImport();                       // 回到新建页：之前那次导入不再占用这块界面
   openUpload();
   $('#upload-body').innerHTML = `
     <div class="up-drop ${dragging ? 'over' : ''}" id="up-drop">
@@ -212,7 +281,8 @@ function openUploadIdle(dragging) {
     </div>
     <div class="up-form">
       <label class="field">工程名称 <input id="up-title" placeholder="默认取文件名，如：回转机构"></label>
-      <label class="switch"><input type="checkbox" id="up-ai" checked> 上传后立即跑 AI 结构识别</label>
+      ${api.caps?.ai?.configured ? `<p class="hint" id="up-ai-note">已接入 AI：解析完成后工作台会在后台用 AI 识别结构，
+        会把零件清单（零件名、尺寸、装配路径）发给 ${esc(api.caps.ai.provider_label || '大模型通道')}；几何模型不出本机。</p>` : ''}
       <div class="up-or"><span>没有自己的 STEP？</span>
         <button class="btn" id="up-ex-gearbox">示例 · 行星齿轮减速器</button>
         <button class="btn" id="up-ex-vise">示例 · 台虎钳</button>
@@ -238,52 +308,152 @@ function openUploadIdle(dragging) {
   $('#up-ex-valve').addEventListener('click', () => startExample('valve'));
 }
 
-function uploadTimeline(active, stages, { failed, done, title } = {}) {
-  const rows = UPLOAD_STAGES.map(([name, label], i) => {
-    const s = stages[i];
-    let cls = 'wait'; let mark = '<i class="step-dot"></i>'; let meta = '';
-    if (s && s.ok) { cls = 'ok'; mark = '<i class="step-dot ok">✓</i>';
-      meta = `<span class="mono step-sec">${s.seconds.toFixed(2)}s</span>`; }
-    else if (s && !s.ok) { cls = 'fail'; mark = '<i class="step-dot fail">✕</i>'; }
-    else if (i === active) { cls = 'run'; mark = '<i class="spin"></i>'; }
-    let detail = label;
-    if (name === '解析' && s && s.ok) detail = '解析装配层级 · 15 零件 / 4 子装配';
-    if (name === '候选分图' && s && s.ok) detail = '按结构给候选分图 · 2 个候选';
-    return `<li class="step ${cls}">${mark}
-      <span class="step-label">${detail}</span>${meta}</li>`;
+// tl = {title, stages[{state: wait|run|ok|fail, seconds, detail}], failed?, done?, summary?, note?, t0}
+function uploadTimeline(tl) {
+  const rows = UPLOAD_STAGES.map(([key, label], i) => {
+    const s = tl.stages[i] || { state: 'wait' };
+    let mark = '<i class="step-dot"></i>'; let meta = '';
+    if (s.state === 'ok') { mark = '<i class="step-dot ok">✓</i>'; meta = `<span class="mono step-sec">${(s.seconds || 0).toFixed(2)}s</span>`; }
+    else if (s.state === 'fail') mark = '<i class="step-dot fail">✕</i>';
+    else if (s.state === 'run') mark = '<i class="spin"></i>';
+    const label2 = (i === 0 && tl.example) ? '准备示例工程' : label;
+    return `<li class="step ${s.state === 'run' ? 'run' : s.state}" data-step="${key}">${mark}
+      <span class="step-label">${esc(s.detail || label2)}</span>${meta}</li>`;
   }).join('');
+  const secs = tl.t0 ? Math.max(0, (Date.now() - tl.t0) / 1000) : 0;
   return `<div class="up-progress">
-    <h2 class="up-title">${esc(title || '新建工程')}</h2>
+    <h2 class="up-title">${esc(tl.title || '新建工程')}</h2>
     <ol class="steps">${rows}</ol>
-    ${failed ? `<div class="banner error">
-        <div><b>${esc(failed.label)}失败</b><p class="hint">${esc(failed.hint || '')}</p></div>
-        <button class="btn" id="up-retry">重试</button></div>`
-      : done ? `<div class="up-done">
-        <p class="ok-line"><span class="stamp-ok">完成</span>解析与候选分图就绪。</p>
+    ${tl.failed ? `<div class="banner error" role="alert">
+        <div><b>${esc(tl.failed.label)}失败</b><p class="hint">${esc(tl.failed.hint || '')}</p></div>
+        ${tl.failed.canEnter ? '<button class="btn" id="up-enter">仍然进入规划台 →</button>' : '<button class="btn" id="up-retry">重试</button>'}</div>`
+      : tl.done ? `<div class="up-done">
+        <p class="ok-line"><span class="stamp-ok">完成</span>${esc(tl.summary || '解析与候选分图就绪。')}</p>
         <button class="btn primary big" id="up-enter">进入规划台 →</button></div>`
-      : `<p class="hint up-running-hint">正在处理，可稍候；每步耗时实时显示。</p>`}</div>`;
+      : `<p class="hint up-running-hint" id="up-elapsed">正在处理（已用 <span class="mono">${secs.toFixed(0)}</span> 秒）。${esc(tl.note || '每步耗时实时显示。')}</p>`}</div>`;
 }
 
-function runImportJob(jobId, projectId, title) {
+// 一条完整的导入流水线：作业 A（新建 / 示例）→ 作业 B（候选分图），共用一条时间线。
+// 所有回调先看 imp.alive：这次导入被作废后（关闭 / 换导入），迟到的事件与轮询结果直接丢弃。
+function runImportJob(jobId, projectId, title, { example = false, uploadSeconds = null } = {}) {
+  const imp = newImport();
   openUpload();
-  const stages = [];
-  let active = 0;
-  const paint = (extra) => { $('#upload-body').innerHTML = uploadTimeline(active, stages, { title, ...extra }); bindUploadRun(projectId, title); };
+  const tl = { title, example, stages: [], t0: Date.now(), stageT0: Date.now(),
+    note: example ? '首次载入示例要现场生成演示模型 STEP 并解析，视机器性能需要几秒到一分钟；之后再载入只需几秒。' : '' };
+  const setRun = (i, detail) => {
+    for (let k = 0; k < i; k += 1) {
+      if (tl.stages[k]?.state !== 'ok') tl.stages[k] = { state: 'ok', seconds: (Date.now() - tl.stageT0) / 1000 };
+    }
+    if (tl.stages[i]?.state !== 'run') tl.stageT0 = Date.now();
+    tl.stages[i] = { state: 'run', detail: detail || tl.stages[i]?.detail };
+  };
+  const setOk = (i, detail) => {
+    tl.stages[i] = { state: 'ok', seconds: (Date.now() - tl.stageT0) / 1000, detail };
+    tl.stageT0 = Date.now();
+  };
+  const paint = () => {
+    if (!imp.alive) return;
+    $('#upload-body').innerHTML = uploadTimeline(tl);
+    bindUploadRun(projectId, title);
+  };
+  if (uploadSeconds != null) tl.stages[0] = { state: 'ok', seconds: uploadSeconds };
+  setRun(uploadSeconds != null ? 1 : 0);
   paint();
-  uploadSub = api.jobEvents(jobId, {
+  const elapsed = imp.every(() => {
+    const el = document.querySelector('#up-elapsed .mono');
+    if (el) el.textContent = ((Date.now() - tl.t0) / 1000).toFixed(0);
+  }, 1000);
+  const stop = () => imp.clear(elapsed);
+  const failAt = (i, d, canEnter) => {
+    if (!imp.alive) return;
+    stop();
+    tl.stages[i] = { state: 'fail', detail: tl.stages[i]?.detail };
+    tl.failed = { label: UPLOAD_STAGES[i][1], hint: [d?.message, d?.hint].filter(Boolean).join('——'), canEnter };
+    paint();
+  };
+  const startSuggest = async () => {
+    if (!imp.alive) return;
+    setOk(1); setRun(2, '按结构生成候选分图'); paint();
+    let sj;
+    try { sj = await api.suggest(projectId, false); } catch (err) { failAt(2, err, true); return; }
+    if (!imp.alive) return;
+    let settled = false; let subB = null;
+    const finish = async (ok, d) => {
+      if (settled || !imp.alive) return; settled = true;
+      imp.untrack(subB);
+      if (!ok) { failAt(tl.stages[3]?.state === 'run' ? 3 : 2, d, true); return; }
+      let summary = '';
+      try {
+        const c = await api.getCandidates(projectId);
+        const s = c?.summary || {};
+        summary = c?.empty_reason
+          ? `候选分图完成：${s.total ?? 0} 个候选都没过闸——进入后请框选分组。`
+          : `候选分图完成：${s.total ?? 0} 个候选，${s.pass ?? 0} 个过闸。`;
+      } catch { /* 摘要读不到不影响进入 */ }
+      if (!imp.alive) return;
+      if (tl.stages[2]?.state !== 'ok') setOk(2);
+      setOk(3, tl.stages[3]?.detail ? '逐候选试渲染并过 QA' : undefined);
+      stop(); tl.done = true; tl.summary = summary; paint();
+    };
+    subB = imp.track(api.jobEvents(sj.job_id, {
+      stage(d) {
+        if (!imp.alive) return;
+        const label = d.label || '';
+        if (/^试渲染候选/.test(label)) { if (tl.stages[2]?.state !== 'ok') setOk(2); setRun(3, label); }
+        else if (label && label !== 'running') setRun(2, label);
+        paint();
+      },
+      done() { finish(true); },
+      fail(d) { finish(false, d); },
+      disconnect() {
+        api.getJob(sj.job_id).then((j) => {
+          if (j.state === 'succeeded') finish(true);
+          else if (['failed', 'cancelled', 'interrupted'].includes(j.state)) finish(false, j.error || { message: j.state });
+        }).catch(() => { /* 等重连 */ });
+      },
+    }));
+  };
+  let settledA = false; let subA = null; let watch = null;
+  const doneA = () => {
+    if (settledA || !imp.alive) return; settledA = true;
+    imp.clear(watch); imp.untrack(subA);
+    startSuggest();
+  };
+  const failA = (d) => {
+    if (settledA || !imp.alive) return; settledA = true;
+    imp.clear(watch); imp.untrack(subA);
+    failAt(tl.stages[1]?.state === 'run' ? 1 : 0, d, false);
+  };
+  // 准备作业要等工程「就绪且没有后台消息」才算完成；已接入 AI 时这包括后台结构识别。识别失败时后端把失败原因
+  // 留在工程消息里，作业会一直等到 30 分钟超时——这里同时看工程摘要：已就绪且消息是「…未完成」就照常往下走，
+  // 并把原因告诉用户（结构识别是可选的，不挡金路径）。
+  watch = imp.every(async () => {
+    if (settledA) return;
+    let p;
+    try { p = (await api.getSummary(projectId)) || null; } catch { return; }
+    if (!p || settledA || !imp.alive) return;
+    if (p.status === 'ready' && p.message) {
+      tl.stages[1] = { ...(tl.stages[1] || {}), state: 'run', detail: p.message };
+      paint();
+      if (/未完成/.test(p.message)) { toast(p.message, '', 6000); doneA(); }
+    }
+  }, 2500);
+  subA = imp.track(api.jobEvents(jobId, {
     stage(d) {
-      if (d.stage === 'queued') return;
-      const idx = UPLOAD_STAGES.findIndex(([n]) => n === d.stage);
-      if (idx >= 0) { stages[idx] = { ok: true, seconds: d.seconds || 0 }; active = idx + 1; }
+      if (!imp.alive) return;
+      if (d.stage === 'from-example') setRun(0, d.label || '生成演示模型 STEP');
+      else if (d.stage === 'prepare') setRun(1, d.label || UPLOAD_STAGES[1][1]);
       paint();
     },
-    fail(d) {
-      const idx = UPLOAD_STAGES.findIndex(([n]) => n === d.stage);
-      if (idx >= 0) stages[idx] = { ok: false };
-      paint({ failed: { label: UPLOAD_STAGES[idx]?.[1] || d.stage, hint: d.hint } });
+    done() { doneA(); },
+    fail(d) { failA(d); },
+    disconnect() {
+      api.getJob(jobId).then((j) => {
+        if (j.state === 'succeeded') doneA();
+        else if (['failed', 'cancelled', 'interrupted'].includes(j.state)) failA(j.error || { message: j.state });
+      }).catch(() => { /* 等重连 */ });
     },
-    done() { active = UPLOAD_STAGES.length; paint({ done: true }); },
-  });
+  }));
 }
 
 function bindUploadRun(projectId, title) {
@@ -308,18 +478,22 @@ async function startUpload(file, titleOverride) {
   if (err0) { toast(err0, 'bad'); return; }
   pendingFile = file;
   const title = (titleOverride || $('#up-title')?.value?.trim() || file.name.replace(/\.(stp|step)$/i, ''));
-  const ai = $('#up-ai') ? $('#up-ai').checked : pendingAi;
-  pendingTitle = title; pendingAi = ai;
+  const ai = pendingAi;
+  pendingTitle = title;
+  const t0 = Date.now();
+  const gen = ++importGen;
   try {
     const res = await api.createProject({ file, title, ai }, params.get('fail'));
+    if (gen !== importGen) return;          // 请求在途期间对话框已关闭或换了导入：不再接管界面
     if (isLegacy) {                 // 旧后端：后台解析，回列表轮询到就绪
       closeUpload(); pendingFile = null;
       toast(`已上传「${title}」，正在后台解析，就绪后可打开`, 'ok');
       loadList();
       return;
     }
-    runImportJob(res.job_id, res.project_id, title);
+    runImportJob(res.job_id, res.project_id, title, { uploadSeconds: (Date.now() - t0) / 1000 });
   } catch (err) {                   // 不引用 try 内局部；用保存的上下文让重试可点
+    if (gen !== importGen) return;
     openUpload();
     $('#upload-body').innerHTML = `<div class="up-progress"><h2 class="up-title">${esc(title)}</h2>
       <div class="banner error"><div><b>上传失败</b><p class="hint">${esc(err.hint || err.message)}</p></div>
@@ -336,29 +510,31 @@ async function startExample(ex) {
     toast('示例工程正在准备，请稍候刷新', '');
     return;
   }
+  const gen = ++importGen;
   try {
     const res = await api.fromExample(ex);
+    if (gen !== importGen) return;          // 请求在途期间对话框已关闭或换了导入
     const title = { gearbox: '行星齿轮减速器', vise: '台虎钳', valve: '球阀' }[ex];
-    runImportJob(res.job_id, res.project_id, `载入示例 · ${title}`);
-  } catch (err) { toast('载入示例失败：' + (err.hint || err.message), 'bad'); }
+    runImportJob(res.job_id, res.project_id, `载入示例 · ${title}`, { example: true });
+  } catch (err) { if (gen === importGen) toast('载入示例失败：' + (err.hint || err.message), 'bad'); }
 }
 
-// 四态截图用：?upload=idle|running|done|fail 强制冻结上传屏
+// 四态截图用（仅开发）：?upload=idle|running|done|fail 强制冻结上传屏
 function forceUpload(mode) {
   openUpload();
-  const full = UPLOAD_STAGES.map((_, i) => ({ ok: true, seconds: [0.41, 1.63, 1.22, 0.88, 1.42][i] }));
   if (mode === 'idle') return openUploadIdle();
+  const ok = (seconds, detail) => ({ state: 'ok', seconds, detail });
   if (mode === 'running') {
-    const partial = full.slice(0, 2);
-    $('#upload-body').innerHTML = uploadTimeline(2, partial, { title: '载入示例 · 行星齿轮减速器' });
+    $('#upload-body').innerHTML = uploadTimeline({ title: '载入示例 · 行星齿轮减速器', example: true, t0: Date.now() - 19000,
+      stages: [ok(14.2), ok(3.1), ok(0.4), { state: 'run', detail: '试渲染候选 3/6：行星架组件分解示意图' }] });
   } else if (mode === 'done') {
-    $('#upload-body').innerHTML = uploadTimeline(5, full, { title: '载入示例 · 行星齿轮减速器', done: true });
+    $('#upload-body').innerHTML = uploadTimeline({ title: '载入示例 · 行星齿轮减速器', example: true, done: true,
+      summary: '候选分图完成：6 个候选，4 个过闸。', stages: [ok(14.2), ok(3.1), ok(0.4), ok(6.9)] });
     bindUploadRun('gearbox');
   } else if (mode === 'fail') {
-    const partial = [full[0], { ok: false }];
-    $('#upload-body').innerHTML = uploadTimeline(1, partial, {
-      title: '（我的）液压夹具',
-      failed: { label: '解析装配层级', hint: 'STEP 顶层只有 1 个实体，未解析出零件——请确认导出的是装配体而非单件。' } });
+    $('#upload-body').innerHTML = uploadTimeline({ title: '（我的）液压夹具', t0: Date.now() - 4000,
+      stages: [ok(0.41), { state: 'fail' }],
+      failed: { label: '解析装配层级并生成 3D 网格', hint: '工程准备失败：STEP 顶层只有 1 个实体，未解析出零件——请确认导出的是装配体而非单件。' } });
   }
 }
 
@@ -514,9 +690,16 @@ function showCompatBadge() {
 }
 
 async function start() {
+  await api.init();
+  api.onDeprecation((msg) => notice(msg, 'auth-notice'));
   showCompatBadge();
   initDialogs();
   if (readOnly) document.body.classList.add('is-static');
+  if (api.mode === 'live') {                       // 接入对话框写真实地址（不含 token）
+    const mcp = $('#mcp-url'); if (mcp) mcp.value = `${location.origin}${api.root}mcp`;
+    const ta = document.querySelector('#dlg-integrate textarea');
+    if (ta) ta.value = ta.value.replaceAll('http://127.0.0.1:8803/', `${location.origin}${api.root}`);
+  }
   await loadList();
   tidyToken();
   const up = params.get('upload');

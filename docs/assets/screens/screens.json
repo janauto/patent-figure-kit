@@ -1,0 +1,140 @@
+[
+ {
+  "file": "01-home-empty.png",
+  "screen": "① 工程列表",
+  "state": "空",
+  "how": "全新数据目录（--no-example），首页真实空态"
+ },
+ {
+  "file": "01-home-loading.png",
+  "screen": "① 工程列表",
+  "state": "加载",
+  "how": "GET /v1/projects 返回前的骨架屏（请求在浏览器里挂起后放行）"
+ },
+ {
+  "file": "01-home-success.png",
+  "screen": "① 工程列表",
+  "state": "成功",
+  "how": "三个公开示例工程（真实出图缩略图）"
+ },
+ {
+  "file": "01-home-error.png",
+  "screen": "① 工程列表",
+  "state": "失败",
+  "how": "没有会话：后端 401 → 「需要 token，从终端完整地址进入」引导"
+ },
+ {
+  "file": "02-upload-empty.png",
+  "screen": "② 新建与上传",
+  "state": "空",
+  "how": "新建工程：拖放区 + 三个示例入口"
+ },
+ {
+  "file": "02-upload-loading.png",
+  "screen": "② 新建与上传",
+  "state": "加载",
+  "how": "上传真实 STEP 后的分阶段时间线（作业运行中，含已用秒数）"
+ },
+ {
+  "file": "02-upload-success.png",
+  "screen": "② 新建与上传",
+  "state": "成功",
+  "how": "解析 + 候选分图 + 逐候选试渲染完成，给出候选过闸数"
+ },
+ {
+  "file": "02-upload-fail.png",
+  "screen": "② 新建与上传",
+  "state": "失败",
+  "how": "上传一个不是 STEP 的文件：后端准备作业失败，时间线标红并给原因"
+ },
+ {
+  "file": "03-plan-empty.png",
+  "screen": "③ 规划台",
+  "state": "空",
+  "how": "候选全部被拦：后端 empty_reason + 「请框选分组」三步引导"
+ },
+ {
+  "file": "03-plan-loading.png",
+  "screen": "③ 规划台",
+  "state": "加载",
+  "how": "可交互骨架先到：零件树与候选已就绪，3D 模型（GLB）仍在载入"
+ },
+ {
+  "file": "03-plan-success.png",
+  "screen": "③ 规划台",
+  "state": "成功",
+  "how": "结构树 ↔ 3D ↔ 候选分图（每个候选都已试渲染并过 QA）"
+ },
+ {
+  "file": "03-plan-fail.png",
+  "screen": "③ 规划台",
+  "state": "失败",
+  "how": "3D 模型取不到（GLB 503）：视口给出原因与重试，其余面板照常可用"
+ },
+ {
+  "file": "04-qa-empty.png",
+  "screen": "④ 出图与 QA",
+  "state": "空",
+  "how": "上传后还没出过图：渲染入口；计划还没过校验（零件未起名）时给白话提示并直达术语页"
+ },
+ {
+  "file": "05-export-empty.png",
+  "screen": "⑤ 导出",
+  "state": "空",
+  "how": "还没有过闸的出图：导出锁定并指向「出图与 QA」"
+ },
+ {
+  "file": "04-qa-loading.png",
+  "screen": "④ 出图与 QA",
+  "state": "加载",
+  "how": "渲染作业已提交（202）并在后端运行：页面显示进度、禁用再次出图（截图时把该作业的 SSE 在浏览器里挂起，拍完放行）"
+ },
+ {
+  "file": "04-qa-success.png",
+  "screen": "④ 出图与 QA",
+  "state": "成功",
+  "how": "13 项 QA 全过：盖章总览 + 点阵 + 预览（预览 URL 绑定版本 ?v=<rid>）"
+ },
+ {
+  "file": "04-qa-fail.png",
+  "screen": "④ 出图与 QA",
+  "state": "失败",
+  "how": "本次出图未过闸：作业诊断 + 白话原因 + 修复直达；预览 / 导出仍是上一成功版本"
+ },
+ {
+  "file": "05-export-loading.png",
+  "screen": "⑤ 导出",
+  "state": "加载",
+  "how": "打包中：生成 PDF / Word / 源文件并逐页核验（导出作业 SSE 进度）"
+ },
+ {
+  "file": "05-export-success.png",
+  "screen": "⑤ 导出",
+  "state": "成功",
+  "how": "附图包完成：逐「版本 × 格式」清单、逐页核验报告、逐图明细、CNIPA 旁注、下载"
+ },
+ {
+  "file": "05-export-fail.png",
+  "screen": "⑤ 导出",
+  "state": "失败",
+  "how": "缺 pypdfium2：PDF「未核验」并写明原因、不报完成，文件在包内 _未通过核验/"
+ },
+ {
+  "file": "x1-ai-outbound.png",
+  "screen": "补充",
+  "state": "AI 外发确认",
+  "how": "AI 起名外发前明示 outbound_fields（e2e 假通道，不连真实大模型）"
+ },
+ {
+  "file": "x2-export-conservative.png",
+  "screen": "补充",
+  "state": "保守版心提示",
+  "how": "导出屏：格式 / 版心 / CNIPA 旁注；选保守版心时提示字高风险"
+ },
+ {
+  "file": "x3-auth-deprecated.png",
+  "screen": "补充",
+  "state": "旧式 ?token= 链接",
+  "how": "据 Deprecation 头提示弃用，已换成会话 Cookie 并抹掉地址栏 token"
+ }
+]

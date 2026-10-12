@@ -297,3 +297,8 @@ body.is-static .hbar-tools [data-open] { display: none; }
 /* 旧版后端兼容模式（开发用，不随产品发布）的中性提示 */
 .compat-badge { font: var(--t-caption); color: var(--ink-muted); border: 1px solid var(--hair-strong); border-radius: var(--r-1);
   padding: 2px 8px; white-space: nowrap; }
+
+/* WP3b：鉴权弃用提示条 */
+.page-notice { display: flex; align-items: center; gap: var(--s-3); padding: 8px 16px; font: var(--t-body-sm);
+  background: var(--warn-bg); color: var(--ink-1); border-bottom: 1px solid var(--hair-strong); }
+.page-notice span { flex: 1; }
