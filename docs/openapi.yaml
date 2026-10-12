@@ -338,6 +338,12 @@ components:
             precision: {type: number, description: 渲染墨迹在 2 px 内对得上源图墨迹的占比}
             caption_iou: {type: number, nullable: true}
             background_nonwhite: {type: number}
+        render_unverified:
+          type: string
+          nullable: true
+          description: >
+            R2l：独立渲染器自身出错（重试 1 次后仍失败）或渲染比对无法完成时的原因。这不是对文件内容的判定：
+            没有其他不通过项时整份 PDF 为 status=unverified（不是 ok，也不是 fail）
     DocumentCheck:
       description: 对写出的 PDF / Word 文件本身逐页核验（deliverable_check），不信任写出端自报。
       type: object

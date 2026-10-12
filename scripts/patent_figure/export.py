@@ -102,8 +102,10 @@ def _nonempty(path: Path) -> bool:
 
 
 def _png(src_dxf: Path, png: Path, dpi: int) -> None:
+    from patent_figure import deliverable as _D
     from patent_figure import sheet as _sheet       # matplotlib is imported lazily inside
-    _sheet.render_preview(src_dxf, png, dpi=dpi)
+    with _D.MPL_LOCK:                               # R2l: matplotlib is not thread-safe
+        _sheet.render_preview(src_dxf, png, dpi=dpi)
 
 
 def write_docx(pngs: Sequence[Path], path: Path) -> None:

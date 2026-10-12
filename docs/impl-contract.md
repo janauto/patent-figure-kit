@@ -2573,3 +2573,20 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   记录为准。`GET /v1/exports/{id}/download` 先校验封口（封口记录摘要、逐文件摘要、无多余文件），不符 → 409，不提供下载。
   包内《核验报告.json》新增 `authority`：「以服务端封口记录为准」。CLI `export_figure_package.py` 与旧 Plan Studio 导出
   不经服务端作业，不写封口（前者的 `--json` 输出含 `sha256`）。
+
+### 14.19 修复轮 12（Codex R2l）：渲染器与 matplotlib 的进程级互斥；渲染器出错 = 未核验
+
+- **问题**：每个导出作业在自己的线程里跑，`_render_gray` 直接打开 / 渲染 / 关闭 PDFium 文档，没有互斥；pypdfium2 明令禁止
+  不同线程同时调用 PDFium（即使是不同文档）。本机复现：8 线程 × 60 次渲染无锁时约 43% 报 `PdfiumError: Failed to load page`，
+  合法交付被判失败。自查同类：matplotlib 也不是线程安全的，并发导出时写 PDF 随机报「生成失败：cmap」。
+- **互斥**：`deliverable_check._RENDER_LOCK`（模块级 `threading.Lock`）覆盖 PDFium / PyMuPDF 的整个使用过程——打开、渲染、
+  把像素**复制**出位图（`np.array(..., copy=True)`，不再持有指向位图缓冲区的视图）、关闭位图 / 页面 / 文档。
+  `deliverable.MPL_LOCK`（模块级 `threading.RLock`）覆盖导出链路上 matplotlib 的全部使用：`rasterize`（写出端与核验端
+  同一函数）、`write_pdf`、导出 PNG 预览。两把锁从不嵌套。跨进程并发不在本轮范围（服务在进程内渲染；若将来需要，改为独立
+  渲染子进程）。
+- **渲染器出错 ≠ 内容不通过**：渲染失败重试 1 次（`RENDER_ATTEMPTS = 2`）；仍失败（或渲染比对本身无法完成）→ 该页记
+  `render_unverified` 原因，不计为页面错误；整份文件没有其他不通过项时 `status=unverified`（原因「独立渲染器出错，无法核验
+  可见性」），导出清单项 `unverified`、导出 `ok=false`——不是 `fail`；有真实内容不通过项时仍为 `fail`，渲染器原因一并列出。
+- **回归**：8 线程 × 60 次渲染无错误、位图逐像素一致；8 个导出作业并发（各自线程，PDF + Word，独立渲染核验）全部通过；
+  渲染器每次都抛错 → `unverified`（每页恰好尝试 2 次），只错一次 → 重试后通过，72 dpi 的真实不通过文件仍为 `fail`；导出层
+  渲染器出错 → PDF 项 `unverified`、Word 不受影响。

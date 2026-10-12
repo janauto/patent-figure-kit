@@ -1389,3 +1389,125 @@ def test_export_directory_is_sealed_with_its_report(tmp_path, monkeypatch):
     (exp / "seal.json").write_text((exp / "seal.json").read_text(encoding="utf-8") + " ",
                                    encoding="utf-8")
     assert any("封口记录" in e for e in EX.verify_export_seal(exp, seal["sha256"]))
+
+
+# --------------------------------------------------------------------------- R2l: concurrency
+
+
+def test_concurrent_renders_are_serialised(two):
+    """R2l: PDFium must not be entered from two threads at once (pypdfium2 forbids it; without
+    a lock 8 threads × 60 renders fail ~40 % with "Failed to load page"). The process-wide lock
+    covers open → render → pixel copy → close: 8 threads × 60 renders, no error, every bitmap
+    identical."""
+    pytest.importorskip("pypdfium2")
+    import threading
+    import numpy as np
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    ref = C._render_gray(good, 1, 36, "pypdfium2")
+    errors, mismatched = [], []
+
+    def work():
+        for _ in range(60):
+            try:
+                arr = C._render_gray(good, 1, 36, "pypdfium2")
+                if not np.array_equal(arr, ref):
+                    mismatched.append(1)
+            except Exception as exc:                       # noqa: BLE001
+                errors.append("%s: %s" % (type(exc).__name__, exc))
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and mismatched == [], (errors[:3], len(mismatched))
+
+
+def test_concurrent_exports_all_pass(tmp_path, monkeypatch):
+    """R2l: 8 export jobs at once (each its own thread, like the service's job threads), each
+    writing and checking PDF + Word with the independent render: every one passes. Before the
+    locks this failed at random — PDFium "Failed to load page", and matplotlib "生成失败：cmap"."""
+    pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    import threading
+    monkeypatch.setenv("PFK_PDF_RENDERER", "pypdfium2")
+    store = V.VersionStore(tmp_path / "ws")
+    _publish(store, "r1", tmp_path)
+    results = []
+
+    def work(i):
+        try:
+            with EX.acquire(store.root) as pin:
+                out = EX.build_bundle(pin, tmp_path / ("b%d" % i), variants=("filing",),
+                                      formats=("pdf", "docx"), dpi=300)
+            results.append((out["ok"], out["reasons"]))
+        except Exception as exc:                           # noqa: BLE001
+            results.append((False, "%s: %s" % (type(exc).__name__, exc)))
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(results) == 8 and all(ok for ok, _r in results), [r for ok, r in results if not ok]
+    assert store.referenced() == set()
+
+
+def test_a_renderer_error_is_unverified_not_fail(two, monkeypatch):
+    """R2l: the renderer's OWN failure is not a verdict on the document. Retried once; still
+    failing → the PDF is ``unverified`` with 「独立渲染器出错」 — never ok, never ``fail``. A
+    single transient failure is absorbed by the retry (the document passes). A document with a
+    real content failure stays ``fail`` whatever the renderer does."""
+    pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    monkeypatch.setenv("PFK_PDF_RENDERER", "pypdfium2")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    real = C._render_gray
+    calls = []
+
+    def broken(*a, **k):
+        calls.append(1)
+        raise RuntimeError("PdfiumError: Failed to load page.")
+    monkeypatch.setattr(C, "_render_gray", broken)
+    rep = _check(good, rows, sp)
+    assert rep["ok"] is False and rep["status"] == C.STATUS_UNVERIFIED, rep["errors"]
+    assert any("独立渲染器出错" in e for e in rep["errors"])
+    assert all(p["ok"] for p in rep["page_checks"])                 # nothing FAILED
+    assert len(calls) == 2 * C.RENDER_ATTEMPTS                      # each page: try + one retry
+
+    flaky = {"left": 1}
+
+    def once(*a, **k):
+        if flaky["left"]:
+            flaky["left"] -= 1
+            raise RuntimeError("PdfiumError: Failed to load page.")
+        return real(*a, **k)
+    monkeypatch.setattr(C, "_render_gray", once)
+    assert _passes(_check(good, rows, sp))                          # the retry absorbed it
+
+    monkeypatch.setattr(C, "_render_gray", broken)
+    low = D.spec("standard", 72)                                    # text height fails at 72 dpi
+    _build(rows, low, tmp / "low.pdf", "pdf")
+    assert _refused(_check(tmp / "low.pdf", rows, low))
+
+
+def test_a_renderer_error_in_an_export_is_unverified_not_fail(tmp_path, monkeypatch):
+    """R2l at the export level: the renderer failing on every attempt makes the PDF items
+    ``unverified`` (reason given, export ok=false) — not ``fail``; Word is unaffected."""
+    pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    monkeypatch.setenv("PFK_PDF_RENDERER", "pypdfium2")
+
+    def broken(*a, **k):
+        raise RuntimeError("PdfiumError: Failed to load page.")
+    monkeypatch.setattr(C, "_render_gray", broken)
+    out = _bundle(tmp_path, "b")
+    assert out["ok"] is False
+    pdf = {k: v for k, v in out["manifest"].items() if k.endswith("/pdf")}
+    assert pdf and set(pdf.values()) == {"unverified"}, out["reasons"]
+    assert all("独立渲染器出错" in out["reasons"][k] for k in pdf)
+    assert all(v == "ok" for k, v in out["manifest"].items() if k.endswith("/docx"))

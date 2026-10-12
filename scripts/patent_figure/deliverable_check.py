@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import io
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -818,33 +819,65 @@ def render_checker_available() -> bool:
     return render_backend() is not None
 
 
+#: R2l: PDFium (and MuPDF) must never be entered from two threads at once — pypdfium2 forbids
+#: it even for different documents (random "Failed to load page", possible crashes), and every
+#: export job runs in its own thread. ONE process-wide lock covers the whole use of the engine:
+#: open, render, copying the pixels out, and closing every object. (Concurrency across PROCESSES
+#: would need a render subprocess; the service renders in-process.)
+_RENDER_LOCK = threading.Lock()
+RENDER_ATTEMPTS = 2            # a renderer failure is retried once before it counts
+
+
+class RenderUnavailable(RuntimeError):
+    """The independent renderer itself failed (twice) — the visibility of this page is UNVERIFIED,
+    which is not a verdict on the document's content."""
+
+
 def _render_gray(path: Path, k: int, dpi: int, backend: str):
     import numpy as np
-    if backend == "pypdfium2":
-        import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(str(path))
-        try:
-            page = pdf[k - 1]
+    with _RENDER_LOCK:
+        if backend == "pypdfium2":
+            import pypdfium2 as pdfium
+            pdf = pdfium.PdfDocument(str(path))
             try:
-                arr = np.asarray(page.render(scale=dpi / 72.0, grayscale=True).to_numpy())
+                page = pdf[k - 1]
+                try:
+                    bitmap = page.render(scale=dpi / 72.0, grayscale=True)
+                    try:
+                        arr = np.array(bitmap.to_numpy(), dtype=np.uint8, copy=True)
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
             finally:
-                page.close()
-        finally:
-            pdf.close()
-        return arr.reshape(arr.shape[0], arr.shape[1]) if arr.ndim == 3 else arr
-    import fitz
-    with fitz.open(str(path)) as doc:
-        pix = doc[k - 1].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
-        return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+                pdf.close()
+            return arr.reshape(arr.shape[0], arr.shape[1]) if arr.ndim == 3 else arr
+        import fitz
+        with fitz.open(str(path)) as doc:
+            pix = doc[k - 1].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
+            return np.frombuffer(bytes(pix.samples), dtype=np.uint8).reshape(
+                pix.height, pix.width).copy()
 
 
-def _render_caption_ink(path: Path, k: int, src: "Source", rect_mm, dpi: int = 100,
-                        backend: str = "pypdfium2"):
-    """Defence in depth (R2f #3): RENDER page ``k`` with an independent PDF engine and measure
-    the non-white share inside the figure-number box as it is actually SEEN — clips, overpaint,
-    transparency, optional content, inherited page boxes and annotations all take effect there."""
+def _render_page(path: Path, k: int, dpi: int, backend: str):
+    """``_render_gray`` with ONE retry; a renderer that still fails raises ``RenderUnavailable``
+    (R2l: an engine error is not a content failure — the page becomes unverified, not fail)."""
+    last = None
+    for _attempt in range(RENDER_ATTEMPTS):
+        try:
+            return _render_gray(path, k, dpi, backend)
+        except Exception as exc:                  # the engine's own error, whatever its type
+            last = exc
+    raise RenderUnavailable("%s 渲染第 %d 页出错（重试 %d 次）：%s: %s"
+                            % (backend, k, RENDER_ATTEMPTS - 1, type(last).__name__, last))
+
+
+def _render_caption_ink(arr, dpi: int, src: "Source", rect_mm):
+    """Defence in depth (R2f #3): on page ``k`` as RENDERED by an independent PDF engine
+    (``arr`` at ``dpi``), the non-white share inside the figure-number box as it is actually
+    SEEN — clips, overpaint, transparency, optional content, inherited page boxes and annotations
+    all take effect there."""
     left, top, w, h = rect_mm
-    arr = _render_gray(path, k, dpi, backend)
     bx0, by0, bx1, by1 = _D.caption_box(src.caption)
     wx0, wy0, wx1, wy1 = src.window
     to_px = dpi / 25.4
@@ -908,15 +941,16 @@ def _tolerant_iou(expected, rendered, r: int) -> Tuple[float, float, float]:
     return 1.0 / (1.0 / recall + 1.0 / precision - 1.0), recall, precision
 
 
-def _render_match(path: Path, k: int, src: "Source", sp: Dict[str, Any],
-                  backend: str) -> Dict[str, Any]:
-    """Render page ``k`` with the independent engine and compare it with the EXPECTED page — the
-    source DXF rasterised by the writer's function at the same dpi, placed where the writer puts
-    it on a white A4 page. Returns the metrics (ink IoU, caption IoU, background non-white share,
-    recall / precision) and ``errors`` for every threshold not met."""
+def render_dpi(sp: Dict[str, Any]) -> int:
+    return int(min(int(sp["dpi"]), RENDER_DPI_MAX))
+
+
+def _render_match(arr, dpi: int, k: int, src: "Source", sp: Dict[str, Any]) -> Dict[str, Any]:
+    """Compare page ``k`` as RENDERED by the independent engine (``arr`` at ``dpi``) with the
+    EXPECTED page — the source DXF rasterised by the writer's function at the same dpi, placed
+    where the writer puts it on a white A4 page. Returns the metrics (ink IoU, caption IoU,
+    background non-white share, recall / precision) and ``errors`` for every threshold not met."""
     import numpy as np
-    dpi = int(min(int(sp["dpi"]), RENDER_DPI_MAX))
-    arr = _render_gray(path, k, dpi, backend)
     spd = dict(sp, dpi=dpi)
     exp = _D.rasterize(src.dxf, spd, src.figure, src.number)
     page = np.full(arr.shape, 255, dtype=np.uint8)
@@ -1013,26 +1047,38 @@ def _pdf_page_report(path: Path, k: int, page, src: "Source", sp: Dict[str, Any]
             gray = np.fliplr(gray)
     px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
     rect_mm = (x0, ph - y1, x1 - x0, y1 - y0)
-    rendered = match = None
+    rendered = match = render_unverified = None
     if render != "unavailable" and src.caption is not None:
+        dpi = render_dpi(sp)
         try:
-            cap_ink, whole_ink = _render_caption_ink(path, k, src, rect_mm, backend=render)
-            rendered = round(cap_ink, 4)
-            if cap_ink < INK_FRACTION_MIN:
-                extra.append("%s渲染后图号位置没有墨迹（%.1f%%）——页面上看不到「图%d」"
-                             % (where, cap_ink * 100, k))
-            if whole_ink <= 0.0:
-                extra.append("%s渲染后图片区域一片空白" % where)
-            # R2k: the render must MATCH the source page spatially, not just carry some ink
-            match = _render_match(path, k, src, sp, render)
-            extra += match.pop("errors")
-        except Exception as exc:
-            extra.append("%s独立渲染核验失败：%s" % (where, exc))
+            arr = _render_page(path, k, dpi, render)
+        except RenderUnavailable as exc:
+            # R2l: the ENGINE failed (twice) — this says nothing about the document's content:
+            # the page's visibility is unverified (the document becomes ``unverified``), not fail
+            render_unverified = "%s独立渲染器出错，无法核验可见性（%s）" % (where, exc)
+            arr = None
+        if arr is not None:
+            try:
+                cap_ink, whole_ink = _render_caption_ink(arr, dpi, src, rect_mm)
+                # R2k: the render must MATCH the source page spatially, not just carry some ink
+                match = _render_match(arr, dpi, k, src, sp)
+            except Exception as exc:              # the comparison itself broke: not content
+                render_unverified = "%s渲染比对无法完成，无法核验可见性（%s: %s）" % (
+                    where, type(exc).__name__, exc)
+            else:
+                rendered = round(cap_ink, 4)
+                if cap_ink < INK_FRACTION_MIN:
+                    extra.append("%s渲染后图号位置没有墨迹（%.1f%%）——页面上看不到「图%d」"
+                                 % (where, cap_ink * 100, k))
+                if whole_ink <= 0.0:
+                    extra.append("%s渲染后图片区域一片空白" % where)
+                extra += match.pop("errors")
     elif render != "unavailable":
         extra.append("%s源图没有图号，无法做渲染比对" % where)
     pc = _page_check(k, src, sp, rect_mm, px, gray, (pw, ph), extra)
     pc["render_caption_ink"] = rendered
     pc["render_match"] = match
+    pc["render_unverified"] = render_unverified
     return pc
 
 
@@ -1113,6 +1159,14 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
         # a structurally clean PDF is ``unverified`` — not ok, not a pass.
         rep["errors"].append(UNVERIFIED_PDF_REASON + UNVERIFIED_PDF_HINT)
         rep.update(ok=False, status=STATUS_UNVERIFIED)
+    engine = [p["render_unverified"] for p in pages if p.get("render_unverified")]
+    if rep["ok"] and engine:
+        # R2l: nothing failed, but the renderer itself did on some page (after a retry): the
+        # document is ``unverified`` with the reason — never ok, never quarantined as "fail"
+        rep["errors"] += engine
+        rep.update(ok=False, status=STATUS_UNVERIFIED)
+    elif engine:
+        rep["errors"] += engine                   # reported alongside the content failures
     return rep
 
 

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import io
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -169,8 +170,22 @@ class Page:
         return buf.getvalue()
 
 
+#: R2l: matplotlib (figures, Agg canvases, colormaps, the PDF backend, rcParams set by the CJK
+#: font hook) is not thread-safe, and every export job runs in its own thread — concurrent
+#: exports failed at random ("生成失败：cmap"). Every matplotlib use of the export path holds this
+#: ONE process-wide lock: ``rasterize`` (writer and checker alike), ``write_pdf``, and the PNG
+#: preview of ``export``. Reentrant, never nested with the checker's renderer lock.
+MPL_LOCK = threading.RLock()
+
+
 def rasterize(dxf: Path, sp: Dict[str, Any], figure: str = "", number: int = 0) -> Page:
-    """Render the DXF's capture window to a gray raster of exactly the placed size at ``dpi``."""
+    """Render the DXF's capture window to a gray raster of exactly the placed size at ``dpi``
+    (under ``MPL_LOCK``)."""
+    with MPL_LOCK:
+        return _rasterize(dxf, sp, figure, number)
+
+
+def _rasterize(dxf: Path, sp: Dict[str, Any], figure: str = "", number: int = 0) -> Page:
     import numpy as np
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -217,7 +232,13 @@ def rasterize(dxf: Path, sp: Dict[str, Any], figure: str = "", number: int = 0) 
 
 def write_pdf(pages: Sequence[Page], path: Path, title: str = "说明书附图") -> Path:
     """One A4 page per figure, the raster placed at its page rectangle (native resolution:
-    ``interpolation='none'`` makes the PDF backend embed the image unsampled)."""
+    ``interpolation='none'`` makes the PDF backend embed the image unsampled). Under
+    ``MPL_LOCK``."""
+    with MPL_LOCK:
+        return _write_pdf(pages, path, title)
+
+
+def _write_pdf(pages: Sequence[Page], path: Path, title: str = "说明书附图") -> Path:
     from matplotlib.backends.backend_pdf import PdfPages
     from matplotlib.figure import Figure
 
