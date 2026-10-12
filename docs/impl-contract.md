@@ -2466,7 +2466,7 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   内容流为单个 Flate 流；资源键固定，Font/Pattern/Shading 为空，XObject 恰为 `/I1…/In`，ExtGState 恰为 `/A1`
   {Type, CA=1, ca=1}。
 - **独立渲染（可选）**：有独立渲染器时（修复轮 7 起推荐 pypdfium2，见 §14.14；PyMuPDF 为 AGPL 仅备选）逐页渲染，在图号位置与
-  图片区域统计看得见的墨迹，`render_check: "pymupdf"`、`render_caption_ink`；没装则 `render_check: "unavailable"`。
+  图片区域统计看得见的墨迹，`render_check: "pypdfium2"`（或 `"pymupdf"`）、`render_caption_ink`；没装则 `render_check: "unavailable"`。
 
 ### 14.14 修复轮 7（Codex R2g）收敛：页树按引用、操作数按原生类型、渲染器许可
 
@@ -2478,3 +2478,32 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
 - **独立渲染器许可**：第二道渲染核验推荐 **pypdfium2**（BSD-3-Clause / Apache-2.0，doctor `deliverable-pdf-render`、
   requirements 可选段）；PyMuPDF 为 **AGPL**，不推荐，只在已安装时作为备选；`PFK_PDF_RENDERER=auto|none|pypdfium2|pymupdf`。
   核心核验不依赖任何渲染器；PDF 封闭集回归在「无渲染器」与「pypdfium2」两种配置下各跑一遍。
+
+### 14.15 修复轮 8（Codex R2h）收敛：PDF 对象取值按原生类型、图片与页面字典封闭
+
+- **问题**：pypdf 把 PDF 名称与字符串都表示为 Python `str` 子类、数值表示为 `int`/`float` 子类，`str(x) == "/Indexed"`、
+  `int(x) == 8` 分不清名称 `/Indexed` 与字符串 `(/Indexed)`、整数 8 与字符串 `(8)`。渲染器分得清：PDFium 不认字符串色彩
+  空间 / 滤镜 / 宽度，图片不画，页面空白；pypdf 却照常解码，无渲染器时核验误报通过。
+- **按类型再比值**：核验依赖的每个字典值（解引用后）先核 PDF 类型、再核取值——名称只认 `NameObject`（`/Type`、`/Subtype`、
+  `/ColorSpace` 及 Indexed 数组首项与基色空间、`/Filter` 及其数组元素、目录 / 页树 / 页面 `/Type`、内容流 `/Filter`、
+  `/ProcSet` 各项）；整数键只认 `NumberObject`（`/Width`、`/Height`、`/BitsPerComponent`、Indexed 的 hival、`/DecodeParms`
+  各项、页树 `/Count`、文件尾 `/Size`；写出端不写实数，实数也拒绝）；数值只认有限的 `NumberObject`/`FloatObject`
+  （`/MediaBox` 四项、图形状态 `/CA`/`/ca`）。
+- **图片 XObject 字典封闭**：键恰为 Type/Subtype/Width/Height/ColorSpace/BitsPerComponent/Filter/DecodeParms，缺键或多键都
+  不通过（`/SMask` 等遮罩键仍按名报出；`/Interpolate` 这类布尔键不在写出端集合里，按未知键拒绝——写出端的图片与页面字典
+  都没有布尔键）。取值：`/XObject`、`/Image`、8 位；色彩空间为 DeviceGray / DeviceRGB，或
+  `[/Indexed 基色 hival 查找表]`（hival 0–255，查找表是 PDF 字符串且字节数 = (hival+1)×基色分量数）；`/Filter` 为单个
+  名称 `/FlateDecode`（数组形式拒绝）；`/DecodeParms` 为字典，键恰为 Predictor/Colors/Columns（BitsPerComponent 可选），
+  Predictor=10、Colors 与色彩空间一致、Columns=Width、BitsPerComponent=8。
+- **页面字典封闭**：键恰为 Type/Parent/Resources/MediaBox/Contents/Annots；`/Annots` 为空数组；`/MediaBox` 为 4 个数且 = A4；
+  `/Contents` 为单个流、字典只有 `/Filter /FlateDecode`；`/Resources` 为字典，Font/Pattern/Shading 为空字典，XObject 为字典且
+  每项是流，ExtGState 恰为 `/A1 {Type /ExtGState, CA 1, ca 1}`（类型逐项核），ProcSet 为名称数组。
+- **`/Length`**：pypdf 解析流时消费并删掉 `/Length`，核验看到的字典里没有它；非整数的 `/Length`（字符串、实数）会让 pypdf
+  解析该流时抛错——现在逐页处理包在异常隔离里，报「无法按写出端的固定结构解释」并判不通过，核验本身不再抛出（此前
+  `/Width` 写成字符串会让 `check_pdf` 直接抛 `TypeError`）。图片像素解码失败同样转为该页不通过并给出原因。
+- **回归**：`test_pdf_object_values_are_checked_by_pdf_type`（R2h 三例 `/Indexed`、`/Filter`、`/Width` 字符串替换，另含基色
+  空间、hival、位深、Subtype、Type、DecodeParms Columns/Predictor、`/Filter` 字符串数组、布尔键、MediaBox、页面 Type、内容流
+  Filter、图形状态 ca、页树 Count 共 17 例）与 `test_pdf_stream_length_must_be_a_pdf_integer`（字符串 / 实数 `/Length`），
+  全部在 `PFK_PDF_RENDERER=none` 与 `pypdfium2` 两种配置下各跑一遍：`none` 时核心核验独立判不通过；使图片不可见的各例由
+  pypdfium2 确认图号位置无墨迹。其余 PDF 回归（页数、页序、图号墨迹、页边 / A4 / 拉伸、遮罩 / 透明 / 覆盖 / 裁切、
+  保守图区）也改为两种配置各跑一遍。

@@ -139,7 +139,7 @@ def test_dpi_72_fails_the_raster_text_height(two, fmt):
     assert rep["page_checks"][0]["min_text_px"] < 24
 
 
-def test_conservative_preset_shrinks_tall_sheets_and_the_check_says_so(tmp_path):
+def test_conservative_preset_shrinks_tall_sheets_and_the_check_says_so(tmp_path, renderer):
     pytest.importorskip("pypdf")
     rows = [{"figure": "fig1", "number": 1,
              "dxf": sheet(tmp_path / "tall.dxf", 1, height=238.0, text_h=3.5)}]
@@ -155,7 +155,7 @@ def test_conservative_preset_shrinks_tall_sheets_and_the_check_says_so(tmp_path)
     assert _check(tmp_path / "s.pdf", rows, sp2)["ok"]
 
 
-def test_page_count_must_equal_figure_count(two):
+def test_page_count_must_equal_figure_count(two, renderer):
     pytest.importorskip("pypdf")
     tmp, rows = two
     sp = D.spec("standard", 300)
@@ -164,7 +164,7 @@ def test_page_count_must_equal_figure_count(two):
     assert not rep["ok"] and "页数 1 ≠ 图数 2" in rep["errors"][0]
 
 
-def test_swapped_page_order_is_caught_by_the_figure_number(two):
+def test_swapped_page_order_is_caught_by_the_figure_number(two, renderer):
     pytest.importorskip("pypdf")
     tmp, rows = two
     sp = D.spec("standard", 300)
@@ -174,7 +174,7 @@ def test_swapped_page_order_is_caught_by_the_figure_number(two):
     assert any("图号应为「图1」" in e or "拉伸" in e for e in rep["page_checks"][0]["errors"])
 
 
-def test_missing_caption_ink_is_caught_from_the_pixels(two):
+def test_missing_caption_ink_is_caught_from_the_pixels(two, renderer):
     pytest.importorskip("pypdf")
     tmp, rows = two
     sp = D.spec("standard", 300)
@@ -209,7 +209,7 @@ def _pdf_with_placement(path: Path, page: "D.Page", page_mm=(210.0, 297.0), rect
         pdf.savefig(fig)
 
 
-def test_margin_violation_non_a4_and_stretching_are_each_caught(tmp_path):
+def test_margin_violation_non_a4_and_stretching_are_each_caught(tmp_path, renderer):
     pytest.importorskip("pypdf")
     rows = [{"figure": "fig1", "number": 1, "dxf": sheet(tmp_path / "a.dxf", 1)}]
     sp = D.spec("standard", 300)
@@ -691,7 +691,7 @@ def _pdf_clip_half(w, page):
                                             (_pdf_alpha_zero, "透明度"),
                                             (_pdf_paint_over, "盖住"),
                                             (_pdf_clip_half, "裁切")])
-def test_pdf_image_transparency_masks_and_overpaint_are_refused(two, mutate, expect):
+def test_pdf_image_transparency_masks_and_overpaint_are_refused(two, renderer, mutate, expect):
     """R2e: the PDF page image must stay fully visible — a soft mask (SMask, alpha 0), a graphics
     state with alpha 0, painting over the image after it is drawn, or a clip that cuts it, each
     fail the full check; the original passes."""
@@ -883,3 +883,114 @@ def test_pdf_is_a_closed_set(two, renderer, mutate, expect, invisible):
         assert ok["page_checks"][0]["render_caption_ink"] > C.INK_FRACTION_MIN
         assert rep["page_checks"][0]["render_caption_ink"] < C.INK_FRACTION_MIN, rep["page_checks"][0]
         assert "渲染后图号位置没有墨迹" in msgs
+
+
+# --------------------------------------------------------------------------- R2h: PDF value types
+
+
+def _pdf_page_image(page):
+    xo = page["/Resources"]["/XObject"]
+    return xo[sorted(xo.keys())[0]].get_object()
+
+
+def _pdf_as_string(where, key, index=None):
+    """Replace one value by a PDF STRING spelling the same thing: ``str()`` of the new value is
+    equal to the old one (``(/Indexed)`` vs ``/Indexed``, ``(1556)`` vs ``1556``), the PDF type
+    is not."""
+    def mutate(w, page):
+        from pypdf.generic import NameObject, TextStringObject
+        d = {"image": lambda: _pdf_page_image(page),
+             "decode": lambda: _pdf_page_image(page)["/DecodeParms"],
+             "page": lambda: page,
+             "contents": lambda: page["/Contents"].get_object(),
+             "gs": lambda: page["/Resources"]["/ExtGState"]["/A1"].get_object(),
+             "pages": lambda: w._root_object["/Pages"].get_object()}[where]()
+        if index is None:
+            d[NameObject(key)] = TextStringObject(str(d[key]))
+        else:
+            d[key][index] = TextStringObject(str(d[key][index]))
+    return mutate
+
+
+def _pdf_filter_array_of_string(w, page):
+    from pypdf.generic import ArrayObject, NameObject, TextStringObject
+    _pdf_page_image(page)[NameObject("/Filter")] = ArrayObject([TextStringObject("/FlateDecode")])
+
+
+def _pdf_image_boolean_key(w, page):                 # a key the writer never writes (boolean)
+    from pypdf.generic import BooleanObject, NameObject
+    _pdf_page_image(page)[NameObject("/Interpolate")] = BooleanObject(True)
+
+
+@pytest.mark.parametrize("mutate, expect, invisible", [
+    # the three R2h reproductions
+    pytest.param(_pdf_as_string("image", "/ColorSpace", 0), "不是 PDF 名称", True, id="R2h-Indexed"),
+    pytest.param(_pdf_as_string("image", "/Filter"), "不是 PDF 名称", True, id="R2h-Filter"),
+    pytest.param(_pdf_as_string("image", "/Width"), "不是 PDF 整数", True, id="R2h-Width"),
+    # the same spoof on every other value the check relies on
+    pytest.param(_pdf_as_string("image", "/ColorSpace", 1), "不是 PDF 名称", True, id="base-cs"),
+    pytest.param(_pdf_as_string("image", "/ColorSpace", 2), "不是 PDF 整数", False, id="hival"),
+    pytest.param(_pdf_as_string("image", "/BitsPerComponent"), "不是 PDF 整数", True, id="bpc"),
+    pytest.param(_pdf_as_string("image", "/Subtype"), "不是 PDF 名称", True, id="subtype"),
+    pytest.param(_pdf_as_string("image", "/Type"), "不是 PDF 名称", False, id="image-type"),
+    pytest.param(_pdf_as_string("decode", "/Columns"), "不是 PDF 整数", False, id="columns"),
+    pytest.param(_pdf_as_string("decode", "/Predictor"), "不是 PDF 整数", False, id="predictor"),
+    pytest.param(_pdf_filter_array_of_string, "不是 PDF 名称", True, id="filter-array"),
+    pytest.param(_pdf_image_boolean_key, "封闭键集", False, id="image-boolean-key"),
+    pytest.param(_pdf_as_string("page", "/MediaBox", 2), "不是 PDF 数值", True, id="mediabox"),
+    pytest.param(_pdf_as_string("page", "/Type"), "不是 PDF 名称", False, id="page-type"),
+    pytest.param(_pdf_as_string("contents", "/Filter"), "不是 PDF 名称", True, id="contents-filter"),
+    pytest.param(_pdf_as_string("gs", "/ca"), "不是 PDF 数值", True, id="gs-alpha"),
+    pytest.param(_pdf_as_string("pages", "/Count"), "不是 PDF 整数", False, id="page-count"),
+])
+def test_pdf_object_values_are_checked_by_pdf_type(two, renderer, mutate, expect, invisible):
+    """R2h: a dictionary value replaced by a PDF STRING that spells it (``str()`` unchanged) —
+    the ``/Indexed`` colour-space name, the image ``/Filter``, the image ``/Width``, and every
+    other name / integer / number the check relies on — fails the CORE check with no renderer at
+    all, never raises; where it makes the picture invisible, pypdfium2 confirms it. The image
+    and page dictionaries are closed key sets: a boolean key the writer never writes is refused."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    ok = _check(good, rows, sp)
+    assert ok["ok"], (ok["errors"], [p["errors"] for p in ok["page_checks"]])
+    bad = tmp / "bad.pdf"
+    _pdf_mutate(good, bad, mutate)
+    assert bad.read_bytes() != good.read_bytes()
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert expect in msgs, msgs
+    if renderer == "none":
+        assert rep["render_check"] == "unavailable"           # the core check alone refused it
+    elif invisible:
+        assert rep["page_checks"][0]["render_caption_ink"] < C.INK_FRACTION_MIN, rep["page_checks"][0]
+        assert "渲染后图号位置没有墨迹" in msgs
+
+
+@pytest.mark.parametrize("kind", ["string", "real"])
+def test_pdf_stream_length_must_be_a_pdf_integer(two, renderer, kind):
+    """R2h: pypdf consumes a stream's ``/Length`` while parsing, so it is not in the dictionary
+    the check sees — a ``/Length`` that is a string ``(178)`` or a real ``178.0`` makes pypdf's
+    parse of that stream fail. That is reported as a failed page / document (never raised, never
+    ok). The content stream of page 1 is patched in place (same byte count, xref intact)."""
+    pypdf = pytest.importorskip("pypdf")
+    import re as _re
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    data = good.read_bytes()
+    ref = pypdf.PdfReader(str(good)).pages[0].raw_get("/Contents")
+    m = _re.compile(rb"/Length (\d+ 0 R)").search(data, data.index(b"\n%d 0 obj\n" % ref.idnum))
+    n = int(pypdf.PdfReader(str(good)).get_object(int(m.group(1).split()[0])))
+    new = ((b"(%d)" % n) if kind == "string" else (b"%d.0" % n)).ljust(len(m.group(1)))
+    assert len(new) == len(m.group(1))
+    bad = tmp / "bad.pdf"
+    bad.write_bytes(data[:m.start(1)] + new + data[m.end(1):])
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert "无法按写出端的固定结构解释" in msgs, msgs

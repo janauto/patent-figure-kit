@@ -248,8 +248,16 @@ def _mat_mul(a, b):
             a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]]
 
 
+#: The writer's page image XObject dictionary as pypdf presents it — a CLOSED key set (R2h):
+#: every key required, nothing else allowed. (pypdf consumes ``/Length`` while it parses the
+#: stream; a ``/Length`` that is not a PDF integer makes that parse fail, which ``check_pdf``
+#: reports as a failure.)
 _PDF_IMAGE_KEYS = {"/Type", "/Subtype", "/Width", "/Height", "/ColorSpace", "/BitsPerComponent",
-                   "/Filter", "/DecodeParms", "/Length"}
+                   "/Filter", "/DecodeParms"}
+_PDF_IMAGE_MASK_KEYS = ("/SMask", "/Mask", "/ImageMask", "/Decode", "/OC", "/SMaskInData")
+_PDF_DEVICE_CS = ("/DeviceGray", "/DeviceRGB")
+_PDF_DECODE_KEYS = {"/Predictor", "/Colors", "/Columns"}       # + optional /BitsPerComponent
+_PDF_PROCSET = ("/PDF", "/Text", "/ImageB", "/ImageC", "/ImageI")
 #: Painting operators: after the page image nothing may be painted over it.
 _PDF_PAINT = {b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"S", b"s", b"sh", b"Do", b"Tj",
               b"TJ", b"'", b'"', b"BI", b"EI"}
@@ -260,48 +268,107 @@ def _obj(x):
 
 
 def _pdf_image_whitelist(xo, where: str) -> List[str]:
-    """The page image XObject must be the writer's kind (WP2 R2e): an opaque 8-bit image —
-    gray, RGB, or an indexed palette of those — with no soft mask / mask / image mask / Decode
-    remap / optional content / anything else."""
+    """The page image XObject must be EXACTLY the writer's kind (WP2 R2e, R2h): a closed key set,
+    every value checked by its PDF TYPE before its value — an opaque 8-bit image, gray / RGB or an
+    indexed palette over them, a single Flate filter with the writer's PNG-predictor parameters.
+    Soft mask / mask / image mask / Decode remap / optional content / boolean flags such as
+    ``/Interpolate`` — any key outside the set — are refused. A string ``(/Indexed)`` is not the
+    name ``/Indexed`` to a renderer (PDFium then draws nothing) although ``str()`` says equal."""
+    from pypdf.generic import (ArrayObject, ByteStringObject, NumberObject, StreamObject,
+                               TextStringObject)
+    img = "%s的图片" % where
+    if not isinstance(xo, StreamObject):
+        return ["%s不是 PDF 流对象（实为%s）" % (img, _pdf_kind(xo))]
     errors = []
     keys = set(str(k) for k in xo.keys())
-    for k in ("/SMask", "/Mask", "/ImageMask", "/Decode", "/OC", "/SMaskInData"):
+    for k in _PDF_IMAGE_MASK_KEYS:
         if k in keys:
-            errors.append("%s的图片带 %s（透明 / 遮罩 / 重映射会改变可见内容）" % (where, k))
-    other = sorted(keys - _PDF_IMAGE_KEYS - {"/SMask", "/Mask", "/ImageMask", "/Decode", "/OC",
-                                              "/SMaskInData"})
-    if other:
-        errors.append("%s的图片字典带写出端不会产生的键 %s" % (where, other))
-    if int(_obj(xo.get("/BitsPerComponent", 0))) != 8:
-        errors.append("%s的图片不是 8 位" % where)
-    cs = _obj(xo.get("/ColorSpace"))
-    ok_cs = str(cs) in ("/DeviceGray", "/DeviceRGB")
-    if not ok_cs and isinstance(cs, list) and len(cs) == 4 and str(cs[0]) == "/Indexed" \
-            and str(_obj(cs[1])) in ("/DeviceGray", "/DeviceRGB"):
-        ok_cs = True
-    if not ok_cs:
-        errors.append("%s的图片色彩空间不受控（%s）" % (where, str(cs)[:40]))
-    if str(_obj(xo.get("/Filter"))) not in ("/FlateDecode", "None"):
-        errors.append("%s的图片压缩方式不受控（%s）" % (where, xo.get("/Filter")))
+            errors.append("%s带 %s（透明 / 遮罩 / 重映射会改变可见内容）" % (img, k))
+    errors += _v_keys(keys, img + "字典", _PDF_IMAGE_KEYS, skip=_PDF_IMAGE_MASK_KEYS)
+
+    def get(key):
+        return _obj(xo.get(key))
+    errors += _v_name(get("/Type"), img + "的 /Type", ("/XObject",))
+    errors += _v_name(get("/Subtype"), img + "的 /Subtype", ("/Image",))
+    width = get("/Width")
+    errors += _v_int(width, img + "的 /Width", lo=1)
+    errors += _v_int(get("/Height"), img + "的 /Height", lo=1)
+    errors += _v_int(get("/BitsPerComponent"), img + "的 /BitsPerComponent（须 8 位）", allowed=(8,))
+    cs, colors = get("/ColorSpace"), None
+    if isinstance(cs, ArrayObject):                       # [/Indexed base hival lookup]
+        parts = [_obj(x) for x in cs]
+        if len(parts) != 4:
+            errors.append("%s的色彩空间数组不是 [/Indexed 基色 hival 查找表] 四项（实为 %d 项）"
+                          % (img, len(parts)))
+        else:
+            e = _v_name(parts[0], img + "色彩空间数组的首项", ("/Indexed",))
+            e += _v_name(parts[1], img + "调色板的基色空间", _PDF_DEVICE_CS)
+            e += _v_int(parts[2], img + "调色板的 hival", lo=0, hi=255)
+            lookup = parts[3]
+            # a PDF string either way: pypdf calls it Text- or ByteString by whether its bytes
+            # happen to decode; both pypdf's decoder and PDFium use the raw bytes
+            raw = (lookup.original_bytes if isinstance(lookup, TextStringObject) else
+                   bytes(lookup) if isinstance(lookup, ByteStringObject) else None)
+            if raw is None:
+                e.append("%s调色板查找表不是 PDF 字符串（实为%s）" % (img, _pdf_kind(lookup)))
+            if not e:
+                need = (int(parts[2]) + 1) * (1 if str(parts[1]) == "/DeviceGray" else 3)
+                if len(raw) != need:
+                    e.append("%s调色板查找表 %d 字节，与 hival / 基色空间要求的 %d 字节不符"
+                             % (img, len(raw), need))
+            errors += e
+            colors = 1
+    else:
+        e = _v_name(cs, img + "的色彩空间", _PDF_DEVICE_CS)
+        errors += e
+        if not e:
+            colors = 1 if str(cs) == "/DeviceGray" else 3
+    flt = get("/Filter")
+    if isinstance(flt, ArrayObject):
+        for n, f in enumerate(flt, start=1):
+            errors += _v_name(_obj(f), "%s的 /Filter 数组第 %d 项" % (img, n), ("/FlateDecode",))
+        errors.append("%s的 /Filter 是数组——写出端只写单个名称 /FlateDecode" % img)
+    else:
+        errors += _v_name(flt, img + "的 /Filter", ("/FlateDecode",))
+    if "/DecodeParms" in keys:
+        dp = get("/DecodeParms")
+        e = _v_dict(dp, img + "的 /DecodeParms")
+        errors += e
+        if not e:
+            dkeys = set(str(k) for k in dp.keys())
+            errors += _v_keys(dkeys, img + "的 /DecodeParms", _PDF_DECODE_KEYS,
+                              optional=("/BitsPerComponent",))
+            want = {"/Predictor": (10,), "/Colors": (colors,) if colors else None,
+                    "/Columns": (int(width),) if isinstance(width, NumberObject) else None,
+                    "/BitsPerComponent": (8,)}
+            for k in sorted(dkeys & set(want)):
+                errors += _v_int(_obj(dp.get(k)), "%s的 /DecodeParms %s" % (img, k),
+                                 allowed=want[k])
     return errors
 
 
 def _pdf_page_whitelist(page, where: str) -> List[str]:
     """Page-level things that change what is SEEN of the image: annotations drawn over the page,
     graphics states with transparency / soft masks / blend modes, painting AFTER the image."""
+    from pypdf.generic import ArrayObject, DictionaryObject
     errors = []
     annots = _obj(page.get("/Annots"))
-    if annots:
+    if annots is not None and (not isinstance(annots, ArrayObject) or len(annots)):
         errors.append("%s带注释对象（可能盖住图片）" % where)
-    res = _obj(page.get("/Resources")) or {}
-    for name, gs in (_obj(res.get("/ExtGState")) or {}).items():
+    res = _obj(page.get("/Resources"))
+    gss = _obj(res.get("/ExtGState")) if isinstance(res, DictionaryObject) else None
+    for name, gs in (gss.items() if isinstance(gss, DictionaryObject) else ()):
         gs = _obj(gs)
+        if not isinstance(gs, DictionaryObject):
+            errors.append("%s的图形状态 %s 不是 PDF 字典（实为%s）" % (where, name, _pdf_kind(gs)))
+            continue
         bad = sorted(set(str(k) for k in gs.keys()) - {"/Type", "/CA", "/ca"})
         if bad:
             errors.append("%s的图形状态 %s 带 %s（软遮罩 / 混合模式等）" % (where, name, bad))
         for k in ("/CA", "/ca"):
-            if k in gs and float(_obj(gs[k])) != 1.0:
-                errors.append("%s的图形状态 %s 透明度 %s=%s" % (where, name, k, gs[k]))
+            if k in gs:
+                errors += _v_num(_obj(gs[k]), "%s的图形状态 %s 透明度 %s" % (where, name, k), 1.0,
+                                 tol=0.0)
     contents = page.get_contents()
     seen_image = False
     for _operands, op in (contents.operations if contents is not None else []):
@@ -332,6 +399,102 @@ def _pdf_name(x) -> str:
     if not isinstance(x, NameObject):
         raise TypeError("操作数 %r 不是 PDF 名称（%s）" % (x, type(x).__name__))
     return str(x)
+
+
+# --------------------------------------------------------------------------- PDF native types (R2h)
+#
+# pypdf models PDF names AND strings as Python ``str`` subclasses and PDF numbers as ``int`` /
+# ``float`` subclasses, so ``str(x) == "/Indexed"`` or ``int(x) == 8`` cannot tell the name
+# ``/Indexed`` from the string ``(/Indexed)``, or the integer 8 from the string ``(8)``. A renderer
+# can: to PDFium ``(/Indexed)`` is no colour space and the picture is simply not drawn, while
+# pypdf still decodes it. Every dictionary value the check relies on (after dereferencing) is
+# therefore checked by its PDF TYPE first, then by its value; the dictionaries themselves are
+# closed key sets. Integer-valued keys take only PDF integers (the writer never writes reals).
+
+
+def _pdf_kind(x) -> str:
+    """The PDF type of an already dereferenced pypdf object, for messages."""
+    from pypdf.generic import (ArrayObject, BooleanObject, ByteStringObject, DictionaryObject,
+                               FloatObject, IndirectObject, NameObject, NullObject, NumberObject,
+                               StreamObject, TextStringObject)
+    for cls, kind in ((NameObject, "名称"), (BooleanObject, "布尔"), (NumberObject, "整数"),
+                      (FloatObject, "实数"), (ByteStringObject, "字符串"),
+                      (TextStringObject, "字符串"), (StreamObject, "流"), (DictionaryObject, "字典"),
+                      (ArrayObject, "数组"), (NullObject, "空对象"), (IndirectObject, "间接引用")):
+        if isinstance(x, cls):
+            return kind
+    return "缺失" if x is None else "非 PDF 对象 %s" % type(x).__name__
+
+
+def _pdf_show(x, n: int = 40) -> str:
+    """``x`` for a message, in PDF notation: a string as ``(…)``, bytes as ``<hex>``."""
+    from pypdf.generic import ByteStringObject, TextStringObject
+    if isinstance(x, TextStringObject):
+        s = "(%s)" % str(x)
+    elif isinstance(x, ByteStringObject):
+        s = "<%s>" % bytes(x).hex()
+    elif isinstance(x, (int, float)) and not isinstance(x, bool):
+        s = "%g" % x                       # (pypdf's own repr of a FloatObject can raise)
+    else:
+        s = repr(x)
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _v_name(v, label: str, allowed: Sequence[str]) -> List[str]:
+    """``v`` must be a PDF NAME (not a string spelling it) and one of ``allowed``."""
+    from pypdf.generic import NameObject
+    if not isinstance(v, NameObject):
+        return ["%s 不是 PDF 名称（实为%s %s）" % (label, _pdf_kind(v), _pdf_show(v))]
+    if str(v) not in allowed:
+        return ["%s 为 %s，不是写出端的取值 %s" % (label, v, " / ".join(allowed))]
+    return []
+
+
+def _v_int(v, label: str, allowed: Optional[Sequence[int]] = None, lo: Optional[int] = None,
+           hi: Optional[int] = None) -> List[str]:
+    """``v`` must be a PDF INTEGER (``NumberObject``; not a real, boolean or digit string)."""
+    from pypdf.generic import NumberObject
+    if isinstance(v, bool) or not isinstance(v, NumberObject):
+        return ["%s 不是 PDF 整数（实为%s %s）" % (label, _pdf_kind(v), _pdf_show(v))]
+    x = int(v)
+    if allowed is not None and x not in allowed:
+        return ["%s=%d 不是写出端的取值 %s" % (label, x, " / ".join(str(a) for a in allowed))]
+    if (lo is not None and x < lo) or (hi is not None and x > hi):
+        return ["%s=%d 超出 %s…%s" % (label, x, lo, hi)]
+    return []
+
+
+def _v_num(v, label: str, want: float, tol: Optional[float] = None) -> List[str]:
+    """``v`` must be a finite PDF NUMBER (integer or real) within ``tol`` of ``want``."""
+    tol = _NUM_TOL if tol is None else tol
+    try:
+        x = _pdf_num(v)
+    except TypeError:
+        return ["%s 不是 PDF 数值（实为%s %s）" % (label, _pdf_kind(v), _pdf_show(v))]
+    if abs(x - want) > tol:
+        return ["%s=%g 不是写出端的取值 %g" % (label, x, want)]
+    return []
+
+
+def _v_dict(v, label: str) -> List[str]:
+    from pypdf.generic import DictionaryObject, StreamObject
+    if not isinstance(v, DictionaryObject) or isinstance(v, StreamObject):
+        return ["%s 不是 PDF 字典（实为%s）" % (label, _pdf_kind(v))]
+    return []
+
+
+def _v_keys(keys, label: str, required, optional: Sequence[str] = (),
+            skip: Sequence[str] = ()) -> List[str]:
+    """A CLOSED key set: every ``required`` key present and nothing outside ``required`` +
+    ``optional`` (``skip``: keys already refused with a more specific message)."""
+    errors = []
+    extra = sorted(set(keys) - set(required) - set(optional) - set(skip))
+    missing = sorted(set(required) - set(keys))
+    if extra:
+        errors.append("%s带写出端不会产生的键 %s（封闭键集：未知键即拒绝）" % (label, extra))
+    if missing:
+        errors.append("%s缺少写出端必有的键 %s" % (label, missing))
+    return errors
 
 
 def _pdf_images(page) -> List[Tuple[str, List[float], Optional[Tuple[float, float, float, float]]]]:
@@ -474,20 +637,31 @@ def _pdf_structure(reader, n: int) -> List[str]:
     """Document-level closed set: trailer, catalog (no optional content, actions, forms…), a flat
     page tree, the shared resources (exactly the n page images, the one opaque graphics state,
     no fonts / patterns / shadings) and every page dict (A4 MediaBox, no CropBox / Group /
-    Rotate / annotations, one Flate content stream)."""
+    Rotate / annotations, one Flate content stream). R2h: every value is checked by its PDF type
+    (name / integer / number / array / dictionary / stream) before its value."""
+    from pypdf.generic import ArrayObject, DictionaryObject, StreamObject
     errors: List[str] = []
     trailer = reader.trailer
     bad = sorted(set(str(k) for k in trailer.keys()) - _TRAILER_KEYS)
     if bad or "/Encrypt" in trailer:
         errors.append("PDF 文件尾带写出端不会产生的键 %s" % bad)
+    errors += _v_int(_obj(trailer.get("/Size")), "PDF 文件尾的 /Size", lo=1)
     root = _obj(trailer["/Root"])
+    e = _v_dict(root, "PDF 目录")
+    if e:
+        return errors + e
     if sorted(str(k) for k in root.keys()) != ["/Pages", "/Type"]:
         errors.append("PDF 目录带写出端不会产生的键 %s（可选内容组 / 动作 / 表单等）"
                       % sorted(set(str(k) for k in root.keys()) - {"/Type", "/Pages"}))
+    errors += _v_name(_obj(root.get("/Type")), "PDF 目录的 /Type", ("/Catalog",))
     pages = _obj(root["/Pages"])
+    e = _v_dict(pages, "PDF 页树根")
+    if e:
+        return errors + e
     if sorted(str(k) for k in pages.keys()) != ["/Count", "/Kids", "/Type"]:
         errors.append("PDF 页树带额外键 %s（CropBox / Rotate / MediaBox 等会被页面继承）"
                       % sorted(str(k) for k in pages.keys()))
+    errors += _v_name(_obj(pages.get("/Type")), "PDF 页树根的 /Type", ("/Pages",))
     # R2g #1: the tree is checked by REFERENCE, not by what pypdf resolves. The catalog's /Pages
     # must be an indirect reference; every kid an indirect reference to a /Page whose RAW /Parent
     # is that same reference (an off-tree parent could otherwise hand down CropBox / Rotate /
@@ -498,15 +672,20 @@ def _pdf_structure(reader, n: int) -> List[str]:
     if pages_ref is None:
         errors.append("PDF 目录的 /Pages 不是间接引用")
     raw_kids = _obj(pages.raw_get("/Kids")) if "/Kids" in pages else None
-    raw_kids = list(raw_kids) if isinstance(raw_kids, list) else []
+    if not isinstance(raw_kids, ArrayObject):
+        errors.append("PDF 页树的 /Kids 不是 PDF 数组（实为%s）" % _pdf_kind(raw_kids))
+    raw_kids = list(raw_kids) if isinstance(raw_kids, ArrayObject) else []
     kid_refs = [ref(x) for x in raw_kids]
     if not raw_kids or None in kid_refs or len(set(kid_refs)) != len(kid_refs):
         errors.append("PDF 页树的 /Kids 不是互不相同的页面间接引用")
     kids = [_obj(x) for x in raw_kids]
-    if any(str(_obj(kid.get("/Type"))) != "/Page" for kid in kids) or \
-            int(_obj(pages.get("/Count", -1))) != len(kids):
-        errors.append("PDF 页树不是写出端的单层结构")
     for k, kid in enumerate(kids, start=1):
+        e = _v_dict(kid, "第 %d 页的页面对象" % k)
+        if e:
+            return errors + e
+    errors += _v_int(_obj(pages.get("/Count")), "PDF 页树的 /Count", allowed=(len(kids),))
+    for k, kid in enumerate(kids, start=1):
+        errors += _v_name(_obj(kid.get("/Type")), "第 %d 页的 /Type" % k, ("/Page",))
         if ref(kid.raw_get("/Parent")) != pages_ref or pages_ref is None:
             errors.append("第 %d 页的 /Parent 不是目录的页树根（离树父对象可能继承裁切 / 旋转）" % k)
     try:
@@ -531,39 +710,73 @@ def _pdf_structure(reader, n: int) -> List[str]:
         if keys != _PAGE_KEYS:
             errors.append("%s的页面对象键不是写出端的集合（多 %s，少 %s）"
                           % (where, sorted(keys - _PAGE_KEYS), sorted(_PAGE_KEYS - keys)))
-        if _obj(page.get("/Annots")):
+        annots = _obj(page.get("/Annots"))
+        if not isinstance(annots, ArrayObject):
+            errors.append("%s的 /Annots 不是 PDF 数组（实为%s）" % (where, _pdf_kind(annots)))
+        elif len(annots):
             errors.append("%s带注释对象" % where)
-        box = [float(_obj(v)) for v in (_obj(page.get("/MediaBox")) or [])]
-        if len(box) != 4 or any(abs(a - b) > _NUM_TOL for a, b in zip(box, [0, 0, pw, ph])):
-            errors.append("%s的页框 %s 不是 A4" % (where, box))
-        cont = page.get("/Contents")
-        cont = _obj(cont)
-        if isinstance(cont, list) or not hasattr(cont, "get_data"):
-            errors.append("%s的内容流不是单个流" % where)
+        box = _obj(page.get("/MediaBox"))
+        if not isinstance(box, ArrayObject) or len(box) != 4:
+            errors.append("%s的页框 /MediaBox 不是 4 个数的数组（%s）——不是 A4" % (where, _pdf_show(box)))
         else:
-            ck = sorted(set(str(x) for x in cont.keys()) - {"/Length", "/Filter"})
-            if ck or str(_obj(cont.get("/Filter"))) != "/FlateDecode":
+            for side, v, want in zip(("左", "下", "右", "上"), box, (0.0, 0.0, pw, ph)):
+                errors += _v_num(_obj(v), "%s的页框 /MediaBox %s边（A4）" % (where, side), want)
+        cont = _obj(page.get("/Contents"))
+        if not isinstance(cont, StreamObject):
+            errors.append("%s的内容流不是单个流" % where)
+        else:                                     # (pypdf consumed /Length while parsing)
+            ck = sorted(set(str(x) for x in cont.keys()) - {"/Filter"})
+            if ck:
                 errors.append("%s的内容流字典不受控 %s" % (where, ck))
-        res = _obj(page.get("/Resources")) or {}
+            errors += _v_name(_obj(cont.get("/Filter")), "%s的内容流 /Filter" % where,
+                              ("/FlateDecode",))
+        res = _obj(page.get("/Resources"))
+        e = _v_dict(res, "%s的 /Resources" % where)
+        if e:
+            errors += e
+            continue
         rkeys = set(str(x) for x in res.keys())
         if rkeys != _RES_KEYS:
             errors.append("%s的资源键不是写出端的集合 %s" % (where, sorted(rkeys ^ _RES_KEYS)))
         for name in ("/Font", "/Pattern", "/Shading"):
-            if _obj(res.get(name)):
-                errors.append("%s的资源里多了 %s" % (where, name))
-        xo = _obj(res.get("/XObject")) or {}
-        if sorted(str(x) for x in xo.keys()) != sorted(want_x):
-            errors.append("%s的图片资源不是写出端的 %s（实为 %s）——多出的图片可能覆盖页面"
-                          % (where, want_x, sorted(str(x) for x in xo.keys())))
-        gs = _obj(res.get("/ExtGState")) or {}
-        ok_gs = sorted(str(x) for x in gs.keys()) == ["/A1"]
+            if name in rkeys:
+                v = _obj(res.get(name))
+                e = _v_dict(v, "%s的资源 %s" % (where, name))
+                errors += e
+                if not e and len(v):
+                    errors.append("%s的资源里多了 %s" % (where, name))
+        xo = _obj(res.get("/XObject"))
+        e = _v_dict(xo, "%s的图片资源 /XObject" % where)
+        errors += e
+        if not e:
+            if sorted(str(x) for x in xo.keys()) != sorted(want_x):
+                errors.append("%s的图片资源不是写出端的 %s（实为 %s）——多出的图片可能覆盖页面"
+                              % (where, want_x, sorted(str(x) for x in xo.keys())))
+            for name in sorted(str(x) for x in xo.keys()):
+                if not isinstance(_obj(xo[name]), StreamObject):
+                    errors.append("%s的图片资源 %s 不是 PDF 流（实为%s）"
+                                  % (where, name, _pdf_kind(_obj(xo[name]))))
+        gs = _obj(res.get("/ExtGState"))
+        gs_err: List[str] = []
+        ok_gs = isinstance(gs, DictionaryObject) and sorted(str(x) for x in gs.keys()) == ["/A1"]
         if ok_gs:
             a1 = _obj(gs["/A1"])
-            ok_gs = sorted(str(x) for x in a1.keys()) == ["/CA", "/Type", "/ca"] and \
-                str(_obj(a1["/Type"])) == "/ExtGState" and float(_obj(a1["/CA"])) == 1.0 \
-                and float(_obj(a1["/ca"])) == 1.0
+            ok_gs = isinstance(a1, DictionaryObject) and \
+                sorted(str(x) for x in a1.keys()) == ["/CA", "/Type", "/ca"]
+            if ok_gs:
+                gs_err = (_v_name(_obj(a1["/Type"]), "/A1 的 /Type", ("/ExtGState",))
+                          + _v_num(_obj(a1["/CA"]), "/A1 的 /CA", 1.0, tol=0.0)
+                          + _v_num(_obj(a1["/ca"]), "/A1 的 /ca", 1.0, tol=0.0))
+                ok_gs = not gs_err
         if not ok_gs:
-            errors.append("%s的图形状态不是写出端的唯一不透明状态（透明度 / 软遮罩 / 混合模式）" % where)
+            errors.append("%s的图形状态不是写出端的唯一不透明状态（透明度 / 软遮罩 / 混合模式）%s"
+                          % (where, "：" + "；".join(gs_err) if gs_err else ""))
+        procset = _obj(res.get("/ProcSet"))
+        if not isinstance(procset, ArrayObject):
+            errors.append("%s的资源 /ProcSet 不是 PDF 数组（实为%s）" % (where, _pdf_kind(procset)))
+        else:
+            for v in procset:
+                errors += _v_name(_obj(v), "%s的资源 /ProcSet 项" % where, _PDF_PROCSET)
     return errors
 
 
@@ -635,6 +848,72 @@ def _render_caption_ink(path: Path, k: int, src: "Source", rect_mm, dpi: int = 1
             float((whole < _D.INK_LEVEL).mean()) if whole.size else 0.0)
 
 
+def _pdf_page_report(path: Path, k: int, page, src: "Source", sp: Dict[str, Any],
+                     render: str) -> Dict[str, Any]:
+    box = page.mediabox
+    pw = float(box.width) / PT_PER_MM
+    ph = float(box.height) / PT_PER_MM
+    imgs = _pdf_images(page)
+    bad_ops = [i for i in imgs if i[0] == "<bad operand>"]
+    imgs = [i for i in imgs if i[0] != "<bad operand>"]
+    if not imgs:
+        return {"page": k, "figure": src.figure, "ok": False,
+                "errors": ["第 %d 页没有图片" % k], "render_caption_ink": None}
+    # more than one image is already a failure; the first one is still measured (and the
+    # page rendered) so the report shows what a reader actually sees
+    name, m, clip, xo = imgs[0]
+    where = "第 %d 页" % k
+    extra = ([] if len(imgs) == 1 else ["第 %d 页应恰好 1 张图片，实有 %d 张" % (k, len(imgs))])
+    if bad_ops:
+        extra.append("%s的内容流里有非 PDF 数值 / 名称类型的操作数（几何无法确定）" % where)
+    extra += _pdf_image_whitelist(xo, where) + _pdf_page_whitelist(page, where)
+    contents = page.get_contents()
+    op_errors, _rect = _pdf_ops_conform(contents.operations if contents is not None else [],
+                                        k, where)
+    extra += op_errors
+    # unit square through the CTM → page rectangle (PDF origin bottom-left, points)
+    xs = [m[4], m[0] + m[4], m[2] + m[4], m[0] + m[2] + m[4]]
+    ys = [m[5], m[1] + m[5], m[3] + m[5], m[1] + m[3] + m[5]]
+    if clip is not None and (clip[0] > min(xs) + 0.5 or clip[1] > min(ys) + 0.5
+                             or clip[2] < max(xs) - 0.5 or clip[3] < max(ys) - 0.5):
+        extra.append("%s的图片被裁切区域截掉一部分" % where)
+    x0, x1 = min(xs) / PT_PER_MM, max(xs) / PT_PER_MM
+    y0, y1 = min(ys) / PT_PER_MM, max(ys) / PT_PER_MM
+    if abs(m[1]) > 1e-6 or abs(m[2]) > 1e-6:
+        extra.append("图片被旋转或错切")
+    try:
+        gray = _pdf_gray(page, name)
+    except Exception as exc:                      # R2h: e.g. a /Width that is not an integer
+        gray = None
+        extra.append("%s的图片像素无法解码（%s: %s）" % (where, type(exc).__name__, exc))
+    if gray is not None:
+        # PDF image space: sample row 0 maps to the TOP of the unit square. A negative CTM
+        # scale mirrors that axis on the page (matplotlib stores rows bottom-up and draws
+        # with d < 0), so orient the samples as they are DISPLAYED before locating ink.
+        import numpy as np
+        if m[3] < 0:
+            gray = np.flipud(gray)
+        if m[0] < 0:
+            gray = np.fliplr(gray)
+    px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
+    rect_mm = (x0, ph - y1, x1 - x0, y1 - y0)
+    rendered = None
+    if render != "unavailable" and src.caption is not None:
+        try:
+            cap_ink, whole_ink = _render_caption_ink(path, k, src, rect_mm, backend=render)
+            rendered = round(cap_ink, 4)
+            if cap_ink < INK_FRACTION_MIN:
+                extra.append("%s渲染后图号位置没有墨迹（%.1f%%）——页面上看不到「图%d」"
+                             % (where, cap_ink * 100, k))
+            if whole_ink <= 0.0:
+                extra.append("%s渲染后图片区域一片空白" % where)
+        except Exception as exc:
+            extra.append("%s独立渲染核验失败：%s" % (where, exc))
+    pc = _page_check(k, src, sp, rect_mm, px, gray, (pw, ph), extra)
+    pc["render_caption_ink"] = rendered
+    return pc
+
+
 def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict[str, Any]:
     path = Path(path)
     if not pdf_checker_available():
@@ -653,65 +932,14 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
     render = render_backend() or "unavailable"
     pages = []
     for k, (page, src) in enumerate(zip(pdf_pages, sources), start=1):
-        box = page.mediabox
-        pw = float(box.width) / PT_PER_MM
-        ph = float(box.height) / PT_PER_MM
-        imgs = _pdf_images(page)
-        bad_ops = [i for i in imgs if i[0] == "<bad operand>"]
-        imgs = [i for i in imgs if i[0] != "<bad operand>"]
-        if not imgs:
-            pages.append({"page": k, "figure": src.figure, "ok": False,
-                          "errors": ["第 %d 页没有图片" % k], "render_caption_ink": None})
-            continue
-        # more than one image is already a failure; the first one is still measured (and the
-        # page rendered) so the report shows what a reader actually sees
-        name, m, clip, xo = imgs[0]
-        where = "第 %d 页" % k
-        extra = ([] if len(imgs) == 1 else ["第 %d 页应恰好 1 张图片，实有 %d 张" % (k, len(imgs))])
-        if bad_ops:
-            extra.append("%s的内容流里有非 PDF 数值 / 名称类型的操作数（几何无法确定）" % where)
-        extra += _pdf_image_whitelist(xo, where) + _pdf_page_whitelist(page, where)
-        contents = page.get_contents()
-        op_errors, _rect = _pdf_ops_conform(contents.operations if contents is not None else [],
-                                            k, where)
-        extra += op_errors
-        # unit square through the CTM → page rectangle (PDF origin bottom-left, points)
-        xs = [m[4], m[0] + m[4], m[2] + m[4], m[0] + m[2] + m[4]]
-        ys = [m[5], m[1] + m[5], m[3] + m[5], m[1] + m[3] + m[5]]
-        if clip is not None and (clip[0] > min(xs) + 0.5 or clip[1] > min(ys) + 0.5
-                                 or clip[2] < max(xs) - 0.5 or clip[3] < max(ys) - 0.5):
-            extra.append("%s的图片被裁切区域截掉一部分" % where)
-        x0, x1 = min(xs) / PT_PER_MM, max(xs) / PT_PER_MM
-        y0, y1 = min(ys) / PT_PER_MM, max(ys) / PT_PER_MM
-        if abs(m[1]) > 1e-6 or abs(m[2]) > 1e-6:
-            extra.append("图片被旋转或错切")
-        gray = _pdf_gray(page, name)
-        if gray is not None:
-            # PDF image space: sample row 0 maps to the TOP of the unit square. A negative CTM
-            # scale mirrors that axis on the page (matplotlib stores rows bottom-up and draws
-            # with d < 0), so orient the samples as they are DISPLAYED before locating ink.
-            import numpy as np
-            if m[3] < 0:
-                gray = np.flipud(gray)
-            if m[0] < 0:
-                gray = np.fliplr(gray)
-        px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
-        rect_mm = (x0, ph - y1, x1 - x0, y1 - y0)
-        rendered = None
-        if render != "unavailable" and src.caption is not None:
-            try:
-                cap_ink, whole_ink = _render_caption_ink(path, k, src, rect_mm, backend=render)
-                rendered = round(cap_ink, 4)
-                if cap_ink < INK_FRACTION_MIN:
-                    extra.append("%s渲染后图号位置没有墨迹（%.1f%%）——页面上看不到「图%d」"
-                                 % (where, cap_ink * 100, k))
-                if whole_ink <= 0.0:
-                    extra.append("%s渲染后图片区域一片空白" % where)
-            except Exception as exc:
-                extra.append("%s独立渲染核验失败：%s" % (where, exc))
-        pc = _page_check(k, src, sp, rect_mm, px, gray, (pw, ph), extra)
-        pc["render_caption_ink"] = rendered
-        pages.append(pc)
+        try:
+            pages.append(_pdf_page_report(path, k, page, src, sp, render))
+        except Exception as exc:
+            # R2h: an object pypdf cannot even interpret (e.g. a stream whose /Length is not a
+            # PDF integer) is not the writer's — the page fails, the check never raises
+            pages.append({"page": k, "figure": src.figure, "ok": False, "render_caption_ink": None,
+                          "errors": ["第 %d 页无法按写出端的固定结构解释：%s: %s"
+                                     % (k, type(exc).__name__, exc)]})
     rep = _report(path, "pdf", sources, pages, doc_errors, len(pdf_pages))
     rep.update(layout_verified="file-geometry",
                layout_note="PDF 的页幅与图片位置取自文件里的绘制指令（CTM）与图片像素；"
