@@ -366,9 +366,9 @@ components:
         layout_note: {type: string, example: "Word 按文档结构核验，实际排版以 Word 打开为准"}
         render_check:
           type: string
-          enum: [pypdfium2, pymupdf, unavailable]
+          enum: [pypdfium2, unavailable]
           description: >
-            仅 PDF：用哪个独立渲染器逐页渲染核验可见性（推荐 pypdfium2；PyMuPDF 为 AGPL，仅已安装时备选）。
+            仅 PDF：独立渲染器（只有 pypdfium2）逐页渲染核验可见性；没装为 unavailable。
             R2j 裁决起是 PDF 通过的必要条件：unavailable 时 status=unverified、ok=false
         status:
           type: string
@@ -453,10 +453,10 @@ components:
             pdf_check_available:
               type: boolean
               description: >
-                true = 有 pypdf 且有独立渲染器（pypdfium2 / PyMuPDF），PDF 可判通过；false = 缺其一，导出的
+                true = 有 pypdf 且有独立渲染器 pypdfium2，PDF 可判通过；false = 缺其一，导出的
                 PDF 一律为 unverified（不是通过），原因见 unavailable_reasons.pdf
             pdf_render_check_available: {type: boolean, description: 是否有独立渲染器（R2j 裁决起是 PDF 通过的必要条件）}
-            pdf_renderer: {type: string, nullable: true, enum: [pypdfium2, pymupdf, null]}
+            pdf_renderer: {type: string, nullable: true, enum: [pypdfium2, null]}
             pdf_render_required: {type: boolean, description: 恒为 true：PDF 通过须经独立渲染}
             statuses: {type: array, items: {type: string}, example: [ok, skip, fail, unverified]}
             integrity:

@@ -791,39 +791,35 @@ def _pdf_structure(reader, n: int) -> List[str]:
     return errors
 
 
-#: Optional independent PDF renderers for the second check, in order of preference (R2g #3):
-#: pypdfium2 (BSD-3-Clause / Apache-2.0, recommended) first; PyMuPDF (AGPL-3.0 — not
-#: recommended, used only if it is already installed) second. The core check never needs either.
-#: ``PFK_PDF_RENDERER`` = auto (default) | none | pypdfium2 | pymupdf.
-RENDER_ORDER = ("pypdfium2", "pymupdf")
+#: The independent PDF renderer (R2j ruling: a NECESSARY condition of a PDF pass): pypdfium2
+#: (BSD-3-Clause / Apache-2.0) — the only one (WP2 R2n ruling: no second native renderer, one
+#: native-object lifetime to get right). ``PFK_PDF_RENDERER`` = auto (default) | none |
+#: pypdfium2; any other value selects no renderer (PDFs then come out ``unverified``).
+RENDERERS = ("pypdfium2",)
 
 
 def render_backend() -> Optional[str]:
     import importlib
     import os
     want = os.environ.get("PFK_PDF_RENDERER", "auto").strip().lower()
-    order = RENDER_ORDER if want in ("", "auto") else (() if want == "none" else (want,))
-    for name in order:
-        module = {"pypdfium2": "pypdfium2", "pymupdf": "fitz"}.get(name)
-        if module is None:
-            continue
-        try:
-            importlib.import_module(module)
-            return name
-        except ImportError:
-            continue
-    return None
+    if want not in ("", "auto") + RENDERERS:
+        return None
+    try:
+        importlib.import_module("pypdfium2")
+        return "pypdfium2"
+    except ImportError:
+        return None
 
 
 def render_checker_available() -> bool:
     return render_backend() is not None
 
 
-#: R2l: PDFium (and MuPDF) must never be entered from two threads at once — pypdfium2 forbids
-#: it even for different documents (random "Failed to load page", possible crashes), and every
-#: export job runs in its own thread. ONE process-wide lock covers the whole use of the engine:
-#: open, render, copying the pixels out, and closing every object. (Concurrency across PROCESSES
-#: would need a render subprocess; the service renders in-process.)
+#: R2l: PDFium must never be entered from two threads at once — pypdfium2 forbids it even for
+#: different documents (random "Failed to load page", possible crashes), and every export job runs
+#: in its own thread. ONE process-wide lock covers the whole use of the engine: open, render,
+#: copying the pixels out, and closing every object. (Concurrency across PROCESSES would need a
+#: render subprocess; the service renders in-process.)
 _RENDER_LOCK = threading.Lock()
 RENDER_ATTEMPTS = 2            # a renderer failure is retried once before it counts
 
@@ -833,38 +829,54 @@ class RenderUnavailable(RuntimeError):
     which is not a verdict on the document's content."""
 
 
+class _EngineError(RuntimeError):
+    """One failed render attempt, carrying only the engine's error TEXT (R2n): no traceback, no
+    reference to any native object."""
+
+
+def _foreign_packed_bitmap(width, height, format, rev_byteorder=False, **_kw):
+    import pypdfium2 as pdfium
+    return pdfium.PdfBitmap.new_foreign(width, height, format, rev_byteorder=rev_byteorder,
+                                        force_packed=True)
+
+
 def _render_gray(path: Path, k: int, dpi: int, backend: str):
+    """Page ``k`` rendered to a gray numpy array (a COPY — no view into a native bitmap). Under
+    the process-wide lock, the document, page and bitmap are opened, used and explicitly closed;
+    an engine exception is caught INSIDE the lock, its traceback frames cleared (they reference
+    the native objects), and only its text leaves the lock (as ``_EngineError``) — so no native
+    object can be released later, by the garbage collector, outside the lock (R2n)."""
+    import traceback
     import numpy as np
+    if backend not in RENDERERS:
+        raise _EngineError("不支持的渲染器 %r（只支持 pypdfium2）" % (backend,))
     with _RENDER_LOCK:
-        if backend == "pypdfium2":
+        arr = error = None
+        pdf = page = bitmap = None
+        try:
             import pypdfium2 as pdfium
             pdf = pdfium.PdfDocument(str(path))
-            try:
-                page = pdf[k - 1]
-                try:
-                    bitmap = page.render(scale=dpi / 72.0, grayscale=True)
+            page = pdf[k - 1]
+            # a PDFium-allocated bitmap (``new_foreign``) is destroyed by its own ``close()`` —
+            # below, inside the lock; the default Python-buffer bitmap is never destroyed at all
+            bitmap = page.render(scale=dpi / 72.0, grayscale=True,
+                                 bitmap_maker=_foreign_packed_bitmap)
+            arr = np.array(bitmap.to_numpy(), dtype=np.uint8, copy=True)
+        except Exception as exc:                  # the engine's own failure: keep its TEXT only
+            error = "%s: %s" % (type(exc).__name__, exc)
+            traceback.clear_frames(exc.__traceback__)
+            exc.__traceback__ = exc.__context__ = exc.__cause__ = None
+        finally:
+            for obj in (bitmap, page, pdf):       # children first; explicit, inside the lock
+                if obj is not None:
                     try:
-                        arr = np.array(bitmap.to_numpy(), dtype=np.uint8, copy=True)
-                    finally:
-                        bitmap.close()
-                finally:
-                    page.close()
-            finally:
-                pdf.close()
-            return arr.reshape(arr.shape[0], arr.shape[1]) if arr.ndim == 3 else arr
-        import fitz
-        with fitz.open(str(path)) as doc:
-            page = doc[k - 1]
-            pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
-            try:
-                arr = np.frombuffer(bytes(pix.samples), dtype=np.uint8).reshape(
-                    pix.height, pix.width).copy()
-            finally:
-                # R2m: release MuPDF objects HERE, under the lock — not whenever the garbage
-                # collector gets to them (possibly in another thread, outside the lock)
-                del pix
-                del page
-        return arr
+                        obj.close()
+                    except Exception:             # noqa: BLE001 — already closed / torn down
+                        pass
+            bitmap = page = pdf = None
+        if error is not None:
+            raise _EngineError(error)
+    return arr.reshape(arr.shape[0], arr.shape[1]) if arr.ndim == 3 else arr
 
 
 def _render_page(path: Path, k: int, dpi: int, backend: str):
@@ -875,9 +887,10 @@ def _render_page(path: Path, k: int, dpi: int, backend: str):
         try:
             return _render_gray(path, k, dpi, backend)
         except Exception as exc:                  # the engine's own error, whatever its type
-            last = exc
-    raise RenderUnavailable("%s 渲染第 %d 页出错（重试 %d 次）：%s: %s"
-                            % (backend, k, RENDER_ATTEMPTS - 1, type(last).__name__, last))
+            last = "%s" % exc if isinstance(exc, _EngineError) else "%s: %s" % (
+                type(exc).__name__, exc)          # keep the TEXT, not the exception (R2n)
+    raise RenderUnavailable("%s 渲染第 %d 页出错（重试 %d 次）：%s"
+                            % (backend, k, RENDER_ATTEMPTS - 1, last))
 
 
 def _render_caption_ink(arr, dpi: int, src: "Source", rect_mm):

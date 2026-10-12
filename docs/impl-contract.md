@@ -2466,8 +2466,8 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   页面对象键恰为 Type/Parent/Resources/MediaBox/Contents/Annots（无 CropBox/Group/Rotate）、注释为空、MediaBox 为 A4、
   内容流为单个 Flate 流；资源键固定，Font/Pattern/Shading 为空，XObject 恰为 `/I1…/In`，ExtGState 恰为 `/A1`
   {Type, CA=1, ca=1}。
-- **独立渲染（可选）**：有独立渲染器时（修复轮 7 起推荐 pypdfium2，见 §14.14；PyMuPDF 为 AGPL 仅备选）逐页渲染，在图号位置与
-  图片区域统计看得见的墨迹，`render_check: "pypdfium2"`（或 `"pymupdf"`）、`render_caption_ink`；没装则 `render_check: "unavailable"`。
+- **独立渲染**：有独立渲染器 pypdfium2 时（见 §14.14、§14.21）逐页渲染，在图号位置与图片区域统计看得见的墨迹，
+  `render_check: "pypdfium2"`、`render_caption_ink`；没装则 `render_check: "unavailable"`（修复轮 10 起 PDF 为 unverified）。
 
 ### 14.14 修复轮 7（Codex R2g）收敛：页树按引用、操作数按原生类型、渲染器许可
 
@@ -2476,8 +2476,8 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   引用（离树父对象无法再下传未检查的裁切 / 旋转）；pypdf 实际迭代的页面序列必须与 `/Kids` 逐一相同。
 - **操作数按 PDF 原生类型**：数值操作数只接受有限的 `NumberObject` / `FloatObject`，名称操作数只接受 `NameObject`；
   `(1)` 这类字符串不再被 `float()` 当成数——内容流比对与 `_pdf_images` 几何复核都按此。
-- **独立渲染器许可**：第二道渲染核验推荐 **pypdfium2**（BSD-3-Clause / Apache-2.0，doctor `deliverable-pdf-render`、
-  requirements 可选段）；PyMuPDF 为 **AGPL**，不推荐，只在已安装时作为备选；`PFK_PDF_RENDERER=auto|none|pypdfium2|pymupdf`。
+- **独立渲染器许可**：渲染核验用 **pypdfium2**（BSD-3-Clause / Apache-2.0，doctor `deliverable-pdf-render`、
+  requirements 可选段）；`PFK_PDF_RENDERER=auto|none|pypdfium2`（§14.21：唯一渲染器）。
   核心核验不依赖任何渲染器；PDF 封闭集回归在「无渲染器」与「pypdfium2」两种配置下各跑一遍。
 
 ### 14.15 修复轮 8（Codex R2h）收敛：PDF 对象取值按原生类型、图片与页面字典封闭
@@ -2534,7 +2534,7 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   `deliverable_check.check_document(..., expected_sha256=)`：给出预期摘要时**先比对**，不一致 → `fail`
   「文件已被修改，请使用导出包原文件」，**不做任何其余核验**；一致只说明是原文件，完整核验照常进行；报告带 `sha256`
   与 `sha256_verified`。CLI `deliverable_check.py --sha256`。核对清单与 README：「核验只对导出包原文件有效」。
-- **渲染核验必需**：独立渲染（pypdfium2 推荐；PyMuPDF 已装则备选）是 PDF「通过」的必要条件。核验报告新增
+- **渲染核验必需**：独立渲染（pypdfium2）是 PDF「通过」的必要条件。核验报告新增
   `status`：`ok`（全部通过，PDF 含渲染）/ `fail`（有不通过项，或哈希不符）/ `unverified`（无不通过项，但缺渲染器或缺
   pypdf，无法确认可见性）。判定次序：任一结构 / 页面 / 渲染错误 → `fail`；否则无渲染器 → `unverified`；否则 `ok`。
   `unverified` 的 PDF 不是通过：清单项状态 `unverified`、原因「缺少 pypdfium2，无法核验 PDF 可见性」，文件同不通过的
@@ -2579,7 +2579,7 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
 - **问题**：每个导出作业在自己的线程里跑，`_render_gray` 直接打开 / 渲染 / 关闭 PDFium 文档，没有互斥；pypdfium2 明令禁止
   不同线程同时调用 PDFium（即使是不同文档）。本机复现：8 线程 × 60 次渲染无锁时约 43% 报 `PdfiumError: Failed to load page`，
   合法交付被判失败。自查同类：matplotlib 也不是线程安全的，并发导出时写 PDF 随机报「生成失败：cmap」。
-- **互斥**：`deliverable_check._RENDER_LOCK`（模块级 `threading.Lock`）覆盖 PDFium / PyMuPDF 的整个使用过程——打开、渲染、
+- **互斥**：`deliverable_check._RENDER_LOCK`（模块级 `threading.Lock`）覆盖 PDFium 的整个使用过程——打开、渲染、
   把像素**复制**出位图（`np.array(..., copy=True)`，不再持有指向位图缓冲区的视图）、关闭位图 / 页面 / 文档。
   `deliverable.MPL_LOCK`（模块级 `threading.RLock`）覆盖导出链路上 matplotlib 的全部使用：`rasterize`（写出端与核验端
   同一函数）、`write_pdf`、导出 PNG 预览。两把锁从不嵌套。跨进程并发不在本轮范围（服务在进程内渲染；若将来需要，改为独立
@@ -2591,7 +2591,7 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   渲染器每次都抛错 → `unverified`（每页恰好尝试 2 次），只错一次 → 重试后通过，72 dpi 的真实不通过文件仍为 `fail`；导出层
   渲染器出错 → PDF 项 `unverified`、Word 不受影响。
 
-### 14.20 修复轮 13（Codex R2m）：matplotlib 锁下沉到所有入口；PyMuPDF 对象锁内释放
+### 14.20 修复轮 13（Codex R2m）：matplotlib 锁下沉到所有入口
 
 - **问题**：修复轮 12 的 matplotlib 锁只包住导出的 PNG（`export._png`）、`rasterize`、`write_pdf`；懒加载 PNG
   （`studio_ext.ensure_preview_png`）与工作台无工程 MCP 流程图仍直接调 `sheet.render_preview`（`qsave` 会切换 backend、走
@@ -2600,8 +2600,23 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   deliverable 循环导入）；`sheet.render_preview` 在**函数内部**持锁（懒加载 PNG、流程图预览、导出 PNG、各 CLI 都经过它），
   `deliverable.rasterize` / `write_pdf` 持同一把锁（`deliverable.MPL_LOCK` 即同一对象）；`export._png` 不再自己加锁。
   进程内 matplotlib 的使用只剩这三个入口。与 PDF 渲染器锁从不嵌套。
-- **PyMuPDF 备选**：页面与 Pixmap 在渲染器锁内显式 `del`（像素先复制出来），文档在锁内关闭，不依赖析构时机。
 - **回归**：另一线程持有 `MPL_LOCK` 时，`sheet.render_preview`、`ensure_preview_png`、`export._png`、`rasterize`、`write_pdf`
   与 MCP `render_flowchart`（无工程）都等待、释放后成功（先预热，未加锁的实现 0.6 s 内即完成，本测试能区分）；3 个导出线程
-  （PDF + Word + PNG，独立渲染）、3 个懒加载 PNG 线程 × 3、2 个 MCP 流程图线程 × 2 同时运行全部成功；替身 `fitz` 记录到
-  页面、Pixmap、文档三者都在锁内释放。
+  （PDF + Word + PNG，独立渲染）、3 个懒加载 PNG 线程 × 3、2 个 MCP 流程图线程 × 2 同时运行全部成功。
+
+### 14.21 修复轮 14（Codex R2n → 架构裁决）：只保留 pypdfium2 一个渲染器；引擎异常在锁内消化
+
+- **裁决**：R2n 复现另一个原生渲染库的异常回溯把原生对象带出锁、由垃圾回收在锁外析构。该库本就是 AGPL、不推荐的备选，
+  裁决移除：渲染器只剩 **pypdfium2**，`PFK_PDF_RENDERER` 只接受 `auto | none | pypdfium2`（其他取值 = 不选渲染器，
+  PDF 为 `unverified`）；能力接口 `pdf_renderer` 与 `render_check` 的取值相应收窄（`pypdfium2` / `null` / `unavailable`），
+  doctor 只检查 pypdfium2，requirements 可选段同步。
+- **pypdfium2 路径的生命周期规范**：`_render_gray` 在渲染器锁内依次打开文档、取页、渲染（位图由 PDFium 分配：
+  `PdfBitmap.new_foreign(..., force_packed=True)`——默认的 Python 缓冲区位图其原生句柄从不销毁，改用后由自身 `close()`
+  在锁内销毁）、把像素**复制**出位图；底层任何
+  异常都在**锁内**捕获，`traceback.clear_frames` 清掉回溯帧（它们引用原生对象），并清空 `__traceback__` / `__context__` /
+  `__cause__`；位图、页面、文档在锁内按子到父显式 `close()`、局部引用置空；只把错误**文本**（`_EngineError`）带出锁。
+  `_render_page` 重试一次，保存的也只是文本；两次都失败 → `RenderUnavailable` → 该页 `render_unverified`，文件 `unverified`。
+- **回归**：用真实 pypdfium2 对象注入像素读取失败（`PdfBitmap.to_numpy` 第一次抛 `MemoryError`）：重试成功；pypdfium2 的
+  每一次原生释放（显式 `close()` 或析构回调，都经同一个 `_close_template`）都记录到发生时 `_RENDER_LOCK.locked()` 为真，
+  `gc.collect()` 之后没有任何锁外的原生释放、没有存活的 pypdfium2 对象；两次都失败时结果为 `unverified`，同样无锁外释放。
+  `PFK_PDF_RENDERER` 取其他值（含被移除的备选名）时 `render_backend()` 为空；`_render_gray` 只接受 pypdfium2。

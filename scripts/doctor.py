@@ -423,9 +423,9 @@ def check_deliverable() -> dict:
 
 def check_deliverable_render() -> dict:
     """**导出 PDF 必需**（WP2 R2j 裁决）：导出包 PDF 每页用独立渲染器渲染，在图号位置与图片区域统计
-    看得见的墨迹——这是 PDF「通过」的必要条件。推荐 pypdfium2（BSD-3-Clause / Apache-2.0）；PyMuPDF
-    是 AGPL 许可，**不推荐**，只在已经装了时作为备选。两者都没有时 PDF 一律判「未核验」（不是通过），
-    导出结果 ok=false。它只决定导出 PDF 的判定，不在出图链路上，所以仍按可选项计（不影响退出码）。"""
+    看得见的墨迹——这是 PDF「通过」的必要条件。渲染器只用 pypdfium2（BSD-3-Clause / Apache-2.0；
+    R2n 裁决起不再有第二个原生渲染库）。没有它 PDF 一律判「未核验」（不是通过），导出结果 ok=false。
+    它只决定导出 PDF 的判定，不在出图链路上，所以仍按可选项计（不影响退出码）。"""
     try:
         import pypdfium2  # noqa: F401
         return _check("deliverable-pdf-render", STATUS_OK,
@@ -433,13 +433,6 @@ def check_deliverable_render() -> dict:
                       % (_dist_version("pypdfium2") or "?"), required=False)
     except Exception as exc:  # noqa: BLE001
         reason = _import_error(exc)
-    try:
-        import fitz  # noqa: F401
-        return _check("deliverable-pdf-render", STATUS_OK,
-                      "导出 PDF 必需：未装推荐的 pypdfium2；已装的 PyMuPDF（AGPL 许可，不推荐）将作为备选渲染器",
-                      "python3 -m pip install pypdfium2", required=False)
-    except Exception:  # noqa: BLE001
-        pass
     return _check("deliverable-pdf-render", STATUS_MISSING,
                   "导出 PDF 必需：缺 pypdfium2（%s）—— 没有独立渲染，导出的 PDF 一律判「未核验」"
                   "（不是通过），导出结果 ok=false" % reason,

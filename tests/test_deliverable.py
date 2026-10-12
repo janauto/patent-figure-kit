@@ -111,7 +111,7 @@ def test_good_document_passes_every_page_check(two, fmt):
 
 def test_independent_reader_agrees_on_pdf_geometry(two):
     """Cross-check the checker's PDF geometry with a second, independent PDF engine (pdfium via
-    pypdfium2 — BSD/Apache; the AGPL PyMuPDF is not used by the tests)."""
+    pypdfium2 — BSD/Apache)."""
     pdfium = pytest.importorskip("pypdfium2")
     import pypdfium2.raw as pdfium_c
     pytest.importorskip("pypdf")
@@ -883,7 +883,7 @@ def test_pdf_is_a_closed_set(two, renderer, mutate, expect, invisible):
     a white inline image or an extra XObject painted over it, the picture in an OFF optional
     content group, a transparent / blended graphics state, a transparency group or a crop box
     each fail the full check (the original passes). Where the injection makes the figure number
-    invisible, an independent renderer (PyMuPDF, when installed) confirms it."""
+    invisible, the independent renderer (pypdfium2, when installed) confirms it."""
     pytest.importorskip("pypdf")
     tmp, rows = two
     sp = D.spec("standard", 300)
@@ -1657,43 +1657,64 @@ def test_exports_lazy_pngs_and_flowcharts_run_concurrently(tmp_path, monkeypatch
     assert problems == [], problems[:3]
 
 
-def test_pymupdf_objects_are_released_under_the_render_lock(two, monkeypatch):
-    """R2m: with the PyMuPDF fallback, the Pixmap and the page are released INSIDE the renderer
-    lock (explicit ``del``, not whenever the garbage collector runs — possibly in another thread,
-    outside it). A stand-in ``fitz`` records the lock state at each release."""
-    import sys
-    import types
+def test_engine_failures_never_release_native_objects_outside_the_lock(two, monkeypatch):
+    """R2n: real pypdfium2 objects, the pixel read failing (``PdfBitmap.to_numpy`` raises
+    ``MemoryError``). Every NATIVE release pypdfium2 makes — explicit ``close()`` or a finaliser
+    run by the garbage collector, both go through ``_close_template`` — is recorded with the
+    state of the renderer lock at that moment. One failure: the retry renders the page; two:
+    ``RenderUnavailable`` (→ unverified). Either way, after ``gc.collect()`` every release
+    happened INSIDE the lock and no pypdfium2 object is left alive."""
+    pdfium = pytest.importorskip("pypdfium2")
+    import gc
+    from pypdfium2.internal import bases
     tmp, rows = two
-    seen = []
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    releases = []
+    real_close = bases._close_template
 
-    class Pixmap:
-        def __init__(self, w, h):
-            self.width, self.height, self.samples = w, h, bytes([255]) * (w * h)
+    def close_template(info, owner):
+        releases.append((owner.type.__name__, C._RENDER_LOCK.locked()))
+        return real_close(info, owner)
+    monkeypatch.setattr(bases, "_close_template", close_template)
+    real_to_numpy = pdfium.PdfBitmap.to_numpy
+    budget = {"fail": 1}
 
-        def __del__(self):
-            seen.append(("pixmap", C._RENDER_LOCK.locked()))
+    def to_numpy(self, *a, **k):
+        if budget["fail"]:
+            budget["fail"] -= 1
+            raise MemoryError("injected: pixel read failed")
+        return real_to_numpy(self, *a, **k)
+    monkeypatch.setattr(pdfium.PdfBitmap, "to_numpy", to_numpy)
 
-    class Page:
-        def get_pixmap(self, dpi, colorspace, alpha):
-            return Pixmap(8, 11)
+    arr = C._render_page(good, 1, 36, "pypdfium2")                 # 1st attempt fails, retry ok
+    assert arr.ndim == 2 and arr.min() < 128
+    gc.collect()
+    assert {k for k, _locked in releases} == {"PdfBitmap", "PdfPage", "PdfDocument"}, releases
+    assert len(releases) == 6 and all(locked for _k, locked in releases), releases
 
-        def __del__(self):
-            seen.append(("page", C._RENDER_LOCK.locked()))
+    releases.clear()
+    budget["fail"] = 2                                               # both attempts fail
+    with pytest.raises(C.RenderUnavailable) as info:
+        C._render_page(good, 1, 36, "pypdfium2")
+    assert "MemoryError" in str(info.value) and info.value.__context__ is None
+    del info
+    gc.collect()
+    assert len(releases) == 6 and all(locked for _k, locked in releases), releases
+    alive = [w for typ in (pdfium.PdfDocument, pdfium.PdfPage, pdfium.PdfBitmap)
+             for w in bases.ObjectTracker.get(typ, ()) if w() is not None]
+    assert alive == [], alive
 
-    class Doc:
-        def __getitem__(self, k):
-            return Page()
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            seen.append(("doc", C._RENDER_LOCK.locked()))
-            return False
-    fake = types.ModuleType("fitz")
-    fake.open = lambda path: Doc()
-    fake.csGRAY = "gray"
-    monkeypatch.setitem(sys.modules, "fitz", fake)
-    arr = C._render_gray(tmp / "whatever.pdf", 1, 72, "pymupdf")
-    assert arr.shape == (11, 8)
-    assert sorted(seen) == [("doc", True), ("page", True), ("pixmap", True)], seen
+def test_pypdfium2_is_the_only_renderer(monkeypatch):
+    """R2n ruling: ``PFK_PDF_RENDERER`` accepts auto | none | pypdfium2 only — any other value
+    (e.g. the removed fallback's name) selects NO renderer, so PDFs come out unverified."""
+    pytest.importorskip("pypdfium2")
+    for value, want in (("auto", "pypdfium2"), ("", "pypdfium2"), ("pypdfium2", "pypdfium2"),
+                        ("none", None), ("pymupdf", None), ("something", None)):
+        monkeypatch.setenv("PFK_PDF_RENDERER", value)
+        assert C.render_backend() == want, value
+    assert C.RENDERERS == ("pypdfium2",)
+    with pytest.raises(C._EngineError):
+        C._render_gray(Path("x.pdf"), 1, 72, "pymupdf")

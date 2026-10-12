@@ -36,4 +36,3 @@ pytest==8.4.2
 #   pypdfium2          【导出 PDF 必需】独立渲染核验可见性（BSD-3-Clause / Apache-2.0）——R2j 裁决起是 PDF
 #                      「通过」的必要条件；缺它导出的 PDF 一律判「未核验」、导出结果 ok=false。出图链路不依赖它
 #                      安装：python3 -m pip install pypdfium2（doctor 的 deliverable-pdf-render 会提示）
-#                      注：PyMuPDF 为 AGPL 许可，不推荐；已装时仅作备选渲染器
