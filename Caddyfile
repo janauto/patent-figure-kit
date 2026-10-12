@@ -4,8 +4,10 @@
 #   PFK_BASIC_USER / PFK_BASIC_HASH   浏览器入口的 Basic Auth（PFK_BASIC_HASH 为 caddy hash-password 输出）
 #
 # 认证分工（与后端不争 Authorization）：
-#   · Agent / MCP：带 "Authorization: Bearer …" 的 /v1/* 与 /mcp 请求直通后端，由后端 token 校验；代理不碰这个头。
-#   · 浏览器：其余一切先过 Basic Auth；转发前删掉 Authorization（Basic 凭据不进后端），后端只认会话 Cookie。
+#   · 带 "Authorization: Bearer …" 的请求（Agent / MCP，以及浏览器前端发的接口请求）：代理不自己判、不消费这个头，
+#     先 forward_auth 到后端部署闸门的 /_pfk/auth，由后端用同一组凭据（常数时间比较）判定，有效才转发。
+#   · 其余（浏览器打开页面、静态资源、事件流）：先过 Basic Auth；转发前删掉 Authorization（Basic 凭据不进后端），
+#     后端只认会话 Cookie。
 {
 	admin off
 	skip_install_trust
@@ -25,11 +27,11 @@
 		-Server
 	}
 
-	@agent {
-		header Authorization "Bearer *"
-		path /v1/* /mcp /mcp/*
-	}
-	handle @agent {
+	@bearer header Authorization "Bearer *"
+	handle @bearer {
+		forward_auth {$PFK_UPSTREAM} {
+			uri /_pfk/auth
+		}
 		reverse_proxy {$PFK_UPSTREAM} {
 			flush_interval -1
 		}

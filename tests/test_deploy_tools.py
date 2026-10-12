@@ -19,6 +19,11 @@ import pfk_cli as P  # noqa: E402
 import verified_envs as V  # noqa: E402
 
 
+#: wheel 里不带 pyproject.toml（装进包目录后 pfk acceptance 在那里跑本文件）：读它的测试只在源码检出里跑。
+_IN_CHECKOUT = (_ROOT / "pyproject.toml").is_file()
+_checkout_only = pytest.mark.skipif(not _IN_CHECKOUT, reason="只在源码检出里检查打包配置")
+
+
 # ----------------------------------------------------------------- pfk 入口
 
 
@@ -39,6 +44,7 @@ def test_pfk_cli_version_paths_and_unknown_command():
     assert run().returncode == 2                         # 无参数：打印用法，退出码 2
 
 
+@_checkout_only
 def test_pfk_version_is_the_wheel_version():
     import re
     src = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -46,6 +52,7 @@ def test_pfk_version_is_the_wheel_version():
     assert re.fullmatch(r"\d+\.\d+\.\d+", P.__version__)
 
 
+@_checkout_only
 def test_pyproject_pins_match_requirement_files():
     """pyproject 的依赖与两份 requirements 逐字一致（doctor 的 PINNED 表同源）。"""
     import re
@@ -176,3 +183,26 @@ def test_record_reads_install_timing(tmp_path):
     rec = json.loads(out.read_text(encoding="utf-8"))
     assert rec["install_seconds"] == 178 and rec["install_method"] == "install.sh"
     assert rec["acceptance"] is None
+
+
+# ----------------------------------------------------------------- 安装脚本静态约束
+
+
+def test_powershell_script_is_bom_crlf_and_python_snippets_avoid_double_quotes():
+    """Windows PowerShell 5.1：无 BOM 时按系统代码页读中文；给原生程序传参会吃掉参数里的双引号。"""
+    raw = (_ROOT / "安装并启动.ps1").read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf"
+    text = raw[3:].decode("utf-8")
+    assert "\r\n" in text and "\n" not in text.replace("\r\n", "")
+    snippets = [line for line in text.splitlines() if "'-c'" in line]
+    assert snippets and all('"' not in line.split("'-c'", 1)[1] for line in snippets), snippets
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    assert "Invoke-Expression" not in code and "iex " not in code
+
+
+def test_shell_scripts_quote_paths_and_never_eval():
+    for name in ("install.sh", "安装并启动.command"):
+        text = (_ROOT / name).read_text(encoding="utf-8")
+        code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        assert "eval " not in code and "curl " not in code, name
+        assert "| sh" not in code and "| bash" not in code, name

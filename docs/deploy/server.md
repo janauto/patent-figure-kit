@@ -24,12 +24,12 @@ docker compose ps          # app 显示 healthy 后 Caddy 才启动
 
 | 层 | 做什么 |
 | --- | --- |
-| Caddy | 自动 HTTPS（域名 → ACME 证书）；浏览器入口 Basic Auth，转发前删掉 `Authorization`（Basic 凭据不进后端）；带 `Authorization: Bearer …` 的 `/v1/*`、`/mcp` 请求直通后端，由后端校验 token——代理与后端不争同一个头；`Referrer-Policy: no-referrer`（首次进入的 `?token=` 不随 Referer 外泄）；不压缩（SSE 不能被缓冲）。 |
-| 部署闸门（`scripts/patent_figure/deploy_opts.py`） | `--allow-remote` 显式才监听 0.0.0.0；Host 只认回环 + `--public-url` 的主机名 + `--allowed-host`；给了 `--trusted-proxy` 后只接受 Caddy（与容器内回环健康检查）的连接，直连后端端口一律 403；`X-Forwarded-*` 只在对端可信时采信；会话 Cookie 在 https 下补 `Secure`；服务器形态禁用「按服务器本地路径导入 STEP」（只收上传）；`/healthz` 不含数据。 |
+| Caddy | 自动 HTTPS（域名 → ACME 证书）；带 `Authorization: Bearer …` 的请求（Agent / MCP，以及浏览器前端发的接口请求）代理不自己判、不消费这个头，先 `forward_auth` 到后端部署闸门的 `/_pfk/auth`（与后端同一组凭据、常数时间比较），有效才转发；其余请求（打开页面、静态资源、事件流）走 Basic Auth，转发前删掉 `Authorization`（Basic 凭据不进后端），后端只认会话 Cookie——代理与后端不争同一个头；`Referrer-Policy: no-referrer`（首次进入的 `?token=` 不随 Referer 外泄）；不压缩（SSE 不能被缓冲）。 |
+| 部署闸门（`scripts/patent_figure/deploy_opts.py`） | `--allow-remote` 显式才监听 0.0.0.0；Host 只认回环 + `--public-url` 的主机名 + `--allowed-host`；给了 `--trusted-proxy` 后只接受 Caddy（与容器内回环健康检查）的连接，直连后端端口一律 403；`X-Forwarded-*` 只在对端可信时采信；会话 Cookie 在 https 下补 `Secure`；服务器形态禁用「按服务器本地路径导入 STEP」（只收上传）；`/healthz` 不含数据；`/_pfk/auth` 只回答凭据对不对（204 / 401）。 |
 | 后端 | 所有数据路径（`/v1`、`/mcp`、`/files`、`/api/wb`、`/p/<id>/api`）要 token（Bearer 或会话 Cookie）；`?token=` 只作首次引导，命中时响应带弃用头。 |
 | 容器 | 非 root（uid 10001）、`no-new-privileges`、`cap_drop: ALL`；后端端口不发布到宿主机；镜像里没有任何密钥（token 只经环境变量注入，启动日志不回显 token）。 |
 
-替代 Basic Auth：已有 SSO 时可把 Caddyfile 里浏览器那段的 `basic_auth` 换成 `forward_auth`（如 oauth2-proxy、Authelia），保持 `header_up -Authorization`，不要动 Agent 那段。
+替代 Basic Auth：已有 SSO 时可把 Caddyfile 里浏览器那段的 `basic_auth` 换成指向 SSO 的 `forward_auth`（如 oauth2-proxy、Authelia），保持 `header_up -Authorization`，不要动带 Bearer 的那段。
 
 ## 数据卷与保密声明
 

@@ -91,8 +91,11 @@ jobs:
           test "$code" = "403"
       - name: 服务以非 root 运行
         run: test "$(docker compose exec -T app id -u)" = "10001"
-      - name: 冒烟（runner 作为第二客户端，校验 Caddy 证书链）
-        run: python3 scripts/deploy_smoke.py --url https://localhost:8443 --cacert caddy-root.crt
+      - name: 冒烟（runner 作为第二客户端，校验 Caddy 证书链；再用真浏览器经代理开首页与工程页）
+        run: |
+          python3 -m pip install --user playwright==1.58.0
+          python3 -m playwright install --with-deps chromium
+          python3 scripts/deploy_smoke.py --url https://localhost:8443 --cacert caddy-root.crt --browser
       - name: curl 再验一次 HTTPS（独立 TLS 实现）
         run: |
           code="$(curl -sS --cacert caddy-root.crt -u "pfk:$PFK_BASIC_PASS" -o /dev/null -w '%{http_code}' https://localhost:8443/)"

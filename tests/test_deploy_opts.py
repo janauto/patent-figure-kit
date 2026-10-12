@@ -114,11 +114,11 @@ def test_main_refuses_remote_bind_without_allow_remote(tmp_path, capsys):
 # ----------------------------------------------------------------- ASGI 闸门（不依赖工作台）
 
 
-def _guard(**kw):
+def _guard(token=TOKEN, **kw):
     opts = D.DeployOptions(**{**dict(bind_host="0.0.0.0", allow_remote=True,
                                      public_url="https://pfk.example.com",
                                      trusted_proxies=["172.30.57.10"]), **kw})
-    return lambda inner: D.DeployGuard(inner, opts)
+    return lambda inner: D.DeployGuard(inner, opts, token)
 
 
 def _run(guard_factory, **call_kw):
@@ -209,7 +209,8 @@ def _wb(tmp_path, public_url, **kw):
     import workbench as W
     reg = W.Registry(tmp_path / "data", TOKEN)
     opts = D.DeployOptions(bind_host="0.0.0.0", allow_remote=True, public_url=public_url, **kw)
-    app = D.wrap(W.Dispatcher(W.build_workbench(reg, TOKEN, 8790, opts.public_url), reg), opts)
+    app = D.wrap(W.Dispatcher(W.build_workbench(reg, TOKEN, 8790, opts.public_url), reg), opts,
+                 token=TOKEN)
     return W, reg, TestClient(app, base_url=public_url, client=("172.30.57.10", 4321))
 
 
@@ -295,3 +296,23 @@ def test_env_defaults_for_container_deploys():
     assert [str(n) for n in opts2.trusted_proxies] == ["10.0.0.1/32"] and not opts2.allow_remote
     with pytest.raises(D.DeployConfigError, match="--allow-remote"):
         D.from_args(ap.parse_args(["--host", "0.0.0.0"]), env)
+
+
+def test_forward_auth_endpoint_judges_the_same_credentials():
+    """Caddy 对带 Bearer 的请求 forward_auth 到 /_pfk/auth：只看凭据、不经业务代码。"""
+    g = _guard()
+    ok = [("Authorization", "Bearer " + TOKEN)], [("X-Studio-Token", TOKEN)], \
+        [("Cookie", "a=1; wb_token=%s; b=2" % TOKEN)], \
+        [("Authorization", "Bearer stale"), ("Cookie", "wb_token=" + TOKEN)]
+    for hdrs in ok:
+        st, _, body, inner = _run(g, path="/_pfk/auth", headers=hdrs)
+        assert st == 204 and body == b"" and not inner, hdrs
+    for hdrs in ([], [("Authorization", "Bearer wrong")], [("Authorization", "Basic dTpw")],
+                 [("Cookie", "wb_token=nope")]):
+        assert _run(g, path="/_pfk/auth", headers=hdrs)[0] == 401, hdrs
+    # 后端没拿到 token（不该发生）：一律 401，不放行
+    assert _run(_guard(token=None), path="/_pfk/auth",
+                headers=[("Authorization", "Bearer " + TOKEN)])[0] == 401
+    # 仍受对端 / Host 约束
+    assert _run(g, path="/_pfk/auth", client=("203.0.113.9", 1),
+                headers=[("Authorization", "Bearer " + TOKEN)])[0] == 403

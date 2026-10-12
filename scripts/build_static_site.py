@@ -304,9 +304,26 @@ def run_example(be: Backend, ex: str, fixtures: Path, samples: Path) -> Dict[str
         "model_url": model_url, "export_sample": sample["path"],
     })
     detail = _scrub(detail)                      # plan.source.step、render.log 等里的本机路径一并收掉
+
+    # ---- 后端响应快照（manifest v2，与界面接线工作包 WP3b 的静态适配器同形）----------------
+    # project = GET /v1/projects/{id}；state = GET /p/{id}/api/state；candidates = GET …/plan/candidates；
+    # plan / plan_etag = GET …/plan。只把资源地址换成站内相对路径、把本机路径收掉。
+    project_v2 = _scrub(dict(summary, thumb=thumb, step_name=step_name, plan_etag=plan_etag))
+    st = {k: v for k, v in state.items() if k not in ("structure_job",)}
+    st.update(step=step_name, workdir="", home_url="./home.html", render=render_out, assembly=asm,
+              llm=STATIC_LLM, rendering=False, flowcharts=[])
+    cand_job = dict(cjob, result=dict(cands, candidates=cand_list))
+    entry = {
+        "id": pid,
+        # summary 同时满足两版适配器：/v1/projects 的条目字段 + 旧版首页卡片字段
+        "summary": _scrub(dict({k: v for k, v in summary.items() if k != "candidates"}, **base)),
+        "detail": detail,                        # 旧版静态适配器（manifest v1）读这一份
+        "project": project_v2, "plan": detail["plan"], "plan_etag": plan_etag,
+        "state": _scrub(st), "candidates": _scrub(cand_job), "model_url": model_url,
+    }
     _log("[%s] 完成：%d 张图全过闸，候选 %d 个，导出包 %.1f MB，用时 %.0f s"
          % (ex, len(figures), len(cand_list), len(zip_bytes) / 1048576, time.time() - t0))
-    return {"entry": {"id": pid, "summary": base, "detail": detail}, "assets": assets,
+    return {"entry": entry, "assets": assets,
             "sample": sample, "step_sha256": src.get("sha256"), "step_name": src.get("step")}
 
 
@@ -350,15 +367,29 @@ def _scrub(obj):
 # ----------------------------------------------------------------------------- 站点组装
 
 
-def assemble(site: Path, staging: Path, samples_src: Path) -> None:
-    """只读调用 webui/dev/build_static.py：把它的输入目录（manifest + fixtures）指到 staging。"""
+def assemble(site: Path, staging: Path, samples_src: Path, manifest: dict) -> None:
+    """只读调用 webui/dev/build_static.py：把它的输入目录（manifest + fixtures）指到 staging。
+
+    兼容两版：旧版 ``build()`` 读 ``HERE/manifest.json``；WP3b 起 ``build(manifest)`` 收字典并另有
+    ``check_drift``（与 openapi 的字段核对）——有就跑，结果只作提示（本站的数据就是真实后端的响应）。"""
+    import inspect
     sys.path.insert(0, str(REPO / "webui" / "dev"))
     try:
         import build_static as BS
     finally:
         sys.path.pop(0)
     BS.HERE, BS.OUT = staging, site            # 输入：staging/manifest.json + staging/fixtures；输出：site
-    BS.build()
+    if inspect.signature(BS.build).parameters:
+        BS.build(manifest)
+    else:
+        BS.build()
+    if hasattr(BS, "check_drift"):
+        try:
+            drift = BS.check_drift(manifest)
+        except Exception as exc:  # noqa: BLE001 — 核对工具自身的问题不挡生成
+            drift = ["（字段核对未能运行：%s）" % exc]
+        for d in drift:
+            _log("  提示（与 openapi 的字段核对）：%s" % d)
     shutil.copytree(str(samples_src), str(site / "samples"))
     (site / ".nojekyll").write_text("", encoding="utf-8")
 
@@ -382,22 +413,24 @@ INDEX_REDIRECT = ("<script>if(!new URLSearchParams(location.search).get('project
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
+def _strip_flagged(text: str, suffix: str) -> str:
+    if suffix == ".html":
+        return _HTML_COMMENT.sub(lambda m: "" if _scan_text(m.group(0)) else m.group(0), text)
+    if suffix == ".js":
+        return "\n".join(l for l in text.split("\n")
+                         if not (l.lstrip().startswith("//") and _scan_text(l)))
+    return text
+
+
 def strip_flagged_comments(site: Path) -> List[str]:
     """发布前去掉**提到禁用词的注释**（webui 源码里有「不得出现『千问办公』」这类自我提醒注释）：
     HTML 注释、我们自己的 JS 模块里的整行 ``//`` 注释。只删注释、不碰代码；返回改动过的文件。"""
     changed = []
     for p in sorted(site.rglob("*")):
-        if not p.is_file() or "vendor" in p.relative_to(site).parts:
+        if not p.is_file() or "vendor" in p.relative_to(site).parts or p.suffix not in (".html", ".js"):
             continue
-        if p.suffix == ".html":
-            s = p.read_text(encoding="utf-8")
-            t = _HTML_COMMENT.sub(lambda m: "" if _scan_text(m.group(0)) else m.group(0), s)
-        elif p.suffix == ".js":
-            s = p.read_text(encoding="utf-8")
-            lines = s.split("\n")
-            t = "\n".join(l for l in lines if not (l.lstrip().startswith("//") and _scan_text(l)))
-        else:
-            continue
+        s = p.read_text(encoding="utf-8")
+        t = _strip_flagged(s, p.suffix)
         if t != s:
             p.write_text(t, encoding="utf-8")
             changed.append(p.relative_to(site).as_posix())
@@ -480,8 +513,7 @@ def _glb_names(data: bytes) -> List[str]:
     return names
 
 
-def audit_site(site: Path, extra_forbidden: List[str] = (),
-               transformed: List[str] = ()) -> Dict[str, Any]:
+def audit_site(site: Path, extra_forbidden: List[str] = ()) -> Dict[str, Any]:
     """逐文件判定；返回 {ok, files[], problems[]}。"""
     from patent_figure import zipcheck
     problems: List[str] = []
@@ -513,7 +545,8 @@ def audit_site(site: Path, extra_forbidden: List[str] = (),
             row["source"] = "本工具生成"
         elif (webui / rel).is_file() and _file_sha(webui / rel) == row["sha256"]:
             row["source"] = "webui/%s（原样）" % rel
-        elif (webui / rel).is_file() and rel in transformed:
+        elif (webui / rel).is_file() and ext in (".js",) and _sha256(_strip_flagged(
+                (webui / rel).read_text(encoding="utf-8"), ext).encode("utf-8")) == row["sha256"]:
             row["source"] = "webui/%s（构建期删去提到禁用词的注释行）" % rel
         else:
             row["why"].append("来源不明（既不是 webui 原样文件，也没有在 manifest 登记）")
@@ -603,9 +636,15 @@ def build(out_root: Path, site_name: str, keep_data: bool) -> int:
     try:
         be = Backend(work / "data")
         results = [run_example(be, ex, fixtures, samples) for ex in EXAMPLES]
+        caps = be.get("/v1/capabilities").json()
+        caps["ai"] = dict(caps.get("ai") or {}, configured=False, provider="none",
+                          provider_label="静态演示站不连接 AI 通道")     # 演示站不外发任何内容
         now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
         manifest = {
-            "schema": "inkline-static-manifest/1",
+            # v2 = 后端响应快照（capabilities + projects[].project/plan/state/candidates）；
+            # 同时保留 v1 字段（llm、data_dir、projects[].detail），新旧两版静态适配器都能读。
+            "schema": "inkline-static/2",
+            "capabilities": _scrub(caps),
             "version": "%s+%s.%s" % (_pkg_version(), _git_rev(), now.strftime("%Y%m%d%H%M%S")),
             "generated_at": now.isoformat(),
             "generator": "scripts/build_static_site.py",
@@ -625,8 +664,8 @@ def build(out_root: Path, site_name: str, keep_data: bool) -> int:
                                                encoding="utf-8")
         if site.exists():
             shutil.rmtree(str(site))
-        assemble(site, staging, samples)
-        transformed = strip_flagged_comments(site)
+        assemble(site, staging, samples, manifest)
+        strip_flagged_comments(site)
         inject(site)
         write_samples_page(site, manifest)
     finally:
@@ -634,8 +673,7 @@ def build(out_root: Path, site_name: str, keep_data: bool) -> int:
             _log("保留构建数据：%s" % work)
         else:
             shutil.rmtree(str(work), ignore_errors=True)
-    report = audit_site(site, extra_forbidden=[token, str(work)] + _local_identity(),
-                        transformed=transformed)
+    report = audit_site(site, extra_forbidden=[token, str(work)] + _local_identity())
     (out_root / "audit.json").write_text(json.dumps(report, ensure_ascii=False, indent=1),
                                          encoding="utf-8")
     _print_audit(report, out_root / "audit.json")

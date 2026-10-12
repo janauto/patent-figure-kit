@@ -122,6 +122,39 @@ def read_sse_frame(base: str, path: str, ctx: ssl.SSLContext, cookie: str, basic
         return "\n".join(lines)
 
 
+def browser_check(base: str, token: str, user: str, password: str) -> None:
+    """真浏览器经代理走一遍首页 → 工程页（证书已由上面的 Python 客户端与 curl 校验，这里不重复）。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        check(False, "真浏览器检查", "未安装 Playwright（python -m pip install playwright && "
+                                     "python -m playwright install chromium）")
+        return
+    bad, errors = [], []
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        ctx = b.new_context(http_credentials={"username": user, "password": password},
+                            ignore_https_errors=True)
+        ctx.on("response", lambda r: bad.append("%d %s" % (r.status, r.url.split("?")[0]))
+               if r.status >= 400 and not r.url.endswith("/favicon.ico") else None)
+        page = ctx.new_page()
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base + "/?token=" + token, wait_until="networkidle")
+        page.wait_for_timeout(1500)
+        cookies = [c for c in ctx.cookies() if c["name"] == "wb_token"]
+        check(bool(cookies) and cookies[0].get("secure") and cookies[0].get("httpOnly"),
+              "真浏览器：首页经代理加载并拿到会话 Cookie（Secure、HttpOnly）")
+        cards = page.eval_on_selector_all("article.card", "e => e.map(x => x.dataset.id)")
+        target = next((c for c in cards if c and c.startswith("example-")), None)
+        if target:
+            page.goto("%s/p/%s/" % (base, target), wait_until="networkidle")
+            page.wait_for_timeout(2500)
+        check(not bad, "真浏览器：首页%s全程无 4xx / 5xx" % ("与工程页 " if target else ""), bad[:4])
+        check(not errors, "真浏览器：无控制台错误与页面异常", errors[:3])
+        b.close()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -133,6 +166,8 @@ def main(argv=None) -> int:
                     help="从哪个环境变量读 Basic Auth 明文密码")
     ap.add_argument("--token-env", default="WORKBENCH_TOKEN", help="从哪个环境变量读后端 token")
     ap.add_argument("--example", default="valve", choices=("gearbox", "vise", "valve"))
+    ap.add_argument("--browser", action="store_true",
+                    help="再用真浏览器（Playwright Chromium）经代理打开首页与工程页，断言无 4xx/5xx 与控制台错误")
     args = ap.parse_args(argv)
 
     token = os.environ.get(args.token_env, "")
@@ -154,8 +189,10 @@ def main(argv=None) -> int:
     st, h, _b, _c = anon.req("GET", "/")
     check(st == 401 and "basic" in (h.get("Www-Authenticate") or h.get("WWW-Authenticate") or "").lower(),
           "代理闸门：无凭据访问页面被 Basic Auth 拦下", "HTTP %d" % st)
+    st, _h, _b, _c = Client(base, ctx, bearer="wrong-" + "x" * 20).req("GET", "/")
+    check(st == 401, "代理闸门：带错误 Bearer 不能绕过 Basic Auth（由后端 /_pfk/auth 判定）", "HTTP %d" % st)
     st, _h, _b, _c = Client(base, ctx, bearer=token).req("GET", "/")
-    check(st == 401, "代理闸门：Bearer 只直通 /v1 与 /mcp，访问页面仍需 Basic Auth", "HTTP %d" % st)
+    check(st == 200, "代理闸门：带有效 Bearer 由后端判定放行（不需要 Basic）", "HTTP %d" % st)
 
     # ---- Agent 路 ----
     agent = Client(base, ctx, bearer=token)
@@ -177,6 +214,14 @@ def main(argv=None) -> int:
           "HTTP %d，Cookie 属性 %s" % (st, [a for a in attrs[1:] if a]))
     st, _h, _b, _c = browser.req("GET", "/v1/capabilities")
     check(st == 200, "浏览器：只凭会话 Cookie 访问 REST（Basic 凭据由代理消费、不进后端）", "HTTP %d" % st)
+    # 真实前端的接口请求：会话 Cookie + 前端自己加的 Authorization: Bearer（webui/js/api.js），路径不限 /v1
+    fe = Client(base, ctx, bearer=token, cookies=True)
+    fe.jar = browser.jar
+    fe.opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx),
+                                            urllib.request.HTTPCookieProcessor(browser.jar))
+    for path in ("/api/wb/state", "/api/wb/settings", "/v1/projects"):
+        st, _h, _b, _c = fe.req("GET", path)
+        check(st == 200, "浏览器前端：Cookie + Bearer 访问 %s" % path, "HTTP %d" % st)
 
     # ---- 金路径（浏览器路）----
     ok_path = False
@@ -233,6 +278,9 @@ def main(argv=None) -> int:
     finally:
         if zip_path:
             os.unlink(zip_path)
+
+    if args.browser:
+        browser_check(base, token, args.basic_user, password)
 
     failed = [r for r in RESULTS if not r[0]]
     print("\n%d 项通过，%d 项失败" % (len(RESULTS) - len(failed), len(failed)))

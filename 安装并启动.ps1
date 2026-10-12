@@ -69,7 +69,9 @@ function Get-PyVersion([string[]]$Cmd) {
         $exe = $Cmd[0]
         $pre = @()
         if ($Cmd.Count -gt 1) { $pre = $Cmd[1..($Cmd.Count - 1)] }
-        $out = & $exe @pre '-c' 'import sys; print("%d.%d" % sys.version_info[:2])' 2>$null
+        # Windows PowerShell 5.1 给原生程序传参时会吃掉参数里的双引号，所以 Python 代码里只用单引号
+        #（PowerShell 单引号字符串里写两个 '' 表示一个 '）。
+        $out = & $exe @pre '-c' 'import sys; print(''%d.%d'' % sys.version_info[:2])' 2>$null
         if ($LASTEXITCODE -ne 0) { return $null }
         return ($out | Select-Object -First 1).Trim()
     } catch { return $null }
@@ -104,7 +106,7 @@ $PyPre = @()
 if ($PyCmd.Count -gt 1) { $PyPre = $PyCmd[1..($PyCmd.Count - 1)] }
 $PyVer = Get-PyVersion $PyCmd
 Write-Host "Python：$($PyCmd -join ' ')（$PyVer）"
-$bits = & $PyExe @PyPre '-c' 'import struct; print(struct.calcsize("P") * 8)'
+$bits = & $PyExe @PyPre '-c' 'import struct; print(struct.calcsize(''P'') * 8)'
 if ("$bits".Trim() -ne '64') { Stop-WithHint '找到的是 32 位 Python' '请安装 64 位 Python 3.12' }
 
 # ---------------------------------------------------------------- 虚拟环境 + 锁定依赖

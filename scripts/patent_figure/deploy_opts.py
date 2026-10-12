@@ -17,9 +17,10 @@
   uvicorn 自带的代理头处理在服务器形态下关闭，由这里统一做，避免两层各自改写 client 地址。
 * **下载 URL 基于 public-url**：``public_base()`` 把工作台对外拼的所有绝对地址（导出包 ``download_url``、
   MCP 地址、REST 文档地址）换成 ``--public-url``；不给时与改前相同（``http://127.0.0.1:<port>``）。
-* **浏览器会话与 Agent 分离**：浏览器只靠会话 Cookie ``wb_token``（public-url 为 https 时本模块给它补
-  ``Secure``）；Agent 用 ``Authorization: Bearer``。反向代理的认证（Basic Auth / forward-auth）只挡浏览器
-  页面路径，不改写也不消费后端的 ``Authorization``——见仓库根 ``Caddyfile``。
+* **浏览器会话与 Agent 分离**：浏览器靠会话 Cookie ``wb_token``（public-url 为 https 时本模块给它补
+  ``Secure``）；Agent 用 ``Authorization: Bearer``。反向代理对带 Bearer 的请求不自己判、不消费这个头，而是
+  ``forward_auth`` 到本模块的 ``/_pfk/auth``（与后端同一组凭据、常数时间比较），有效才放行；其余请求走代理的
+  Basic Auth，转发前删掉 Basic 凭据——见仓库根 ``Caddyfile``。
 * **token 不进日志**：服务器形态下启动横幅只打印对外地址，不回显 token（token 由运维经环境变量
   ``WORKBENCH_TOKEN`` 提供，见 ``docs/deploy/server.md``）。
 
@@ -31,6 +32,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import secrets
 import sys
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
@@ -43,6 +45,8 @@ DEFAULT_BIND = "127.0.0.1"
 #: 会话 Cookie 名（workbench.py 设置；本模块只在 https 下补 Secure）。
 SESSION_COOKIE = b"wb_token"
 HEALTH_PATH = "/healthz"
+#: 反向代理的 forward_auth 用：只回答「这次请求带的 token 对不对」（204 / 401），不经业务代码。
+AUTH_PATH = "/_pfk/auth"
 #: 本机形态专属的「按本地路径导入」入口（workbench.py 的 /api/wb/projects 的 JSON 分支）。
 LOCAL_PATH_IMPORT = "/api/wb/projects"
 
@@ -302,17 +306,39 @@ def startup_banner(opts: DeployOptions, port: int, token: str, data_dir: str) ->
 # ----------------------------------------------------------------------------- ASGI 闸门
 
 
-def wrap(app, opts: DeployOptions):
-    """本机形态原样返回 ``app``（零行为变化）；服务器形态套上 :class:`DeployGuard`。"""
-    return DeployGuard(app, opts) if opts.server_mode else app
+def wrap(app, opts: DeployOptions, token: Optional[str] = None):
+    """本机形态原样返回 ``app``（零行为变化）；服务器形态套上 :class:`DeployGuard`。
+    ``token`` 只用于 ``/_pfk/auth``（反向代理用后端自己的 token 判定放行带 Bearer 的请求）。"""
+    return DeployGuard(app, opts, token) if opts.server_mode else app
+
+
+def _request_token_ok(headers, token: Optional[str]) -> bool:
+    """与 workbench.auth_via 同一组凭据：X-Studio-Token / Bearer / 会话 Cookie；常数时间比较。"""
+    if not token:
+        return False
+    cands = []
+    for k, v in headers:
+        k = k.lower()
+        val = v.decode("latin-1")
+        if k == b"x-studio-token":
+            cands.append(val)
+        elif k == b"authorization" and val[:7].lower() == "bearer ":
+            cands.append(val[7:])
+        elif k == b"cookie":
+            for part in val.split(";"):
+                name, _, cv = part.strip().partition("=")
+                if name == SESSION_COOKIE.decode():
+                    cands.append(cv)
+    return any(c and secrets.compare_digest(c.encode("utf-8", "replace"), token.encode("utf-8"))
+               for c in cands)
 
 
 class DeployGuard:
     """最外层 ASGI 闸门：对端（可信代理）→ Host 允许列表 → 归一 Host → 交给内层；响应里给会话 Cookie
     补 Secure。``/healthz`` 在这里直接应答（容器健康检查用，不经内层、不需要 token、不含任何数据）。"""
 
-    def __init__(self, app, opts: DeployOptions) -> None:
-        self.app, self.opts = app, opts
+    def __init__(self, app, opts: DeployOptions, token: Optional[str] = None) -> None:
+        self.app, self.opts, self.token = app, opts, token
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") not in ("http", "websocket"):
@@ -345,6 +371,9 @@ class DeployGuard:
         if scope["type"] == "http" and scope.get("path") == HEALTH_PATH \
                 and scope.get("method") in ("GET", "HEAD"):
             return await _json(send, 200, {"ok": True})
+        if scope["type"] == "http" and scope.get("path") == AUTH_PATH:
+            ok = _request_token_ok(headers, self.token)
+            return await _json(send, 204 if ok else 401, None if ok else {"detail": "token 无效"})
         if not self.opts.secure_cookie or scope["type"] != "http":
             return await self.app(scope, receive, send)
 
@@ -396,7 +425,7 @@ async def _plain(send, scope, status: int, text: str) -> None:
 
 
 async def _json(send, status: int, obj) -> None:
-    body = json.dumps(obj).encode("utf-8")
+    body = b"" if obj is None else json.dumps(obj).encode("utf-8")
     await send({"type": "http.response.start", "status": status,
                 "headers": [(b"content-type", b"application/json"),
                             (b"cache-control", b"no-store"),

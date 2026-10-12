@@ -2066,7 +2066,8 @@ def main(argv=None) -> int:
     _work_in(reg.data)
     if not getattr(args, "no_example", False):
         ensure_synthetic(reg)
-    app = DEPLOY.wrap(Dispatcher(build_workbench(reg, token, port, deploy.public_url), reg), deploy)
+    app = DEPLOY.wrap(Dispatcher(build_workbench(reg, token, port, deploy.public_url), reg), deploy,
+                      token=token)
     banner, url = DEPLOY.startup_banner(deploy, port, token, str(reg.data))
     print(banner, flush=True)
     if url and not getattr(args, "no_browser", False):
