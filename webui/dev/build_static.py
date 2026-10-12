@@ -41,6 +41,8 @@ OUT = HERE / "static-site" / "pfk"              # 故意放进子目录 pfk/，�
 MANIFEST = HERE / "manifest.json"
 
 META = '<meta name="inkline-mode" content="static">'
+#: 快照里作业的时间戳固定（2026-10-11 10:00 UTC+8），让重复生成的 manifest.json 逐字节一致、不在 git 里来回变
+SNAPSHOT_TS = 1791684000.0
 
 
 def inject_meta(html: str) -> str:
@@ -93,7 +95,7 @@ def make_manifest() -> dict:
             "plan": copy.deepcopy(p["data"]["plan"]),
             "plan_etag": M.norm_etag(p["plan_etag"]),
             "state": _rewrite(state, pid),
-            "candidates": _rewrite(M.job_dict(M.latest_suggest(pid)), pid),
+            "candidates": _rewrite(dict(M.job_dict(M.latest_suggest(pid)), created_at=SNAPSHOT_TS, updated_at=SNAPSHOT_TS), pid),
             "model_url": "dev/fixtures/models/%s" % M.GLB_BY_PROJECT[pid],
         })
     return {"schema": "inkline-static/2", "version": 2, "display_name": caps["display_name"],

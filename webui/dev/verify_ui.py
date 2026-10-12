@@ -37,6 +37,7 @@ WP3b 接线（对齐 docs/openapi.yaml 的真实契约）：
 跑：    python3 webui/dev/verify_ui.py        # 自动起缺的 mock（8803 / 8805）与静态站（8808）；全过退出 0
 """
 import atexit
+import json
 import socket
 import subprocess
 import sys
@@ -651,16 +652,28 @@ def test_render_resume(ctx):
 
 
 def test_ai_draft_contract(pg):
-    """WP3b #9：AI 起名 = 外发确认 → apply=false 只取建议（不写 plan）→「写入空白件」apply=true + If-Match。
-    写入后前端以服务端 plan 与新 ETag 为准——随后的编辑保存不冲突。"""
+    """WP3b #9 + 修复轮 1（Codex R3b）：AI 起名 = 外发确认 → apply=false 只取建议（不写 plan）→「写入空白件」把
+    **预览过的建议**按只填空白写进计划，经保存循环 PUT /plan + If-Match，不再请后端重新生成。
+    这里让「模型」每次返回不同名称（第 1 次 甲、第 2 次 乙）：写入必须等于预览（甲），且只调用一次 draft-terms。"""
+    calls = []
+
+    def vary(route):
+        r = route.fetch()
+        j = r.json()
+        calls.append(json.loads(route.request.post_data or "{}"))
+        tag = "甲" if len(calls) == 1 else "乙"
+        for sgg in j.get("suggestions", []):
+            sgg["term"] = "预览名" + tag + sgg["term"]
+        route.fulfill(response=r, body=json.dumps(j, ensure_ascii=False), headers={**r.headers, "content-type": "application/json"})
+    pg.route("**/ai/draft-terms", vary)
     pg.goto(f"{B}/index.html?project=ball-valve&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2500)
     r = pg.evaluate("""async () => {""" + JS_HELPERS + """
         const st = await import('/js/state.js');
         st.mutate((p) => { p.terms.slice(0, 3).forEach((t) => { t.term = ''; }); }); await st.flush();
-        const realFetch = window.fetch; const reqs = [];
+        const realFetch = window.fetch; const puts = [];
         window.fetch = async (url, init) => {
-          if (init && init.method === 'POST' && /ai\/draft-terms$/.test(String(url))) reqs.push({ ifMatch: (init.headers || {})['If-Match'], body: JSON.parse(init.body || '{}') });
+          if (init && init.method === 'PUT' && /\/plan$/.test(String(url))) puts.push({ ifMatch: (init.headers || {})['If-Match'], body: JSON.parse(init.body || '{}') });
           return realFetch(url, init);
         };
         try {
@@ -673,30 +686,109 @@ def test_ai_draft_contract(pg):
           const dlg = document.querySelector('#dlg-outbound').textContent;
           document.querySelector('#ob-ok').click();
           await waitFor(() => document.querySelector('#afb-apply'), 6000);
+          const preview = sel.map((x) => (st.state.aiSuggestions[x] || {}).term || '');
           const planMid = await (await realFetch('/v1/projects/ball-valve/plan')).json();
           const midBlank = planMid.terms.slice(0, 3).every((t) => !(t.term || '').trim());
+          const putsBefore = puts.length;
           document.querySelector('#afb-apply').click();
           await waitFor(() => (document.querySelector('#toast')?.textContent || '').includes('AI 已写入'), 6000);
           const toast = document.querySelector('#toast')?.textContent || '';
           const res = await realFetch('/v1/projects/ball-valve/plan'); const srv = await res.json(); const srvEtag = res.headers.get('ETag');
+          const written = sel.map((x) => (srv.terms.find((t) => t.selector === x) || {}).term || '');
+          const writePut = puts.slice(putsBefore)[0] || null;
           const sameEtag = norm(st.state.planEtag) === norm(srvEtag);
-          const samePlan = JSON.stringify(st.state.plan.terms) === JSON.stringify(srv.terms);
-          const blanksAfter = st.state.plan.terms.slice(0, 3).filter((t) => !(t.term || '').trim()).length;
           const edit = uniq('起名后再改');
           st.mutate((p) => { p.terms[0].term = edit; }); await st.flush();
           const srv2 = await (await realFetch('/v1/projects/ball-valve/plan')).json();
-          return { dlg: dlg.includes('STEP 零件名'), reqs, midBlank, blanksAfter, toast, sameEtag, samePlan,
-                   save: st.state.saveState, saved: srv2.terms[0].term === edit };
+          return { dlg: dlg.includes('STEP 零件名'), preview, written, midBlank, toast, sameEtag,
+                   putIfMatch: !!(writePut && writePut.ifMatch), save: st.state.saveState, saved: srv2.terms[0].term === edit };
         } finally { window.fetch = realFetch; }
     }""")
-    rq = r.get("reqs") or []
-    ok = (not r.get("noBtn") and r.get("dlg") and len(rq) == 2 and rq[0]["body"].get("apply") is False
-          and rq[1]["body"].get("apply") is True and rq[1]["ifMatch"] and r.get("midBlank") and r.get("blanksAfter") == 0
-          and "AI 已写入" in r.get("toast", "") and r.get("sameEtag") and r.get("samePlan")
+    ok = (not r.get("noBtn") and r.get("dlg") and len(calls) == 1 and calls[0].get("apply") is False
+          and r.get("midBlank") and r.get("putIfMatch") and all(t.startswith("预览名甲") for t in r.get("preview", []))
+          and r.get("written") == r.get("preview") and "AI 已写入" in r.get("toast", "") and r.get("sameEtag")
           and r.get("save") == "saved" and r.get("saved"))
-    check("AI 起名（WP2 语义）：外发确认 → apply=false 预览不写 → apply=true + If-Match 写入；以服务端 plan/ETag 为准", ok,
-          f"reqs={[(x['body'].get('apply'), bool(x['ifMatch'])) for x in rq]} midBlank={r.get('midBlank')} "
-          f"after={r.get('blanksAfter')} etag={r.get('sameEtag')} save={r.get('save')}")
+    check("AI 起名：外发确认 → apply=false 预览不写 → 写入 = 预览（模型连续返回不同名称也不变），经 PUT /plan + If-Match", ok,
+          f"draftCalls={len(calls)} preview={r.get('preview')} written={r.get('written')} putIfMatch={r.get('putIfMatch')} "
+          f"etag={r.get('sameEtag')} save={r.get('save')}")
+
+
+def test_import_lifecycle(pg):
+    """修复轮 1（Codex R3b）：关闭导入 A → 启动 B → A 迟到失败（后台结构识别「未完成」被轮询看到）：
+    A 的旧轮询 / 订阅必须已失效——B 的进度不丢、不被关掉 SSE、入口不切回 A、不替 A 起候选作业。"""
+    a_events = []
+    pg.route("**/v1/jobs/*/events*", lambda route: a_events.append(route) if not a_events else route.continue_())
+    late = {"on": False}
+
+    def summary(route):
+        if late["on"]:
+            r = route.fetch()
+            j = r.json()
+            j.update(status="ready", message="结构识别未完成：模拟 A 迟到失败")
+            route.fulfill(response=r, body=json.dumps(j, ensure_ascii=False), headers={**r.headers, "content-type": "application/json"})
+        else:
+            route.continue_()
+    pg.route("**/v1/projects/gearbox", summary)
+    posts = []
+    pg.on("request", lambda rq: posts.append(rq.url) if rq.method == "POST" else None)
+    pg.goto(f"{B}/home.html", wait_until="networkidle"); pg.wait_for_timeout(600)
+    pg.click("#drop"); pg.click("#up-ex-gearbox")                 # A：其 SSE 被挂起，A 停在运行中
+    pg.wait_for_selector(".steps .step.run", timeout=8000)
+    title_a = pg.eval_on_selector(".up-title", "e => e.textContent")
+    pg.click("#upload-close")                                      # 关闭 A
+    pg.click("#drop"); pg.click("#up-ex-vise")                     # 启动 B
+    pg.wait_for_function("() => /台虎钳/.test(document.querySelector('.up-title')?.textContent || '')", timeout=8000)
+    late["on"] = True                                              # A 的「迟到失败」此刻才出现
+    pg.wait_for_timeout(3500)                                      # 超过 A 旧轮询的周期（2.5 s）
+    pg.wait_for_selector("#up-enter", timeout=20000)
+    title = pg.eval_on_selector(".up-title", "e => e.textContent")
+    toast = pg.evaluate("() => document.querySelector('#toast')?.textContent || ''")
+    suggest_posts = [u for u in posts if u.endswith("/plan/suggest")]
+    for rt in a_events:
+        try:
+            rt.abort()
+        except Exception:
+            pass
+    pg.click("#up-enter")                                          # 入口必须进 B（台虎钳），不是 A
+    pg.wait_for_url("**/p/**", timeout=8000)
+    entered = pg.url
+    ok = ("减速器" in title_a and "台虎钳" in title and "模拟 A 迟到失败" not in toast and "/p/bench-vise/" in entered
+          and suggest_posts and all("/bench-vise/" in u for u in suggest_posts))
+    check("导入生命周期：关闭 A → 启动 B → A 迟到失败，B 的进度不丢、入口不切回 A、不替 A 起候选", ok,
+          f"A={title_a!r} B={title!r} entered={entered.split('8803')[-1]} "
+          f"suggest={[(u.split('/v1/projects/')[1]) for u in suggest_posts]} toast={toast[:24]!r}")
+
+
+def test_probe_retry(pg):
+    """修复轮 1（Codex R3b）：能力探测首次失败（网络错误）→ 首页「连接不上」→ 点「重试」重新探测并恢复列表；
+    再测一次 5xx 后恢复。"""
+    out = {}
+    for kind in ("abort", "503"):
+        state = {"n": 0}
+
+        def make(state, kind):
+            def caps(route):                       # 只收 route：Playwright 按参数个数决定是否另传 request
+                state["n"] += 1
+                if state["n"] == 1:
+                    if kind == "abort":
+                        route.abort()
+                    else:
+                        route.fulfill(status=503, body="unavailable")
+                else:
+                    route.continue_()
+            return caps
+        pg.route("**/v1/capabilities", make(state, kind))
+        pg.goto(f"{B}/home.html", wait_until="load")
+        pg.wait_for_selector(".banner.error #retry", timeout=8000)
+        err = pg.evaluate("() => document.querySelector('.banner.error')?.textContent || ''")
+        pg.click("#retry")
+        pg.wait_for_selector(".card[data-id]", timeout=8000)
+        cards = pg.eval_on_selector_all(".card[data-id]", "e => e.length")
+        out[kind] = {"err": "连接不上" in err, "probes": state["n"], "cards": cards,
+                     "mode": pg.evaluate("async () => (await import('/static/js/api.js')).api.mode")}
+        pg.unroute("**/v1/capabilities")
+    ok = all(v["err"] and v["probes"] == 2 and v["cards"] > 0 and v["mode"] == "live" for v in out.values())
+    check("能力探测重试：首次失败（网络 / 503）→「连接不上」→ 重试重新探测并恢复列表", ok, f"{out}")
 
 
 def test_ai_blocked_on_failed_save(pg):
@@ -854,7 +946,7 @@ def main():
         for fn in (test_xss, test_save_race, test_concurrent_flush, test_flush_noop_then_edit,
                    test_flush_after_failure, test_unsaved_lock, test_render_evidence_race, test_export_late_callback,
                    test_live_export_conflict, test_render_job_failure, test_render_late_failure_read,
-                   test_ai_draft_contract, test_ai_blocked_on_failed_save,
+                   test_ai_draft_contract, test_ai_blocked_on_failed_save, test_import_lifecycle, test_probe_retry,
                    test_candidate_resolve, test_candidate_bad_member, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:

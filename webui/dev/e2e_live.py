@@ -76,7 +76,9 @@ def check(name, ok, extra=""):
 FAKE_NAMES = {"PGB-MOTOR-SHAFT": "电机轴", "PGB-OIL-SEAL": "油封", "PGB-SUN-GEAR": "太阳轮",
               "PGB-END-COVER": "端盖", "PGB-RING-GEAR": "内齿圈"}
 FAKE_CALLS = []
-FAKE_MODE = {"structure_fail": False}     # True：结构识别请求回 401（模拟通道 / 密钥失效）
+FAKE_MODE = {"structure_fail": False,    # True：结构识别请求回 401（模拟通道 / 密钥失效）
+             "vary": False}               # True：同一零件每次起名都换一个名字（第 1 次 FAKE_NAMES，之后 FAKE_ALT）
+FAKE_ALT = {"PGB-MOTOR-SHAFT": "传动轴", "PGB-OIL-SEAL": "密封圈"}
 
 
 class FakeLLM(BaseHTTPRequestHandler):
@@ -101,7 +103,9 @@ class FakeLLM(BaseHTTPRequestHandler):
         user = json.loads(body["messages"][-1]["content"])
         parts = next((v for k, v in user.items() if k.startswith("产品零件")), [])
         FAKE_CALLS.append({"kind": "terms", "parts": [p["name"] for p in parts], "keys": list(user.keys())})
-        terms = [{"selector": p["name"], "term": FAKE_NAMES.get(p["name"], "连接件"), "label": "once",
+        nth = sum(1 for c in FAKE_CALLS if c.get("kind") == "terms")
+        table = FAKE_ALT if (FAKE_MODE["vary"] and nth > 1) else FAKE_NAMES
+        terms = [{"selector": p["name"], "term": table.get(p["name"], "连接件"), "label": "once",
                   "confidence": "low" if p["name"] == "PGB-OIL-SEAL" else "high",
                   "reason": "按零件代号与尺寸判断（e2e 假通道）"} for p in parts]
         return self._reply({"terms": terms})
@@ -241,8 +245,9 @@ class Watch:
     """收集一页的控制台 error 与未捕获异常。allow：本用例故意制造的 HTTP 状态（浏览器在网络层会报一行
     「Failed to load resource: … status of N」，只放行这些状态，且只放行这一种文案）。"""
 
-    def __init__(self, page, allow=()):
+    def __init__(self, page, allow=(), allow_net_fail=False):
         self.errors, self.allow = [], set(allow)
+        self.allow_net_fail = allow_net_fail      # 本用例故意掐断的请求：浏览器会报 net::ERR_FAILED
         self.allowed = []
         page.on("console", self._console)
         page.on("pageerror", lambda e: self.errors.append("pageerror: %s" % e))
@@ -256,6 +261,9 @@ class Watch:
         t = m.text
         mm = re.search(r"Failed to load resource: the server responded with a status of (\d+)", t)
         if mm and int(mm.group(1)) in self.allow:
+            self.allowed.append(t)
+            return
+        if self.allow_net_fail and "net::ERR_FAILED" in t:
             self.allowed.append(t)
             return
         if "EventSource's response has" in t and any(str(a) in t for a in self.allow):
@@ -281,10 +289,10 @@ def new_ctx(browser, be, bootstrap=True):
     return ctx
 
 
-def page(ctx, allow=()):
+def page(ctx, allow=(), allow_net_fail=False):
     pg = ctx.new_page()
     pg.on("dialog", lambda d: d.accept())
-    return pg, Watch(pg, allow)
+    return pg, Watch(pg, allow, allow_net_fail)
 
 
 ST = "const st = await import('./js/state.js');"
@@ -666,9 +674,12 @@ def ai_configured(browser, be):
     ctx = new_ctx(browser, be)
     pg, w = page(ctx, allow=(409,))
     try:
-        reqs = []
+        reqs, puts = [], []
         pg.on("request", lambda r: reqs.append((r.headers.get("if-match"), json.loads(r.post_data or "{}")))
               if r.method == "POST" and "ai/draft-terms" in r.url else None)
+        pg.on("request", lambda r: puts.append((r.headers.get("if-match"), json.loads(r.post_data or "{}")))
+              if r.method == "PUT" and r.url.endswith(f"/v1/projects/{pid}/plan") else None)
+        FAKE_MODE["vary"] = True                             # 模型每次给不同名字：写入必须等于预览
         pg.goto(f"{be.base}/p/{pid}/?stage=plan", wait_until="networkidle")
         studio_ready(pg)
         FAKE_CALLS.clear()
@@ -678,6 +689,7 @@ def ai_configured(browser, be):
         dlg = pg.eval_on_selector("#dlg-outbound", "e => e.textContent.replace(/\\s+/g,' ')")
         pg.click("#ob-ok")
         pg.wait_for_selector("#afb-apply", timeout=30000)
+        preview = page_state(pg, "(st.state.aiSuggestions['PGB-MOTOR-SHAFT'] || {}).term || ''")
         plan_mid, _ = be.plan(pid)
         untouched = next((t for t in plan_mid["terms"] if t["selector"] == "PGB-MOTOR-SHAFT"), {"term": ""})
         term_calls = [c for c in FAKE_CALLS if c.get("kind") == "terms"]
@@ -685,14 +697,18 @@ def ai_configured(browser, be):
               "STEP 零件名" in dlg and "零件代号" in dlg and reqs and reqs[0][1].get("apply") is False
               and not (untouched.get("term") or "").strip() and term_calls and term_calls[0]["parts"] == ["PGB-MOTOR-SHAFT"],
               f"req={reqs[0][1] if reqs else None} sent={term_calls[0]['parts'] if term_calls else None}")
+        n_puts = len(puts)
         pg.click("#afb-apply")
         pg.wait_for_function("() => /AI 已写入/.test(document.querySelector('#toast')?.textContent || '')", timeout=30000)
         plan2, etag2 = be.plan(pid)
         term = next((t["term"] for t in plan2["terms"] if t["selector"] == "PGB-MOTOR-SHAFT"), "")
         ui = page_state(pg, "st.state.planEtag")
-        check("AI 起名 · 写入走 apply=true + If-Match，只填空白，前端以服务端新 ETag 为准",
-              len(reqs) >= 2 and reqs[1][1].get("apply") is True and bool(reqs[1][0]) and term == "电机轴" and ui == etag2,
-              f"ifMatch={'有' if len(reqs) > 1 and reqs[1][0] else '无'} term={term!r} etag同步={ui == etag2}")
+        term_calls = [c for c in FAKE_CALLS if c.get("kind") == "terms"]
+        put = puts[n_puts] if len(puts) > n_puts else (None, {})
+        check("AI 起名 · 写入 = 预览（模型每次给不同名字也不变）：不再调模型，经 PUT /plan + If-Match，只填空白，ETag 同步",
+              len(reqs) == 1 and len(term_calls) == 1 and bool(put[0]) and preview == "电机轴" and term == preview and ui == etag2,
+              f"draftCalls={len(reqs)} modelCalls={len(term_calls)} preview={preview!r} written={term!r} "
+              f"putIfMatch={'有' if put[0] else '无'} etag同步={ui == etag2}")
         # 409：预览后、写入前计划在别处被改
         page_state(pg, "st.setSelection(['PGB-OIL-SEAL'])")
         pg.wait_for_selector("#afb-name", timeout=5000)
@@ -708,9 +724,10 @@ def ai_configured(browser, be):
         save = pg.eval_on_selector("#tb-save", "e => e.textContent")
         p4, _ = be.plan(pid)
         still_blank = not next((t["term"] for t in p4["terms"] if t["selector"] == "PGB-OIL-SEAL"), "")
-        check("AI 起名 · apply=true 时 ETag 不符 → 409：不写入、提示重载", still_blank and "冲突" in save,
+        check("AI 起名 · 写入时 ETag 不符 → 409：服务端不被写入、顶栏提示重载", still_blank and "冲突" in save,
               f"tbSave={save!r} blank={still_blank}")
     finally:
+        FAKE_MODE["vary"] = False
         be.reset_example_plan("gearbox")
         w.zero(name)
         ctx.close()
@@ -748,6 +765,95 @@ def ai_structure_fail_no_hang(browser, be):
         ctx.close()
         if pid:
             be.rest("DELETE", f"/api/wb/projects/{pid}")
+
+
+def import_lifecycle(browser, be):
+    """修复轮 1（Codex R3b）：关闭导入 A → 启动 B → A 迟到失败。A 的 SSE 在浏览器里挂起（A 停在运行中），关闭后
+    启动 B；B 进行中让 A 的工程摘要变成「已就绪 + 结构识别未完成」（旧实现里 A 的轮询会据此关掉 B 的 SSE、替 A 起候选、
+    把入口切回 A）。断言：B 的进度走完、入口进 B、候选作业只为 B 起、没有 A 的提示。"""
+    name = "import_lifecycle"
+    be.ensure_example("gearbox")
+    be.ensure_example("vise")
+    ctx = new_ctx(browser, be)
+    pg, w = page(ctx, allow_net_fail=True)
+    held, late = [], {"on": False}
+    try:
+        pg.route("**/v1/jobs/*/events*", lambda r: held.append(r) if not held else r.continue_())
+
+        def summary(route):
+            if late["on"]:
+                r = route.fetch()
+                j = r.json()
+                j.update(status="ready", message="结构识别未完成：模拟 A 迟到失败")
+                route.fulfill(response=r, body=json.dumps(j, ensure_ascii=False), headers={**r.headers, "content-type": "application/json"})
+            else:
+                route.continue_()
+        pg.route("**/v1/projects/example-gearbox", summary)
+        posts = []
+        pg.on("request", lambda rq: posts.append(rq.url) if rq.method == "POST" and rq.url.endswith("/plan/suggest") else None)
+        pg.goto(f"{be.base}/", wait_until="networkidle")
+        pg.click("#drop")
+        pg.click("#up-ex-gearbox")
+        pg.wait_for_selector(".steps .step.run", timeout=10000)
+        title_a = pg.eval_on_selector(".up-title", "e => e.textContent")
+        pg.click("#upload-close")
+        pg.click("#drop")
+        pg.click("#up-ex-vise")
+        pg.wait_for_function("() => /台虎钳/.test(document.querySelector('.up-title')?.textContent || '')", timeout=10000)
+        late["on"] = True
+        pg.wait_for_timeout(3500)
+        pg.wait_for_selector("#up-enter", timeout=60000)
+        title = pg.eval_on_selector(".up-title", "e => e.textContent")
+        toast = toast_text(pg)
+        pg.click("#up-enter")
+        pg.wait_for_url(re.compile(r".*/p/[^/]+/.*"), timeout=20000)
+        entered = pg.url
+        check("导入生命周期（真实后端）：关闭 A → 启动 B → A 迟到失败，B 走完、入口进 B、候选只为 B 起",
+              "减速器" in title_a and "台虎钳" in title and "/p/example-vise/" in entered and "模拟 A 迟到失败" not in toast
+              and posts and all("/example-vise/" in u for u in posts),
+              f"A={title_a!r} B={title!r} entered=…{entered[-22:]} suggest={[u.split('/v1/projects/')[1] for u in posts]}")
+    finally:
+        for r in held:
+            try:
+                r.abort()
+            except Exception:
+                pass
+        w.zero(name)
+        ctx.close()
+
+
+def probe_retry(browser, be):
+    """修复轮 1（Codex R3b）：能力探测首次失败（网络掐断 / 503）→ 首页「连接不上」→「重试」重新探测，恢复工程列表。"""
+    name = "probe_retry"
+    ctx = new_ctx(browser, be)
+    pg, w = page(ctx, allow=(503,), allow_net_fail=True)
+    out = {}
+    try:
+        for kind in ("abort", "503"):
+            state = {"n": 0}
+
+            def make(state, kind):
+                def caps(route):
+                    state["n"] += 1
+                    if state["n"] == 1:
+                        route.abort() if kind == "abort" else route.fulfill(status=503, body="unavailable")
+                    else:
+                        route.continue_()
+                return caps
+            pg.route("**/v1/capabilities", make(state, kind))
+            pg.goto(f"{be.base}/", wait_until="load")
+            pg.wait_for_selector(".banner.error #retry", timeout=10000)
+            err = pg.eval_on_selector(".banner.error", "e => e.textContent")
+            pg.click("#retry")
+            pg.wait_for_selector(".card[data-id]", timeout=15000)
+            out[kind] = {"err": "连接不上" in err, "probes": state["n"],
+                         "cards": pg.eval_on_selector_all(".card[data-id]", "e => e.length")}
+            pg.unroute("**/v1/capabilities")
+        check("能力探测重试（真实后端）：首次失败（网络 / 503）→「连接不上」→ 重试重新探测并恢复工程列表",
+              all(v["err"] and v["probes"] == 2 and v["cards"] > 0 for v in out.values()), f"{out}")
+    finally:
+        w.zero(name)
+        ctx.close()
 
 
 def sse_reconnect(browser, be):
@@ -1008,7 +1114,7 @@ def pdf_unverified(browser, be):
 
 
 CASES = ["first_run_example", "golden_gearbox", "golden_vise", "golden_valve", "empty_candidates", "vise_blocked_fix",
-         "ai_not_configured", "sse_reconnect", "refresh_resume", "etag_409", "cookie_only",
+         "ai_not_configured", "import_lifecycle", "probe_retry", "sse_reconnect", "refresh_resume", "etag_409", "cookie_only",
          "dwg_conservative_note", "ai_configured", "ai_structure_fail_no_hang", "pdf_unverified"]
 
 

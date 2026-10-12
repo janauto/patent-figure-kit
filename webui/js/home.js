@@ -159,7 +159,19 @@ function errorState(msg, hint, code) {
     <div><b>连接不上工作台服务</b><p class="muted">${esc(msg)}</p>
     ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}</div>
     <button class="btn" id="retry">重试</button></div>`;
-  $('#retry').addEventListener('click', loadList);
+  $('#retry').addEventListener('click', retryConnect);
+}
+
+// 重试：重新探测能力接口（清掉上次的探测错误与缓存的 init），恢复后再取列表（Codex R3b）。
+// 重新探测得出的模式若变了（例如原来连不上、现在是旧后端），整页重载，让各模块按新模式初始化。
+async function retryConnect() {
+  const before = api.mode;
+  $('#grid').innerHTML = '';
+  skeletonGrid();
+  const mode = await api.reprobe();
+  if (mode !== before && before !== 'pending') { location.reload(); return; }
+  if (api.authRequired) { errorState('需要 token', '', 'auth_required'); return; }
+  await loadList();
 }
 
 function renderGrid(data) {
@@ -219,18 +231,43 @@ const UPLOAD_STAGES = [
   ['suggest', '按结构生成候选分图'],
   ['trial', '逐候选试渲染并过 QA'],
 ];
-let uploadSub = null;
-let elapsedTimer = null;
+// 每次导入一个独立的生命周期（Codex R3b）：它自己的 SSE 订阅、定时器与回调都挂在这里；关闭对话框、回到新建页
+// 或开始下一次导入时整体作废——旧导入迟到的事件 / 轮询结果一律不再绘制、不再关别人的订阅、不再起候选作业。
+let currentImport = null;
+let importGen = 0;          // 发起导入的代次：创建请求在途期间关闭或换了导入，回来的结果不再接管界面
+function newImport() {
+  if (currentImport) currentImport.dispose();
+  const imp = {
+    alive: true, subs: new Set(), timers: new Set(),
+    track(sub) { if (!this.alive) { try { sub.close(); } catch { /* */ } } else this.subs.add(sub); return sub; },
+    untrack(sub) { try { sub?.close(); } catch { /* */ } this.subs.delete(sub); },
+    every(fn, ms) { const t = setInterval(() => { if (this.alive) fn(); }, ms); this.timers.add(t); return t; },
+    clear(t) { clearInterval(t); this.timers.delete(t); },
+    dispose() {
+      this.alive = false;
+      this.subs.forEach((sub) => { try { sub.close(); } catch { /* */ } });
+      this.subs.clear();
+      this.timers.forEach((t) => clearInterval(t));
+      this.timers.clear();
+    },
+  };
+  currentImport = imp;
+  return imp;
+}
+function abandonImport() {
+  importGen += 1;
+  if (currentImport) { currentImport.dispose(); currentImport = null; }
+}
 
 function openUpload() { $('#upload').hidden = false; }
 function closeUpload() {
   $('#upload').hidden = true;
-  if (uploadSub) { uploadSub.close(); uploadSub = null; }
-  clearInterval(elapsedTimer); elapsedTimer = null;
+  abandonImport();
 }
 
 function openUploadIdle(dragging) {
   if (readOnly) { toast('静态演示站只读，无法新建工程', ''); return; }
+  abandonImport();                       // 回到新建页：之前那次导入不再占用这块界面
   openUpload();
   $('#upload-body').innerHTML = `
     <div class="up-drop ${dragging ? 'over' : ''}" id="up-drop">
@@ -296,8 +333,10 @@ function uploadTimeline(tl) {
       : `<p class="hint up-running-hint" id="up-elapsed">正在处理（已用 <span class="mono">${secs.toFixed(0)}</span> 秒）。${esc(tl.note || '每步耗时实时显示。')}</p>`}</div>`;
 }
 
-// 一条完整的导入流水线：作业 A（新建 / 示例）→ 作业 B（候选分图），共用一条时间线
+// 一条完整的导入流水线：作业 A（新建 / 示例）→ 作业 B（候选分图），共用一条时间线。
+// 所有回调先看 imp.alive：这次导入被作废后（关闭 / 换导入），迟到的事件与轮询结果直接丢弃。
 function runImportJob(jobId, projectId, title, { example = false, uploadSeconds = null } = {}) {
+  const imp = newImport();
   openUpload();
   const tl = { title, example, stages: [], t0: Date.now(), stageT0: Date.now(),
     note: example ? '首次载入示例要现场生成演示模型 STEP 并解析，视机器性能需要几秒到一分钟；之后再载入只需几秒。' : '' };
@@ -312,30 +351,36 @@ function runImportJob(jobId, projectId, title, { example = false, uploadSeconds 
     tl.stages[i] = { state: 'ok', seconds: (Date.now() - tl.stageT0) / 1000, detail };
     tl.stageT0 = Date.now();
   };
-  const paint = () => { $('#upload-body').innerHTML = uploadTimeline(tl); bindUploadRun(projectId, title); };
+  const paint = () => {
+    if (!imp.alive) return;
+    $('#upload-body').innerHTML = uploadTimeline(tl);
+    bindUploadRun(projectId, title);
+  };
   if (uploadSeconds != null) tl.stages[0] = { state: 'ok', seconds: uploadSeconds };
   setRun(uploadSeconds != null ? 1 : 0);
   paint();
-  clearInterval(elapsedTimer);
-  elapsedTimer = setInterval(() => {
+  const elapsed = imp.every(() => {
     const el = document.querySelector('#up-elapsed .mono');
     if (el) el.textContent = ((Date.now() - tl.t0) / 1000).toFixed(0);
   }, 1000);
-  const stop = () => { clearInterval(elapsedTimer); elapsedTimer = null; };
+  const stop = () => imp.clear(elapsed);
   const failAt = (i, d, canEnter) => {
+    if (!imp.alive) return;
     stop();
     tl.stages[i] = { state: 'fail', detail: tl.stages[i]?.detail };
     tl.failed = { label: UPLOAD_STAGES[i][1], hint: [d?.message, d?.hint].filter(Boolean).join('——'), canEnter };
     paint();
   };
   const startSuggest = async () => {
+    if (!imp.alive) return;
     setOk(1); setRun(2, '按结构生成候选分图'); paint();
     let sj;
     try { sj = await api.suggest(projectId, false); } catch (err) { failAt(2, err, true); return; }
-    let settled = false;
+    if (!imp.alive) return;
+    let settled = false; let subB = null;
     const finish = async (ok, d) => {
-      if (settled) return; settled = true;
-      try { uploadSub?.close(); } catch { /* */ }
+      if (settled || !imp.alive) return; settled = true;
+      imp.untrack(subB);
       if (!ok) { failAt(tl.stages[3]?.state === 'run' ? 3 : 2, d, true); return; }
       let summary = '';
       try {
@@ -345,12 +390,14 @@ function runImportJob(jobId, projectId, title, { example = false, uploadSeconds 
           ? `候选分图完成：${s.total ?? 0} 个候选都没过闸——进入后请框选分组。`
           : `候选分图完成：${s.total ?? 0} 个候选，${s.pass ?? 0} 个过闸。`;
       } catch { /* 摘要读不到不影响进入 */ }
+      if (!imp.alive) return;
       if (tl.stages[2]?.state !== 'ok') setOk(2);
       setOk(3, tl.stages[3]?.detail ? '逐候选试渲染并过 QA' : undefined);
       stop(); tl.done = true; tl.summary = summary; paint();
     };
-    uploadSub = api.jobEvents(sj.job_id, {
+    subB = imp.track(api.jobEvents(sj.job_id, {
       stage(d) {
+        if (!imp.alive) return;
         const label = d.label || '';
         if (/^试渲染候选/.test(label)) { if (tl.stages[2]?.state !== 'ok') setOk(2); setRun(3, label); }
         else if (label && label !== 'running') setRun(2, label);
@@ -364,28 +411,36 @@ function runImportJob(jobId, projectId, title, { example = false, uploadSeconds 
           else if (['failed', 'cancelled', 'interrupted'].includes(j.state)) finish(false, j.error || { message: j.state });
         }).catch(() => { /* 等重连 */ });
       },
-    });
+    }));
   };
-  let settledA = false;
-  let watchTimer = null;
-  const doneA = () => { if (settledA) return; settledA = true; clearInterval(watchTimer); try { uploadSub?.close(); } catch { /* */ } startSuggest(); };
-  const failA = (d) => { if (settledA) return; settledA = true; clearInterval(watchTimer); try { uploadSub?.close(); } catch { /* */ } failAt(tl.stages[1]?.state === 'run' ? 1 : 0, d, false); };
+  let settledA = false; let subA = null; let watch = null;
+  const doneA = () => {
+    if (settledA || !imp.alive) return; settledA = true;
+    imp.clear(watch); imp.untrack(subA);
+    startSuggest();
+  };
+  const failA = (d) => {
+    if (settledA || !imp.alive) return; settledA = true;
+    imp.clear(watch); imp.untrack(subA);
+    failAt(tl.stages[1]?.state === 'run' ? 1 : 0, d, false);
+  };
   // 准备作业要等工程「就绪且没有后台消息」才算完成；已接入 AI 时这包括后台结构识别。识别失败时后端把失败原因
   // 留在工程消息里，作业会一直等到 30 分钟超时——这里同时看工程摘要：已就绪且消息是「…未完成」就照常往下走，
   // 并把原因告诉用户（结构识别是可选的，不挡金路径）。
-  watchTimer = setInterval(async () => {
-    if (settledA) { clearInterval(watchTimer); return; }
+  watch = imp.every(async () => {
+    if (settledA) return;
     let p;
     try { p = (await api.getSummary(projectId)) || null; } catch { return; }
-    if (!p || settledA) return;
+    if (!p || settledA || !imp.alive) return;
     if (p.status === 'ready' && p.message) {
       tl.stages[1] = { ...(tl.stages[1] || {}), state: 'run', detail: p.message };
       paint();
       if (/未完成/.test(p.message)) { toast(p.message, '', 6000); doneA(); }
     }
   }, 2500);
-  uploadSub = api.jobEvents(jobId, {
+  subA = imp.track(api.jobEvents(jobId, {
     stage(d) {
+      if (!imp.alive) return;
       if (d.stage === 'from-example') setRun(0, d.label || '生成演示模型 STEP');
       else if (d.stage === 'prepare') setRun(1, d.label || UPLOAD_STAGES[1][1]);
       paint();
@@ -398,7 +453,7 @@ function runImportJob(jobId, projectId, title, { example = false, uploadSeconds 
         else if (['failed', 'cancelled', 'interrupted'].includes(j.state)) failA(j.error || { message: j.state });
       }).catch(() => { /* 等重连 */ });
     },
-  });
+  }));
 }
 
 function bindUploadRun(projectId, title) {
@@ -426,8 +481,10 @@ async function startUpload(file, titleOverride) {
   const ai = pendingAi;
   pendingTitle = title;
   const t0 = Date.now();
+  const gen = ++importGen;
   try {
     const res = await api.createProject({ file, title, ai }, params.get('fail'));
+    if (gen !== importGen) return;          // 请求在途期间对话框已关闭或换了导入：不再接管界面
     if (isLegacy) {                 // 旧后端：后台解析，回列表轮询到就绪
       closeUpload(); pendingFile = null;
       toast(`已上传「${title}」，正在后台解析，就绪后可打开`, 'ok');
@@ -436,6 +493,7 @@ async function startUpload(file, titleOverride) {
     }
     runImportJob(res.job_id, res.project_id, title, { uploadSeconds: (Date.now() - t0) / 1000 });
   } catch (err) {                   // 不引用 try 内局部；用保存的上下文让重试可点
+    if (gen !== importGen) return;
     openUpload();
     $('#upload-body').innerHTML = `<div class="up-progress"><h2 class="up-title">${esc(title)}</h2>
       <div class="banner error"><div><b>上传失败</b><p class="hint">${esc(err.hint || err.message)}</p></div>
@@ -452,11 +510,13 @@ async function startExample(ex) {
     toast('示例工程正在准备，请稍候刷新', '');
     return;
   }
+  const gen = ++importGen;
   try {
     const res = await api.fromExample(ex);
+    if (gen !== importGen) return;          // 请求在途期间对话框已关闭或换了导入
     const title = { gearbox: '行星齿轮减速器', vise: '台虎钳', valve: '球阀' }[ex];
     runImportJob(res.job_id, res.project_id, `载入示例 · ${title}`, { example: true });
-  } catch (err) { toast('载入示例失败：' + (err.hint || err.message), 'bad'); }
+  } catch (err) { if (gen === importGen) toast('载入示例失败：' + (err.hint || err.message), 'bad'); }
 }
 
 // 四态截图用（仅开发）：?upload=idle|running|done|fail 强制冻结上传屏

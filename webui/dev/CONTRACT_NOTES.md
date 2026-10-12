@@ -20,7 +20,7 @@ mock 也随之改成真实响应形状（`tests/test_e2e_contract_mock.py` 钉�
 | `POST /v1/projects/{id}/render` | 202 `{job_id, inputs}` | 出图；版本 = 作业 ID |
 | `GET /v1/jobs/{id}/events` | SSE `id / event / data={stage,progress,data}`，`Last-Event-ID` / `?last_event_id=` | 全部作业进度；断线重连 |
 | `POST /v1/projects/{id}/export` + `GET /v1/exports/{id}` + `/download` | `ExportResult`（items / documents / manifest / reasons / sha256 / note / download_url） | 导出屏四态（ok / skip / fail / unverified） |
-| `POST /v1/projects/{id}/ai/draft-terms` | `DraftTermsResult`，`apply` 缺省 false，`ai_not_configured` 200，502 `ai_call_failed`，409 | 外发确认 → 预览 → 写入 |
+| `POST /v1/projects/{id}/ai/draft-terms` | `DraftTermsResult`，`apply` 缺省 false，`ai_not_configured` 200，502 `ai_call_failed` | 外发确认 → `apply=false` 预览；写入时前端按与 `fill_blank_terms` 相同的「只填空白」规则改计划，经 `PUT /plan` + If-Match 保存（写入 = 预览） |
 | `POST /v1/projects/from-example`、`POST /v1/projects` | 202 `JobRef` | 新建 / 示例时间线，随后自动起候选作业 |
 | 鉴权 | Cookie `wb_token`；`?token=` 只靠它通过时回 `Deprecation` / `X-Auth-Deprecated` | 浏览器只用 Cookie；据 Deprecation 头提示 |
 

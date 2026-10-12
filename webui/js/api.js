@@ -287,6 +287,13 @@ export const api = {
     }
     return _init;
   },
+  // 重新探测（首页「重试」用）：清掉上次的探测错误、401 标记、能力缓存与已完成的 init Promise，再走一遍 init。
+  // 模式只在 live / pending 之间重判；静态站不需要重探。
+  async reprobe() {
+    if (forcedStatic) return MODE;
+    _init = null; probeError = null; authRequired = false; caps = null;
+    return this.init();
+  },
   async refreshCaps() {
     if (MODE !== 'live') return caps;
     caps = (await call('GET', `${root}v1/capabilities`)).body;

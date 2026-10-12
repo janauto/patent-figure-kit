@@ -129,6 +129,39 @@ export function termFor(name) {
   return null;
 }
 
+// AI 起名「写入空白件」（Codex R3b）：把用户**预览过的**建议写进计划，规则与后端 suggest_plan.fill_blank_terms 一致——
+//   管辖该零件的第一条术语行（发号优先级）已有名称 → kept_human（人填过的不覆盖）；
+//   没有行管辖 → 末尾追加一条精确行 → added；
+//   管辖行只覆盖这一个零件 → 原地填 → filled；
+//   管辖行是共享通配行（还覆盖别的零件）→ 不动它，在它前面插一条精确行（新行优先）→ filled。
+// 写入走普通保存循环（PUT /plan + If-Match），不再让后端重新生成名称。
+const globEscape = (n) => String(n).replace(/[*?[]/g, (c) => `[${c}]`);
+export function fillBlankTerms(plan, rows, names) {
+  const out = { filled: [], kept_human: [], added: [] };
+  plan.terms = plan.terms || [];
+  for (const r of rows || []) {
+    const sel = String(r?.selector || ''); const term = String(r?.term || '').trim();
+    if (!sel || !term) continue;
+    const label = ['once', 'none'].includes(r.label) ? r.label : null;
+    const row = plan.terms.find((t) => typeof t.selector === 'string' && t.selector && globToRegExp(t.selector).test(sel));
+    if (!row) {
+      plan.terms.push({ selector: globEscape(sel), term, label: label || 'once' });
+      out.added.push(sel);
+      continue;
+    }
+    if (String(row.term || '').trim()) { out.kept_human.push(sel); continue; }
+    const covered = (names || []).filter((n) => globToRegExp(row.selector).test(n));
+    if (covered.length === 1 && covered[0] === sel) {
+      row.term = term;
+      if (label) row.label = label;
+    } else {
+      plan.terms.splice(plan.terms.indexOf(row), 0, { selector: globEscape(sel), term, label: label || row.label || 'once' });
+    }
+    out.filled.push(sel);
+  }
+  return out;
+}
+
 // 前端预演的「本图有效标记数」——权威判定永远是服务器 validate；这里只为图卡上的 n/20 徽标。
 export function labelCount(fig) {
   const members = resolveMembers(fig);

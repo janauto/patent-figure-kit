@@ -1,7 +1,7 @@
 // 规划台装配入口：顶栏、三屏切换（规划 / 出图与 QA / 导出）、键盘金路径、AI 起名浮条。
 // three.js 只在进入「规划台」时动态 import()，首页零 three.js（硬约束）。
 // 启动先 await api.init()：按能力接口判定 live / legacy（WP3b #1），之后才读工程。
-import { boot, bus, state, setSelection, flush, setView, displayName } from './state.js';
+import { boot, bus, state, setSelection, flush, setView, displayName, mutate, fillBlankTerms } from './state.js';
 import { api, readOnly, pagePid } from './api.js';
 import { applyBrand } from './brand.js';
 import { esc } from './esc.js';
@@ -317,7 +317,8 @@ export function confirmOutbound({ title = 'AI 起名会外发以下内容', coun
 
 // ---------------------------------------------------------------- AI 起名浮条（F9，WP3b #9）
 // live：① 先落盘本地改动（保存失败绝不外发）② 外发确认 ③ apply=false 只取建议（不写 plan）、在术语页标出把握
-// ④ 用户点「写入空白件」→ 再落盘一次，apply=true + If-Match（只填空白、人工填过的不动）→ 以服务端新 plan / ETag 为准。
+// ④ 用户点「写入空白件」→ 再落盘一次，把预览过的建议按「只填空白」写进计划，经保存循环 PUT /plan + If-Match。
+// 写入的是预览过的建议本身（PUT /plan + If-Match，不再 apply=true 让后端重新生成——Codex R3b）。
 // 没有 AI 通道：服务端 200 ai_not_configured → 中性提示，不报错。legacy 维持旧的一步式（服务端起名并写入）。
 let aiPending = null;          // {selectors, suggestions, etag0}：已取到、待写入的建议
 function initAiFloatbar() {
@@ -407,36 +408,37 @@ async function applyAiSuggestions() {
   try {
     await flush();
     if (saveBlocked()) { blockedToast(); paintPending(bar); return; }
-    const v0 = state.editVersion; const e0 = state.planEtag;
-    const res = await api.draftTerms(projectId, { selectors: aiPending.selectors, apply: true, etag: state.planEtag });
-    if (res.status === 'ai_not_configured') { aiPending = null; toast(res.hint || 'AI 通道未配置', ''); updateFloatbar(); return; }
-    const fresh = await api.getPlan(projectId);
-    // 用服务端 plan 替换本地前再核一次：等待期间没有新编辑、没有保存失败、本地版本没被别的保存推进
-    const unchanged = state.editVersion === v0 && state.savedVersion >= v0 && state.planEtag === e0
-      && state.saveState !== 'error' && state.saveState !== 'conflict';
-    aiPending = null;
-    if (!unchanged) {
-      toast('AI 已在服务端写入，但等待期间本地计划又有改动——为不覆盖你的编辑，请刷新后查看 AI 名称。', 'bad');
+    // 写入的就是用户刚才预览的建议（不再请后端重新生成）：先在副本上试算「只填空白」，没有可写的就不动计划
+    const rows = aiPending.suggestions;
+    const names = (state.assembly?.parts || []).map((p) => p.name);
+    const trial = fillBlankTerms(JSON.parse(JSON.stringify(state.plan)), rows, names);
+    if (!trial.filled.length && !trial.added.length) {
+      aiPending = null;
+      toast('AI 没有可写入的空白件（这些零件已被人工命名）。', '');
       updateFloatbar(); return;
     }
-    state.plan = fresh.plan;
-    state.planEtag = fresh.etag || res.etag || null;
-    (res.suggestions || []).forEach((s) => { state.aiSuggestions[s.selector] = s; });
-    if (state.render) bus.emit('render-stale');      // plan 变了 → 旧渲染结果过期
-    bus.emit('plan'); bus.emit('ai-suggestions');
-    const { scheduleValidate } = await import('./state.js');
-    scheduleValidate(50);
-    const filled = (res.applied?.filled?.length || 0) + (res.applied?.added?.length || 0);
-    const kept = res.applied?.kept_human?.length || 0;
-    const low = (res.suggestions || []).filter((s) => s.confidence === 'low').length;
-    toast(filled ? `AI 已写入 ${filled} 个零件名${low ? `（${low} 个把握低，已标黄，请核对）` : ''}。`
-      + (kept ? `${kept} 个人工填过的未改动。` : '人工填过的未改动。') : 'AI 没有可写入的空白件（可能已被人工填写）。', filled ? 'ok' : '');
+    let outcome = trial;
+    mutate((plan) => { outcome = fillBlankTerms(plan, rows, names); });
+    rows.forEach((s) => { state.aiSuggestions[s.selector] = s; });
+    bus.emit('ai-suggestions');
+    await flush();                                    // 普通保存循环：PUT /plan + If-Match
+    if (state.saveState === 'conflict') {
+      toast('计划已在别处被修改（ETag 不匹配），AI 名称没有存进服务端——请点顶栏「重载」后再试。', 'bad', 6000);
+      updateFloatbar(); return;
+    }
+    if (state.saveState === 'error' || state.editVersion > state.savedVersion) {
+      toast('AI 名称已写进本页计划，但保存未成功——请先解决保存问题。', 'bad', 6000);
+      updateFloatbar(); return;
+    }
+    aiPending = null;
+    const filled = outcome.filled.length + outcome.added.length;
+    const kept = outcome.kept_human.length;
+    const low = rows.filter((s) => s.confidence === 'low' && (outcome.filled.includes(s.selector) || outcome.added.includes(s.selector))).length;
+    toast(`AI 已写入 ${filled} 个零件名${low ? `（${low} 个把握低，已标黄，请核对）` : ''}。`
+      + (kept ? `${kept} 个人工填过的未改动。` : '人工填过的未改动。'), 'ok');
     updateFloatbar();
   } catch (err) {
-    if (err.status === 409) {
-      toast('计划已在别处被修改（ETag 不匹配），AI 名称未写入——请点顶栏「重载」后再试。', 'bad', 6000);
-      state.saveState = 'conflict'; bus.emit('save-state');
-    } else toast('AI 写入失败：' + (err.hint || err.message), 'bad');
+    toast('AI 写入失败：' + (err.hint || err.message), 'bad');
     paintPending(bar);
   }
 }

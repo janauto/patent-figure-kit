@@ -68,7 +68,7 @@
 
 | # | 项 | 前端做法 | 真实后端证据 |
 | --- | --- | --- | --- |
-| 1 | 能力探测与模式判定 | `api.init()` 探测 `/v1/capabilities`，200/401 → live，404 → legacy | e2e 全部用例；verify_ui 的 legacy 用例跑在 `--old-backend` |
+| 1 | 能力探测与模式判定 | `api.init()` 探测 `/v1/capabilities`，200/401 → live，404 → legacy；首页「重试」经 `api.reprobe()` 重新探测 | e2e 全部用例 + probe_retry；verify_ui 的 legacy 用例跑在 `--old-backend` |
 | 2 | 资源挂载 | 首页 `/static/*`，规划台 `/p/{pid}/` 子应用的静态页 + importmap；后端无需改挂载 | e2e 每条用例断言零 4xx/5xx 资源 |
 | 3 | 数据源 | 详情 = `GET /v1/projects/{id}`（摘要、plan_etag、候选状态）+ 子应用 `api/state`（装配体、已发布 render、版本、本次作业）+ `GET /plan/candidates`；渲染状态读 `api/render/status`（result / job 分开）；已发布版本的输入证据取 `GET /v1/jobs/{rid}` 的 `inputs.plan_etag` | golden_*、refresh_resume、vise_blocked_fix |
 | 4 | SSE | 帧 `{stage, progress, data}` 解包；CONNECTING 由浏览器带 `Last-Event-ID` 重连，CLOSED 由前端按 `?last_event_id=` 重连；终态后回读 | sse_reconnect |
@@ -76,9 +76,9 @@
 | 6 | 渲染与证据 | 202 → SSE → 读 `api/render/status`，版本 = 作业 ID、证据 = 冻结输入 plan_etag；失败显示 job 诊断并标明预览 / 导出属上一成功版本；排版阶段失败从日志行取错误码给白话 | golden_*、vise_blocked_fix |
 | 7 | QA | 后端 `title_zh / hint_plain / fix_action` 优先；`fix_action.target` 直达控件；`null` →「不是你的操作问题」 | vise_blocked_fix |
 | 8 | 导出 | 请求带 variant / formats / dpi / sheet_preset / render_job_id / plan_etag；能力事前禁选 DWG、提示 PDF 未核验；结果按 items / documents 四态展示，`_未通过核验/` 给原因；CNIPA 旁注；保守版心提示 | golden_*、dwg_conservative_note、pdf_unverified |
-| 9 | AI 起名 | 外发确认（outbound_fields / note）→ `apply=false` 预览 → `apply=true` + If-Match 写入；`ai_not_configured` 中性 | ai_configured（假 LLM 通道）、ai_not_configured |
+| 9 | AI 起名 | 外发确认（outbound_fields / note）→ `apply=false` 预览 → 把**预览过的建议**按只填空白写进计划，经 `PUT /plan` + If-Match 保存（不再让后端重新生成）；`ai_not_configured` 中性 | ai_configured（假 LLM 每次给不同名字，断言写入 = 预览）、ai_not_configured |
 | 10 | 鉴权 | 见上 | cookie_only |
-| 11 | 示例 | `POST /v1/projects/from-example` → 时间线（准备示例 / 解析 / 候选 / 试渲染 k/N，已用秒数 + 首次耗时说明） | first_run_example、golden_* |
+| 11 | 示例 | `POST /v1/projects/from-example` → 时间线（准备示例 / 解析 / 候选 / 试渲染 k/N，已用秒数 + 首次耗时说明）；每次导入一个独立生命周期，关闭 / 换导入即作废旧回调 | first_run_example、golden_*、import_lifecycle |
 | 12 | 静态站 | manifest = 后端响应快照，与 live 共用归一化；`build_static.py` 生成后按 openapi 核对漂移 | `tests/test_e2e_contract_mock.py` |
 
 ## 五、脚本
