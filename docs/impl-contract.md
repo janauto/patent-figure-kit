@@ -2507,3 +2507,16 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   全部在 `PFK_PDF_RENDERER=none` 与 `pypdfium2` 两种配置下各跑一遍：`none` 时核心核验独立判不通过；使图片不可见的各例由
   pypdfium2 确认图号位置无墨迹。其余 PDF 回归（页数、页序、图号墨迹、页边 / A4 / 拉伸、遮罩 / 透明 / 覆盖 / 裁切、
   保守图区）也改为两种配置各跑一遍。
+
+### 14.16 修复轮 9（Codex R2i）收敛：PDF 严格解析、重复键拒绝
+
+- **问题**：`PdfReader` 默认 `strict=False`，字典里重复的键（如 `/ca 1 /ca 0`）只记一条警告并保留**前值**，而 PDFium 取
+  **后值**——类型检查与封闭键集看到的是前值（不透明），屏幕上是后值（全透明 / 解码失败 / 宽度 1），无渲染器时空白页判通过。
+- **严格解析**：核验端 `PdfReader(path, strict=True)`；先按交叉引用表把**每个在用对象**逐一解析（`_pdf_parse_all`），任何
+  重复键、错误的流长度、畸形对象都使文档不通过，不论后续检查是否会碰到该对象；页面级的延迟解析异常照旧转为该页不通过
+  （核验不抛出）。重复键在原因里明说「PDF 字典里有重复的键（pypdf 取前值、PDFium 取后值）」。
+- **写出端自身可严格解析**：matplotlib 3.9.4 `PdfPages` 的产物在 `strict=True` 下逐对象解析无误、无警告（单元测试）；
+  N17 对下载包里每份 PDF 另行逐对象严格解析，dpi 72 的 PDF 也只因栅格字高不通过、无文档级错误。
+- **回归**：`test_pdf_duplicate_dictionary_keys_fail_without_a_renderer`——在原始字节里注入重复 `/ca`、`/Filter`、`/Width`
+  并修正 xref / startxref（合法文件），`none` 与 `pypdfium2` 两种配置下均不通过；`test_pdf_byte_patch_keeps_the_file_legal`
+  用同一改写手法做无害改动（同值换写法）仍通过，证明失败来自重复键而非文件损坏。

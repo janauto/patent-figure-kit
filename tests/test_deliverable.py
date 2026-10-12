@@ -994,3 +994,110 @@ def test_pdf_stream_length_must_be_a_pdf_integer(two, renderer, kind):
     assert not rep["ok"]
     msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
     assert "无法按写出端的固定结构解释" in msgs, msgs
+
+
+# --------------------------------------------------------------------------- R2i: strict parsing
+
+
+def _pdf_patch_bytes(data: bytes, obj: int, old: bytes, new: bytes) -> bytes:
+    """Byte-level edit of a writer PDF that keeps it a LEGAL file: replace the first ``old`` after
+    object ``obj``'s header by ``new``, then shift every later offset in the classic xref table
+    and the ``startxref`` value by the size change."""
+    import re as _re
+    head = _re.search(rb"(?:^|\n)%d 0 obj\n" % obj, data)
+    at = data.index(old, head.end())
+    delta = len(new) - len(old)
+    out = data[:at] + new + data[at + len(old):]
+    sx = _re.search(rb"startxref\s+(\d+)\s+%%EOF\s*$", out)
+    xref_at = int(sx.group(1)) + delta
+    assert out[xref_at:xref_at + 4] == b"xref"
+    end = out.index(b"trailer", xref_at)
+
+    def fix(m):
+        off = int(m.group(1))
+        return b"%010d %s n" % (off + delta if off > at else off, m.group(2))
+    table = _re.sub(rb"(\d{10}) (\d{5}) n", fix, out[xref_at:end])
+    return out[:xref_at] + table + out[end:sx.start(1)] + b"%d" % xref_at + out[sx.end(1):]
+
+
+def _pdf_targets(path: Path):
+    """``(graphics-state object, page-1 image object, image width)`` of a writer PDF."""
+    from pypdf import PdfReader
+    page = PdfReader(str(path)).pages[0]
+    img = page["/Resources"]["/XObject"]
+    return (page["/Resources"].raw_get("/ExtGState").idnum, img.raw_get("/I1").idnum,
+            int(img["/I1"]["/Width"]))
+
+
+@pytest.mark.parametrize("case", ["ca", "filter", "width"])
+def test_pdf_duplicate_dictionary_keys_fail_without_a_renderer(two, renderer, case):
+    """R2i: a dictionary key written TWICE (``/ca 1 /ca 0``, ``/Filter /FlateDecode /Filter
+    /DCTDecode``, ``/Width w /Width 1``) — pypdf's tolerant parse keeps the first value, PDFium the
+    last (blank page). The check parses STRICTLY: each fails with no renderer at all and with
+    pypdfium2, never raises. The file is otherwise legal (xref and startxref corrected)."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    assert _check(good, rows, sp)["ok"]
+    gs, img, width = _pdf_targets(good)
+    obj, old, new = {"ca": (gs, b"/ca 1", b"/ca 1 /ca 0"),
+                     "filter": (img, b"/Filter /FlateDecode",
+                                b"/Filter /FlateDecode /Filter /DCTDecode"),
+                     "width": (img, b"/Width %d" % width, b"/Width %d /Width 1" % width)}[case]
+    bad = tmp / "bad.pdf"
+    bad.write_bytes(_pdf_patch_bytes(good.read_bytes(), obj, old, new))
+    rep = _check(bad, rows, sp)
+    assert not rep["ok"]
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert "重复的键" in msgs, msgs
+    if renderer == "none":
+        assert rep["render_check"] == "unavailable"           # the core check alone refused it
+
+
+@pytest.mark.parametrize("old, new", [(b"/ca 1", b"/ca 1.000"), (b"/Width ", b"/Width    ")])
+def test_pdf_byte_patch_keeps_the_file_legal(two, renderer, old, new):
+    """Control for the R2i injections: the same byte-level patch with a harmless edit (a longer
+    spelling of the same value) still passes the full strict check — so the duplicate-key files
+    fail because of the duplicate, not because the patch broke the xref."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    gs, img, _w = _pdf_targets(good)
+    edited = tmp / "edited.pdf"
+    edited.write_bytes(_pdf_patch_bytes(good.read_bytes(), gs if b"ca" in old else img, old, new))
+    assert edited.read_bytes() != good.read_bytes()
+    rep = _check(edited, rows, sp)
+    assert rep["ok"], (rep["errors"], [p["errors"] for p in rep["page_checks"]])
+
+
+def test_writer_pdf_parses_strictly_object_by_object(two):
+    """R2i: the writer's own PDF resolves under ``PdfReader(strict=True)`` — every in-use object
+    of the xref table, no warning — so strict checking costs no false failures."""
+    pypdf = pytest.importorskip("pypdf")
+    import logging
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    records = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+    h = _Grab(level=logging.WARNING)
+    logging.getLogger("pypdf").addHandler(h)
+    try:
+        reader = pypdf.PdfReader(str(good), strict=True)
+        assert C._pdf_parse_all(reader) == []
+        n = sum(len(t) for t in reader.xref.values())
+        assert n >= 10
+        for page in reader.pages:
+            page.get_contents().operations
+            assert [im.image.size for im in page.images]
+    finally:
+        logging.getLogger("pypdf").removeHandler(h)
+    assert records == [], records

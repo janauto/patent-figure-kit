@@ -914,6 +914,38 @@ def _pdf_page_report(path: Path, k: int, page, src: "Source", sp: Dict[str, Any]
     return pc
 
 
+def _pdf_exc_reason(exc: BaseException) -> str:
+    """A parse failure in words. A duplicate dictionary key is named explicitly (R2i): readers
+    disagree on it — pypdf keeps the FIRST value, PDFium the LAST — so ``/ca 1 /ca 0`` would be
+    opaque to the check and invisible on screen."""
+    text = str(exc)
+    if "Multiple definitions" in text:
+        return "PDF 字典里有重复的键（pypdf 取前值、PDFium 取后值，各阅读器看到的不一样）——%s" % text
+    if "Detected loop with self reference" in text:
+        # pypdf's answer when an object that already failed to parse is asked for again
+        return "引用的对象无法严格解析（循环引用或该对象本身已解析失败，见文档级原因）"
+    return "%s: %s" % (type(exc).__name__, text)
+
+
+def _pdf_parse_all(reader) -> List[str]:
+    """R2i: resolve EVERY in-use object of the cross-reference table under ``strict=True`` — a
+    duplicate dictionary key, a stream with a wrong ``/Length``, any malformed object anywhere in
+    the file fails the document, whether or not the later checks would have touched it (a tolerant
+    parse would silently keep one of the conflicting values)."""
+    from pypdf.generic import IndirectObject
+    errors: List[str] = []
+    free = getattr(reader, "xref_free_entry", {}) or {}
+    refs = [(idnum, gen) for gen, table in reader.xref.items() for idnum in table
+            if not free.get(gen, {}).get(idnum)]
+    refs += [(idnum, 0) for idnum in getattr(reader, "xref_objStm", {}) or {}]
+    for idnum, gen in sorted(set(refs)):
+        try:
+            reader.get_object(IndirectObject(idnum, gen, reader))
+        except Exception as exc:
+            errors.append("PDF 对象 %d %d 无法严格解析：%s" % (idnum, gen, _pdf_exc_reason(exc)))
+    return errors
+
+
 def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict[str, Any]:
     path = Path(path)
     if not pdf_checker_available():
@@ -921,14 +953,19 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
                                                    "——按规则不得报通过"], -1)
     from pypdf import PdfReader
     try:
-        reader = PdfReader(str(path))
+        # R2i: STRICT parsing — the tolerant default keeps the first of duplicated dictionary keys
+        # (with only a warning) where PDFium takes the last, repairs broken xref / stream lengths
+        # its own way, and so on; the writer's files parse cleanly in strict mode
+        reader = PdfReader(str(path), strict=True)
         pdf_pages = list(reader.pages)
     except Exception as exc:
-        return _report(path, "pdf", sources, [], ["PDF 读不了：%s" % exc], -1)
+        return _report(path, "pdf", sources, [], ["PDF 读不了（严格解析）：%s" % _pdf_exc_reason(exc)],
+                       -1)
+    doc_errors = _pdf_parse_all(reader)
     try:
-        doc_errors = _pdf_structure(reader, len(pdf_pages))
+        doc_errors += _pdf_structure(reader, len(pdf_pages))
     except Exception as exc:                      # an unexpected structure is not ours
-        doc_errors = ["PDF 结构无法按写出端的固定结构解释：%s: %s" % (type(exc).__name__, exc)]
+        doc_errors.append("PDF 结构无法按写出端的固定结构解释：%s" % _pdf_exc_reason(exc))
     render = render_backend() or "unavailable"
     pages = []
     for k, (page, src) in enumerate(zip(pdf_pages, sources), start=1):
@@ -938,8 +975,8 @@ def check_pdf(path: Path, sources: Sequence[Source], sp: Dict[str, Any]) -> Dict
             # R2h: an object pypdf cannot even interpret (e.g. a stream whose /Length is not a
             # PDF integer) is not the writer's — the page fails, the check never raises
             pages.append({"page": k, "figure": src.figure, "ok": False, "render_caption_ink": None,
-                          "errors": ["第 %d 页无法按写出端的固定结构解释：%s: %s"
-                                     % (k, type(exc).__name__, exc)]})
+                          "errors": ["第 %d 页无法按写出端的固定结构解释：%s"
+                                     % (k, _pdf_exc_reason(exc))]})
     rep = _report(path, "pdf", sources, pages, doc_errors, len(pdf_pages))
     rep.update(layout_verified="file-geometry",
                layout_note="PDF 的页幅与图片位置取自文件里的绘制指令（CTM）与图片像素；"

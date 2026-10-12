@@ -652,6 +652,11 @@ def _recheck_zip(env, export_job, dest):
             assert rep["ok"], "%s 复核不通过：%s %s" % (doc.name, rep["errors"],
                                                      [p["errors"] for p in rep["page_checks"]])
             pages += rep["pages"]
+            if fmt == "pdf":            # R2i: the writer's own PDF parses STRICTLY, every object
+                from pypdf import PdfReader
+                bad = _C._pdf_parse_all(PdfReader(str(doc), strict=True))
+                assert not bad, "%s 严格解析不通过：%s" % (doc.name, bad)
+                env.setdefault("strict_pdfs", []).append(doc.name)
     for name in ("附图说明.txt", "核对清单.txt", "核验报告.json", "reference-numerals.json"):
         assert (dest / name).is_file(), "包内缺 %s" % name
     return pages
@@ -689,10 +694,17 @@ def n17(ctx):
         assert res72["ok"] is False and bad and all(v == "fail" for v in bad.values()), \
             "%s dpi 72 未判不通过：%s" % (ex, bad)
         assert all("px" in res72["reasons"][k] for k in bad), res72["reasons"]
+        # R2i: the dpi-72 PDFs fail on raster text height ONLY — they too parse strictly, with
+        # no document-level (structure / strict-parse) error
+        for name, doc in res72["documents"].items():
+            assert not (name.endswith(".pdf") and doc["errors"]), \
+                "%s %s：%s" % (ex, name, doc["errors"])
         assert all(v == "ok" for k, v in res72["manifest"].items() if k.endswith("/dxf"))
         assert not any(f.startswith("说明书附图_") for f in res72["files"]), res72["files"]
     return ("3 个模型 × 两版 × PDF/Word 服务端核验 + 下载包独立复核共 %d 页全部通过；"
-            "dpi 72 时 PDF/Word 全部判 fail（栅格字高 < 24 px）并隔离" % total_pages)
+            "%d 份 PDF 逐对象严格解析（pypdf strict）无误；"
+            "dpi 72 时 PDF/Word 全部判 fail（栅格字高 < 24 px）并隔离"
+            % (total_pages, len(env.get("strict_pdfs", []))))
 
 
 @node("N18", "候选分图 · 三个公开模型至少各一张过闸；台虎钳整机被拦并给建议")
