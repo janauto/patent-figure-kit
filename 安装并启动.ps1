@@ -124,7 +124,7 @@ $WantStamp = -join ($sha.ComputeHash($buf) | ForEach-Object { $_.ToString('x2') 
 $upToDate = $false
 if (-not $Reinstall -and (Test-Path -LiteralPath $VPy) -and (Test-Path -LiteralPath $Stamp)) {
     if ((Get-Content -LiteralPath $Stamp -Raw).Trim() -eq $WantStamp) {
-        & $VPy '-c' 'import OCP, ezdxf, fastapi, pypdfium2' 2>$null
+        & $VPy '-c' 'import OCP, ezdxf, fastapi, pypdfium2, python_multipart' 2>$null
         if ($LASTEXITCODE -eq 0) { $upToDate = $true }
     }
 }

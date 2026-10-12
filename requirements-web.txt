@@ -7,6 +7,7 @@
 #
 # 安装： python -m pip install -r requirements-pinned.txt -r requirements-web.txt
 #
+#   python-multipart   浏览器上传 STEP（multipart/form-data）的表单解析——fastapi 不自带，缺它上传接口 500
 #   fastapi / uvicorn  本地服务器（默认只绑 127.0.0.1；远程访问须显式 --allow-remote，见 docs/deploy/server.md）
 #   httpx              AI 起名调用大模型接口（可选功能；不配置密钥时不外发任何内容）
 #   openpyxl           «导入 BOM» 读 .xlsx
@@ -14,6 +15,7 @@
 #   pypdf              导出包 PDF 逐页结构核验（缺它 PDF 判「未核验」）
 #   pypdfium2          【导出 PDF 必需】逐页独立渲染核验（BSD-3-Clause / Apache-2.0）；缺它导出结果 ok=false
 fastapi==0.128.8
+python-multipart==0.0.20
 uvicorn==0.39.0
 httpx==0.28.1
 openpyxl==3.1.5

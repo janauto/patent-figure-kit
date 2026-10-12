@@ -151,7 +151,7 @@ PY
 )" || fail "无法计算依赖清单摘要"
 
 if [ "$REINSTALL" = "0" ] && [ -x "$VPY" ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT_STAMP" ] \
-   && "$VPY" -c 'import OCP, ezdxf, fastapi, pypdfium2' >/dev/null 2>&1; then
+   && "$VPY" -c 'import OCP, ezdxf, fastapi, pypdfium2, python_multipart' >/dev/null 2>&1; then
   say "依赖已是最新（跳过安装）。"
   INSTALL_SECONDS=0
   INSTALL_KIND="skip"

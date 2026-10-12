@@ -124,6 +124,9 @@ def cmd_doctor(argv: Sequence[str]) -> int:
     missing_web = []
     if args.profile == "web":
         missing_web = [cid for cid in WEB_REQUIRED if checks.get(cid, {}).get("status") != "ok"]
+        # doctor 不查表单解析库：浏览器上传 STEP（multipart/form-data）靠它，缺了上传接口 500
+        if not _has_multipart():
+            missing_web.append("python-multipart")
     ok = not missing_core and not missing_web
     if as_json:
         report["profile"] = args.profile
@@ -137,6 +140,8 @@ def cmd_doctor(argv: Sequence[str]) -> int:
         for cid, what in WEB_REQUIRED.items():
             st = checks.get(cid, {}).get("status", "missing")
             print("  [%s] %s" % ("OK      " if st == "ok" else "缺失    ", what))
+        print("  [%s] 浏览器上传 STEP 的表单解析（python-multipart）"
+              % ("OK      " if _has_multipart() else "缺失    "))
     if not ok:
         print("\n结论：还不能用。", file=sys.stderr)
         for c in missing_core:
@@ -147,6 +152,11 @@ def cmd_doctor(argv: Sequence[str]) -> int:
         return 1
     print("\n结论：可以启动工作台。")
     return 0
+
+
+def _has_multipart() -> bool:
+    import importlib.util
+    return any(importlib.util.find_spec(m) is not None for m in ("python_multipart", "multipart"))
 
 
 # ----------------------------------------------------------------------------- paths

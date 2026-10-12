@@ -188,6 +188,7 @@ def test_record_reads_install_timing(tmp_path):
 # ----------------------------------------------------------------- 安装脚本静态约束
 
 
+@_checkout_only                               # 安装脚本不进 wheel
 def test_powershell_script_is_bom_crlf_and_python_snippets_avoid_double_quotes():
     """Windows PowerShell 5.1：无 BOM 时按系统代码页读中文；给原生程序传参会吃掉参数里的双引号。"""
     raw = (_ROOT / "安装并启动.ps1").read_bytes()
@@ -200,9 +201,46 @@ def test_powershell_script_is_bom_crlf_and_python_snippets_avoid_double_quotes()
     assert "Invoke-Expression" not in code and "iex " not in code
 
 
+@_checkout_only
 def test_shell_scripts_quote_paths_and_never_eval():
     for name in ("install.sh", "安装并启动.command"):
         text = (_ROOT / name).read_text(encoding="utf-8")
         code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
         assert "eval " not in code and "curl " not in code, name
         assert "| sh" not in code and "| bash" not in code, name
+
+
+@pytest.mark.parametrize("name", ["../important", "/abs/path", "a/b", "..", ".", "", ".hidden",
+                                  "x" * 80, "a\\b"])
+def test_site_name_must_be_a_single_directory(tmp_path, name):
+    with pytest.raises(B.BuildError):
+        B._site_dir(tmp_path, name)
+    with pytest.raises(B.BuildError):
+        B.build(tmp_path / "out", name, keep_data=False)
+    assert not (tmp_path / "out").exists()              # 名字不合法时连输出根目录都不认领
+
+
+def test_site_name_symlink_is_refused(tmp_path):
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "patent-figure-kit").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(B.BuildError):
+        B._site_dir(tmp_path / "out", "patent-figure-kit")
+    assert B._site_dir(tmp_path / "out", "demo-site").name == "demo-site"
+
+
+def test_web_profile_requires_multipart(monkeypatch, capsys):
+    """doctor 本身不查表单解析库；web profile 缺 python-multipart 必须判不通过（浏览器上传会 500）。"""
+    report = {"ok": True, "checks": [{"id": c, "status": "ok", "required": False}
+                                     for c in P.WEB_REQUIRED]}
+
+    class _Done:
+        returncode, stdout, stderr = 0, json.dumps(report), ""
+
+    monkeypatch.setattr(P.subprocess, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr(P, "_has_multipart", lambda: False)
+    assert P.cmd_doctor(["--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["profile_ok"] is False and "python-multipart" in out["profile_missing"]
+    monkeypatch.setattr(P, "_has_multipart", lambda: True)
+    assert P.cmd_doctor(["--json"]) == 0

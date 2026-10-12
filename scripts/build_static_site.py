@@ -614,15 +614,32 @@ def _isolate_env(cfg_dir: Path) -> str:
     return token
 
 
+#: 站点子目录名：单个目录名（GitHub Pages 项目站的子路径），不得含路径分隔符或点段。
+SITE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _site_dir(out_root: Path, site_name: str) -> Path:
+    """``out_root/site_name``，且保证解析后严格位于 ``out_root`` 之内（重建前会整个删掉它）。"""
+    if not SITE_NAME_RE.match(site_name or "") or site_name in (".", "..") or ".." in site_name:
+        raise BuildError("--site-name 只能是单个目录名（字母数字开头，可含 . _ -），收到 %r" % site_name)
+    site = out_root / site_name
+    root_r, site_r = out_root.resolve(), site.resolve()
+    if site_r.parent != root_r or site.is_symlink():
+        raise BuildError("站点目录 %s 不在输出根目录 %s 之内（或是符号链接），拒绝写入" % (site, out_root))
+    return site
+
+
 def build(out_root: Path, site_name: str, keep_data: bool) -> int:
     from patent_figure import pathguard
+    if not SITE_NAME_RE.match(site_name or "") or ".." in site_name:
+        raise BuildError("--site-name 只能是单个目录名（字母数字开头，可含 . _ -），收到 %r" % site_name)
     why = pathguard.check_outputs([("-o", out_root)])
     if why:
         raise BuildError(why)
     why = pathguard.claim_workdir(out_root, MARKER)
     if why:
         raise BuildError(why)
-    site = out_root / site_name
+    site = _site_dir(out_root, site_name)
     work = Path(tempfile.mkdtemp(prefix="pfk-static-"))
     token = _isolate_env(work / "config")
     import workbench_llm as LLM
@@ -662,6 +679,7 @@ def build(out_root: Path, site_name: str, keep_data: bool) -> int:
         }
         (staging / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1),
                                                encoding="utf-8")
+        site = _site_dir(out_root, site_name)    # 删之前再核一次（生成期间目录可能被换成链接）
         if site.exists():
             shutil.rmtree(str(site))
         assemble(site, staging, samples, manifest)
@@ -730,7 +748,7 @@ def main(argv=None) -> int:
         return 2
     try:
         if args.audit_only:
-            site = args.out / args.site_name
+            site = _site_dir(args.out, args.site_name)
             if not site.is_dir():
                 print("没有站点目录：%s" % site, file=sys.stderr)
                 return 2

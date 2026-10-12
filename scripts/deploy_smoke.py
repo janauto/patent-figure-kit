@@ -166,6 +166,8 @@ def main(argv=None) -> int:
                     help="从哪个环境变量读 Basic Auth 明文密码")
     ap.add_argument("--token-env", default="WORKBENCH_TOKEN", help="从哪个环境变量读后端 token")
     ap.add_argument("--example", default="valve", choices=("gearbox", "vise", "valve"))
+    ap.add_argument("--step", default=str(HERE.parent / "tests" / "fixtures" / "synthetic.stp"),
+                    help="上传冒烟用的 STEP（默认仓库自带的合成装配体；给空串跳过）")
     ap.add_argument("--browser", action="store_true",
                     help="再用真浏览器（Playwright Chromium）经代理打开首页与工程页，断言无 4xx/5xx 与控制台错误")
     args = ap.parse_args(argv)
@@ -222,6 +224,31 @@ def main(argv=None) -> int:
     for path in ("/api/wb/state", "/api/wb/settings", "/v1/projects"):
         st, _h, _b, _c = fe.req("GET", path)
         check(st == 200, "浏览器前端：Cookie + Bearer 访问 %s" % path, "HTTP %d" % st)
+
+    # ---- 浏览器上传 STEP（multipart/form-data，与前端 createProject 同形）----
+    if args.step:
+        try:
+            boundary = "----pfk" + os.urandom(8).hex()
+            step_bytes = Path(args.step).read_bytes()
+            body = b"".join([
+                ("--%s\r\n" % boundary).encode(),
+                ('Content-Disposition: form-data; name="step"; filename="%s"\r\n'
+                 % Path(args.step).name).encode(),
+                b"Content-Type: application/octet-stream\r\n\r\n", step_bytes, b"\r\n",
+                ("--%s\r\n" % boundary).encode(),
+                b'Content-Disposition: form-data; name="title"\r\n\r\n', "上传冒烟".encode(), b"\r\n",
+                ("--%s--\r\n" % boundary).encode()])
+            req = urllib.request.Request(base + "/v1/projects", data=body, method="POST", headers={
+                "Content-Type": "multipart/form-data; boundary=" + boundary,
+                "Authorization": "Bearer " + token})
+            with fe.opener.open(req, timeout=120) as resp:
+                up = json.loads(resp.read().decode("utf-8"))
+                code = resp.status
+            job = browser.wait(up["job_id"], "上传后准备")
+            check(code == 202 and job.get("state") == "succeeded",
+                  "浏览器上传 STEP（multipart，经代理）→ 202 → 工程准备就绪", "%s" % up.get("project_id"))
+        except Exception as exc:  # noqa: BLE001
+            check(False, "浏览器上传 STEP（multipart，经代理）", "%s: %s" % (type(exc).__name__, str(exc)[:300]))
 
     # ---- 金路径（浏览器路）----
     ok_path = False
