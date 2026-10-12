@@ -59,6 +59,7 @@ from patent_figure import suggest_plan as SUG  # noqa: E402
 from patent_figure import jobs as JOBS  # noqa: E402
 from patent_figure import project_io as PIO  # noqa: E402
 from patent_figure import publish as PUB  # noqa: E402
+from patent_figure import render_errors as RERR  # noqa: E402
 from patent_figure import versions as VS  # noqa: E402
 from patent_figure import worker as WK  # noqa: E402
 
@@ -69,6 +70,8 @@ DEFAULT_PORT = 8790
 #: Refuse a new render job when free disk space is below this (R1c #11).
 MIN_FREE_BYTES = 100 * 1024 * 1024
 PID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
+#: A Host header that may be echoed into an absolute URL (WP2b F2): loopback name + optional port.
+_LOOPBACK_HOST_RE = re.compile(r"(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?")
 FILE_RE = re.compile(r"^[A-Za-z0-9_\-]+\.(png|svg|dxf|dwg|json|glb)$")
 MEDIA = {"png": "image/png", "svg": "image/svg+xml", "dxf": "application/octet-stream",
          "dwg": "application/octet-stream", "json": "application/json",
@@ -78,6 +81,29 @@ SYNTHETIC_STEP = REPO / "tests" / "fixtures" / "synthetic.stp"
 #: Public demo examples for POST /v1/projects/from-example (WP2): gearbox / vise / valve.
 EXAMPLES_META = EXM.EXAMPLES
 DISPLAY_NAME = CAPS.DISPLAY_NAME
+#: WP2b F1: the AI structure step of a project's preparation has its OWN short timeout (default
+#: 60 s; env ``PFK_AI_STRUCTURE_TIMEOUT_S`` or config key ``ai_structure_timeout_s``). It never
+#: blocks the prepare job: on failure / timeout the job still succeeds with ``ai_status: failed``.
+AI_STRUCTURE_TIMEOUT_S = 60.0
+#: Extra wait for the call thread beyond its own deadline before the step is abandoned.
+AI_STRUCTURE_GRACE_S = 5.0
+#: ``ai_status`` values of a project's preparation (meta + prepare-job result).
+AI_STATUSES = ("pending", "running", "ok", "failed", "skipped", "not_configured")
+
+
+def ai_structure_timeout() -> float:
+    """The AI-structure timeout in seconds: env ``PFK_AI_STRUCTURE_TIMEOUT_S`` → config
+    ``ai_structure_timeout_s`` → 60 s. Non-positive / malformed values fall through; capped at
+    the 1800 s job limit."""
+    for raw in (os.environ.get("PFK_AI_STRUCTURE_TIMEOUT_S"),
+                LLM.load_config().get("ai_structure_timeout_s")):
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if val > 0:
+            return min(val, 1800.0)
+    return AI_STRUCTURE_TIMEOUT_S
 
 
 # ----------------------------------------------------------------------------- token
@@ -120,6 +146,13 @@ def _basename(url: str) -> str:
     return Path(str(url).split("?", 1)[0]).name
 
 
+def _read_json(path: Path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 class Project:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -145,12 +178,18 @@ class Project:
         return PS.Workspace(Path(self.meta["step"]), self.root / "studio")
 
     def _structure_brief(self) -> dict:
+        # WP2b F1: the AI step's outcome rides INSIDE ``structure`` (the top-level summary keys
+        # are a pinned contract): ``ai_status`` ∈ AI_STATUSES (None = project predates WP2b),
+        # ``ai_error`` = why it failed.
+        m = self.meta
+        ai = {"ai_status": m.get("ai_status"), "ai_error": m.get("ai_error") or None}
         try:
             data = json.loads((self.root / "studio" / "structure.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return {"source": None, "groups": []}
-        return {"source": data.get("source"),
-                "groups": [{"name": g["name"], "count": len(g["parts"])} for g in data.get("groups", [])]}
+            return dict({"source": None, "groups": []}, **ai)
+        return dict({"source": data.get("source"),
+                     "groups": [{"name": g["name"], "count": len(g["parts"])}
+                                for g in data.get("groups", [])]}, **ai)
 
     def summary(self) -> dict:
         m = self.meta
@@ -185,6 +224,10 @@ class Registry:
         #: /api/render submits the same isolated job as REST/MCP (R1b #5). Read late (per render),
         #: so a sub-app built before the service was set still picks it up.
         self.render_service = None
+        #: WP2b F1: ids whose ``_prepare`` thread is alive in THIS process. A prepare job is done
+        #: when the project is ready and its preparation thread has finished — never keyed on
+        #: the human-facing ``message`` (which an AI failure used to leave non-empty forever).
+        self._preparing: set = set()
 
     def all(self) -> List[Project]:
         projects = [Project(p) for p in sorted(self.dir.iterdir())
@@ -243,11 +286,62 @@ class Registry:
             "id": pid, "title": title, "step": str(step), "example": example, "order": order,
             "description": description, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
             "status": "preparing", "message": "正在解析装配体与导出 3D 预览…",
+            "ai_status": "pending",
         }, ensure_ascii=False, indent=2), encoding="utf-8")
-        threading.Thread(target=self._prepare, args=(proj, render), daemon=True).start()
+        self._start_prepare(proj, render)
         return proj
 
+    def is_preparing(self, pid: str) -> bool:
+        with self.lock:
+            return pid in self._preparing
+
+    def _start_prepare(self, proj: Project, render: bool) -> bool:
+        """Start the preparation thread unless one is already running for this project."""
+        with self.lock:
+            if proj.id in self._preparing:
+                return False
+            self._preparing.add(proj.id)
+        try:
+            threading.Thread(target=self._prepare, args=(proj, render), daemon=True).start()
+        except BaseException:
+            with self.lock:
+                self._preparing.discard(proj.id)
+            raise
+        return True
+
+    def prepare_outcome(self, proj: Project, what: str = "工程") -> Optional[dict]:
+        """The prepare job's view of a project (WP2b F1): ``None`` while it is still being
+        prepared, the job result once it is ready AND its preparation thread has finished (the
+        AI step is bounded by its own timeout), ``RuntimeError`` on a failed preparation.
+
+        A project left ``preparing`` by an earlier process (no live thread here) is prepared
+        again instead of waiting out the job's 30-minute limit."""
+        m = proj.meta
+        status = m.get("status")
+        if status == "error":
+            raise RuntimeError("%s准备失败：%s" % (what, m.get("message", "")))
+        if status != "ready":
+            if status == "preparing" and not self.is_preparing(proj.id):
+                self._start_prepare(proj, False)
+            return None
+        if self.is_preparing(proj.id):
+            return None
+        ai = m.get("ai_status")
+        out = {"project_id": proj.id, "status": "ready",
+               "ai_status": ai if ai in AI_STATUSES and ai not in ("pending", "running")
+               else "skipped"}
+        if out["ai_status"] == "failed":
+            out["ai_error"] = m.get("ai_error") or "AI 结构识别未完成"
+        return out
+
     def _prepare(self, proj: Project, render: bool) -> None:
+        try:
+            self._prepare_steps(proj, render)
+        finally:
+            with self.lock:
+                self._preparing.discard(proj.id)
+
+    def _prepare_steps(self, proj: Project, render: bool) -> None:
         try:
             PS.prepare(proj.workspace(), quiet=True)
         except SystemExit as exc:
@@ -270,25 +364,50 @@ class Registry:
         self._auto_structure(proj)
 
     def _auto_structure(self, proj: Project) -> None:
-        """有大模型通道且还没识别过结构时，后台识别一次（推理模型可能要几分钟）。"""
+        """有大模型通道且还没识别过结构时，在准备作业里识别一次——**有独立短超时**（WP2b F1，默认 60 s，
+        见 ``ai_structure_timeout``）。失败 / 超时不阻塞准备：``ai_status: failed`` + ``ai_error``，
+        工程照常 ready（可在工程里手动重试）。调用在自己的线程里跑、整次受时限约束；超时后迟到的结果
+        一律丢弃（不写 structure.json），所以「失败」与磁盘状态始终一致。"""
         studio = proj.root / "studio"
         if (studio / "structure.json").is_file():
+            proj.update(ai_status="skipped", ai_error="")
             return
         if LLM.public_settings().get("provider") in (None, "none"):
+            proj.update(ai_status="not_configured", ai_error="")
             return
+        timeout = ai_structure_timeout()
         keep = proj.meta.get("message", "")
-        proj.update(message="AI 正在识别结构…")
-        try:
-            ws = proj.workspace()
-            data = LLM.analyze_structure(
-                json.loads(ws.assembly.read_text(encoding="utf-8")),
-                json.loads(ws.plan.read_text(encoding="utf-8")),
-                glossary=EXT.glossary_of(ws), bom=EXT.bom_names_of(ws))
-            (studio / "structure.json").write_text(
-                json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-            proj.update(message=keep)
-        except Exception as exc:
-            proj.update(message="结构识别未完成：%s（可在工程里手动重试）" % str(exc)[:80])
+        proj.update(message="AI 正在识别结构…", ai_status="running", ai_error="")
+        box: dict = {}
+
+        def call() -> None:
+            try:
+                ws = proj.workspace()
+                box["data"] = LLM.analyze_structure(
+                    json.loads(ws.assembly.read_text(encoding="utf-8")),
+                    json.loads(ws.plan.read_text(encoding="utf-8")),
+                    glossary=EXT.glossary_of(ws), bom=EXT.bom_names_of(ws), timeout_s=timeout)
+            except BaseException as exc:  # noqa: BLE001 — reported as ai_status: failed
+                box["error"] = exc
+
+        worker = threading.Thread(target=call, daemon=True, name="ai-structure-%s" % proj.id)
+        worker.start()
+        worker.join(timeout + AI_STRUCTURE_GRACE_S)
+        if worker.is_alive():
+            err = "超过 %g 秒没有完成，已跳过" % timeout
+        elif "error" in box:
+            err = str(box["error"]).strip() or type(box["error"]).__name__
+        else:
+            try:
+                (studio / "structure.json").write_text(
+                    json.dumps(box["data"], ensure_ascii=False, indent=1), encoding="utf-8")
+            except (OSError, TypeError, ValueError) as exc:
+                err = "结构结果写入失败：%s" % exc
+            else:
+                proj.update(message=keep, ai_status="ok", ai_error="")
+                return
+        proj.update(message="结构识别未完成：%s（可在工程里手动重试）" % err[:80],
+                    ai_status="failed", ai_error=err[:300])
 
     def app_for(self, pid: str):
         proj = self.get(pid)
@@ -599,7 +718,8 @@ class Tools:
         job = self.jobs.get(args.get("job_id", ""))
         if job is None:
             raise MCP.ToolError("未找到作业 %s" % args.get("job_id"))
-        return job.to_dict()
+        present = getattr(self, "present_job", None)     # WP2b F2: absolute download URL
+        return present(job.to_dict()) if present else job.to_dict()
 
     def cancel_job(self, args: dict) -> dict:
         job = self.jobs.get(args.get("job_id", ""))
@@ -1116,10 +1236,24 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             data["plan_etag"] = job.inputs.get("plan_etag", "")
             data["manifest"] = out["manifest"]
             if not out["ok"]:
-                failed = [f["id"] for f in out["result"]["figures"] if not f.get("pass")]
-                err = RuntimeError("出图未全部过闸/有图缺失：%s" % (failed or "（无合格图）"))
-                err.code = "E_RENDER_NOT_OK"            # type: ignore
-                err.hint = "按每张图的 QA 提示改计划后重渲"  # type: ignore
+                # WP2b F3/F4: say WHY, in the job's error (and so the SSE error event): parts
+                # still unnamed → E_TERMS_MISSING + open_terms; otherwise E_RENDER_NOT_OK with
+                # the cause, plain text and fix action per failed figure — classified from this
+                # job's FROZEN inputs and the renderer's own report, never from the live plan.
+                inputs_dir = vstore.version_dir(rid) / "inputs"
+                try:
+                    fields = RERR.render_failure(_read_json(inputs_dir / "plan.json"),
+                                                 _read_json(inputs_dir / "assembly.json"),
+                                                 out["result"])
+                except Exception:                    # classification must never mask the failure
+                    failed = [f["id"] for f in out["result"]["figures"] if not f.get("pass")]
+                    fields = {"code": RERR.E_RENDER_NOT_OK,
+                              "message": "出图未全部过闸/有图缺失：%s" % (failed or "（无合格图）"),
+                              "hint": "按每张图的 QA 提示改计划后重渲"}
+                err = RuntimeError(fields.pop("message"))
+                err.code = fields.pop("code")            # type: ignore
+                err.hint = fields.pop("hint")            # type: ignore
+                err.error_fields = fields                # type: ignore
                 err.result = data                        # structured diagnostics for the error
                 raise err
             return data
@@ -1149,6 +1283,24 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if job is None:
             raise HTTPException(404, "未找到作业 %s" % job_id)
         return job
+
+    def _wait_prepared(j, proj, what: str) -> dict:
+        """The prepare job's wait (WP2b F1): done when the project is ready AND its preparation
+        thread has finished — the AI structure step inside it has its own short timeout and
+        never fails the job (the result carries ``ai_status`` / ``ai_error``)."""
+        deadline = time.time() + 1800
+        told = False
+        while time.time() < deadline:
+            j.raise_if_cancelled()
+            out = reg.prepare_outcome(proj, what)
+            if out is not None:
+                return out
+            if not told and proj.meta.get("ai_status") == "running":
+                told = True
+                j.emit(JOBS.EV_STAGE, "AI 识别结构（最多 %g 秒，失败不影响出图）"
+                       % ai_structure_timeout(), stage="prepare", progress=0.8)
+            time.sleep(0.5)
+        raise RuntimeError("%s准备超时" % what)
 
     @app.post("/v1/projects", status_code=202, tags=["工程"], summary="新建工程（异步准备）")
     async def v1_create_project(request: Request):
@@ -1182,16 +1334,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
 
         def prepare_fn(j):
             j.emit(JOBS.EV_STAGE, "解析装配体与导出预览", stage="prepare", progress=0.2)
-            deadline = time.time() + 1800
-            while time.time() < deadline:
-                j.raise_if_cancelled()
-                status = proj.meta.get("status")
-                if status == "error":
-                    raise RuntimeError("工程准备失败：%s" % proj.meta.get("message", ""))
-                if status == "ready" and not proj.meta.get("message"):
-                    return {"project_id": proj.id, "status": "ready"}
-                time.sleep(0.5)
-            raise RuntimeError("工程准备超时")
+            return _wait_prepared(j, proj, "工程")
 
         jobs.start(job, prepare_fn)
         return JSONResponse({"project_id": proj.id, "job_id": job.id}, status_code=202)
@@ -1217,16 +1360,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                 j.emit(JOBS.EV_STAGE, "生成演示模型 STEP", stage="from-example", progress=0.1)
                 proj = ensure_example(reg, example)
             j.emit(JOBS.EV_STAGE, "解析装配体与导出预览", stage="prepare", progress=0.4)
-            deadline = time.time() + 1800
-            while time.time() < deadline:
-                j.raise_if_cancelled()
-                m = proj.meta
-                if m.get("status") == "error":
-                    raise RuntimeError("示例工程准备失败：%s" % m.get("message", ""))
-                if m.get("status") == "ready" and not m.get("message"):
-                    return {"project_id": proj.id, "status": "ready", "example": example}
-                time.sleep(0.5)
-            raise RuntimeError("示例工程准备超时")
+            return dict(_wait_prepared(j, proj, "示例工程"), example=example)
 
         jobs.start(job, fn)
         return JSONResponse({"project_id": pid, "job_id": job.id}, status_code=202)
@@ -1245,11 +1379,38 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             "job_id": sj.id, "state": sj.state, "summary": res.get("summary"),
             "empty_reason": res.get("empty_reason"),
             "url": "/v1/projects/%s/plan/candidates" % pid}
+        out["render_job"] = _render_job_brief(pid, proj)   # WP2b F6 (openapi ProjectRenderJob)
         return out
 
+    def _render_job_brief(pid: str, proj) -> Optional[dict]:
+        """This project's latest render job (any entry: browser, REST, MCP), trimmed — the full
+        record (logs, result, per-figure diagnostics) is at ``url`` and, for the browser, at
+        ``status_url`` (``result`` = published version, ``job`` = this job). ``published`` says
+        whether this job's version IS the current published one. ``None`` = never rendered."""
+        renders = [j for j in jobs.list(pid) if j.kind == "render"]
+        if not renders:
+            return None
+        j = renders[-1]
+        try:
+            cur = VS.VersionStore(proj.root / "studio").current_id()
+        except Exception:
+            cur = None
+        err = j.error if isinstance(j.error, dict) else None
+        return {"job_id": j.id, "state": j.state, "stage": j.stage,
+                "progress": round(float(j.progress or 0.0), 4),
+                "ok": (j.state == JOBS.SUCCEEDED) if j.is_terminal() else None,
+                "published": bool(cur) and cur == j.id,
+                "plan_etag": (j.inputs or {}).get("plan_etag", ""),
+                "error": None if err is None else {
+                    k: err.get(k) for k in ("code", "message", "hint", "title_zh", "hint_plain",
+                                            "fix_action") if k in err},
+                "created_at": j.created_at, "updated_at": j.updated_at,
+                "url": "/v1/jobs/%s" % j.id,
+                "status_url": "/p/%s/api/render/status" % pid}
+
     @app.get("/v1/jobs/{job_id}", tags=["作业"], summary="查询作业状态")
-    def v1_job(job_id: str):
-        return _job_or_404(job_id).to_dict()
+    def v1_job(job_id: str, request: Request):
+        return _present_job(_job_or_404(job_id).to_dict(), request)
 
     @app.delete("/v1/jobs/{job_id}", tags=["作业"], summary="取消作业")
     def v1_job_cancel(job_id: str):
@@ -1277,18 +1438,25 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         except ValueError:
             last_id = 0
 
+        def frame(ev):
+            # WP2b F2: an export's ``done`` payload carries the same per-request download URL
+            # as GET /v1/exports/{id}.
+            if job.kind == "export" and ev.get("type") == JOBS.EV_DONE:
+                ev = dict(ev, data=_present_result(job.id, ev.get("data"), request))
+            return JOBS.sse_frame(ev)
+
         def gen():
             nonlocal last_id
             for ev in job.events_since(last_id):        # replay missed events first
                 last_id = ev["id"]
-                yield JOBS.sse_frame(ev)
+                yield frame(ev)
             # then stream live until the job is terminal and fully drained
             while True:
                 fresh = job.wait_for_event_after(last_id, timeout=15.0)
                 if fresh:
                     for ev in fresh:
                         last_id = ev["id"]
-                        yield JOBS.sse_frame(ev)
+                        yield frame(ev)
                 elif job.is_terminal() and not job.events_since(last_id):
                     break
                 else:
@@ -1380,6 +1548,53 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if render_job.state != JOBS.SUCCEEDED:
             raise HTTPException(409, "render_job 未成功（state=%s），不能导出" % render_job.state)
 
+    # ---- 对外地址（WP2b F2）---------------------------------------------------------
+    # The export's download URL used to be hard-wired to http://127.0.0.1:<port>; opened from
+    # http://localhost:<port> the session cookie (bound to localhost) is not sent there → 401.
+    # Order: the configured public URL → the request's own Host (the guard only admits
+    # 127.0.0.1 / localhost) → a relative path. ``base`` is this function's public base: the
+    # loopback default unless a public URL was configured (WP4's --public-url feeds it), so the
+    # default value is NOT treated as a configured public URL.
+    _loopback_base = "http://127.0.0.1:%d" % port
+    app.state.public_url = None        # optional override (embedding / tests); see _public_base
+
+    def _public_base() -> Optional[str]:
+        b = str(getattr(app.state, "public_url", None) or base or "").rstrip("/")
+        return b if b and b != _loopback_base else None
+
+    def _download_path(export_id: str) -> str:
+        return "/v1/exports/%s/download" % export_id
+
+    def _abs_url(path: str, request: Optional[Request] = None,
+                 fallback: Optional[str] = None) -> str:
+        pub = _public_base()
+        if pub:
+            return pub + path
+        host = request.headers.get("host") if request is not None else None
+        # Only a well-formed loopback Host is echoed (the guard admits these two names; a Host
+        # with anything else in it — userinfo, a path — falls through to the relative path).
+        if host and _LOOPBACK_HOST_RE.fullmatch(host) and request.url.scheme in ("http", "https"):
+            return "%s://%s%s" % (request.url.scheme, host, path)
+        return (fallback.rstrip("/") + path) if fallback else path
+
+    def _present_result(job_id: str, result, request: Optional[Request] = None,
+                        fallback: Optional[str] = None):
+        """An export result as served: ``download_path`` relative (always right for a
+        same-origin browser), ``download_url`` absolute per ``_abs_url``. Works for records
+        written before WP2b (absolute 127.0.0.1) too — both are rebuilt from the export id."""
+        if not isinstance(result, dict) or "download_url" not in result:
+            return result
+        path = _download_path(job_id)
+        return dict(result, download_path=path, download_url=_abs_url(path, request, fallback))
+
+    def _present_job(d: dict, request: Optional[Request] = None,
+                     fallback: Optional[str] = None) -> dict:
+        if d.get("kind") == "export" and isinstance(d.get("result"), dict):
+            d = dict(d, result=_present_result(d["id"], d["result"], request, fallback))
+        return d
+
+    tools.present_job = lambda d: _present_job(d, None, fallback=base)   # MCP: no request
+
     def _start_export(pid: str, formats, variant=None, dpi: int = 300, render_job=None,
                       sheet_preset: Optional[str] = None):
         """Create + start an export job bound to one verified, pinned render version — through
@@ -1437,7 +1652,10 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                           "sha256": bundle["sha256"],
                           "spec": bundle["spec"], "note": DELIV.CNIPA_NOTE,
                           "notes": bundle["notes"], "dwg_log": bundle["dwg_log"],
-                          "download_url": base + "/v1/exports/%s/download" % j.id}
+                          # WP2b F2: stored RELATIVE (host-independent, sealed as such); every
+                          # read absolutises it per request — see _present_job.
+                          "download_url": _download_path(j.id),
+                          "download_path": _download_path(j.id)}
                 # R2k: the report + this result are written into the export's own directory and
                 # sealed with every file of it (bundle/, bundle.zip); files become read-only.
                 # The seal's digest lives in the persisted job result — the authority.
@@ -1648,7 +1866,16 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                 else None
             picked.append((cid, c, members if members is not None else c.get("members")))
         apply_std = bool(body.get("apply_standard_labels", True))
-        info: dict = {}
+        # WP2b F5: the untouched initial fallback figure (整体结构示意图, members ["*"]) of an
+        # uploaded model is usually what this job's whole-machine candidate is — when THAT
+        # candidate failed the gate, keeping the figure makes the whole next render fail. In
+        # append mode it is removed by default; ``keep_default_figure: true`` keeps it.
+        keep_default = bool(body.get("keep_default_figure", False))
+        wholes = [c for c in res.get("candidates", []) if (c.get("source") or {}).get("kind")
+                  == "whole"]
+        drop_default = (mode == "append" and not keep_default and bool(wholes)
+                        and all(c.get("status") == "fail" for c in wholes))
+        info: dict = {"removed_default_figure": False}
         unresolved_all: list = []
 
         def mutate(plan):
@@ -1670,6 +1897,11 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             new, extra = SUG.accept_into(plan, assembly, accepted, mode=mode,
                                          standard_parts=sorted(set(std)))
             info.update(extra)
+            had_default = any(SUG.is_default_figure(f) for f in (plan.get("figures") or []))
+            if drop_default:
+                SUG.drop_default_figure(new)           # after accept_into: new ids stay figN+1
+            info["removed_default_figure"] = had_default and not any(
+                SUG.is_default_figure(f) for f in (new.get("figures") or []))
             return new
 
         try:
@@ -1688,6 +1920,7 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                 "standard_labels_set": info.get("standard_labels_set", []),
                 "standard_labels_skipped": info.get("standard_labels_skipped", []),
                 "accepted_failed": [cid for cid, c, _m in picked if c.get("status") != "pass"],
+                "removed_default_figure": bool(info.get("removed_default_figure")),
                 "plan_valid": check["ok"], "issues": check["issues"][:20]}
 
     tools.start_suggest = _suggest_job
@@ -1738,8 +1971,8 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                              "render_job_id": render_job.id}, status_code=202)
 
     @app.get("/v1/exports/{export_id}", tags=["导出"], summary="导出包清单与下载地址")
-    def v1_export_status(export_id: str):
-        return _job_or_404(export_id).to_dict()
+    def v1_export_status(export_id: str, request: Request):
+        return _present_job(_job_or_404(export_id).to_dict(), request)
 
     @app.get("/v1/exports/{export_id}/download", tags=["导出"], summary="下载导出 zip")
     def v1_export_download(export_id: str):
@@ -2022,11 +2255,10 @@ def cmd_seed(args) -> int:
                       description=args.description or "", plan=plan, glossary=glossary,
                       flowcharts=flows, render=args.render, link=args.link, order=args.order)
     print("已创建工程 %s，后台准备中…" % proj.id)
-    while proj.meta.get("status") == "preparing" or proj.meta.get("message"):
-        time.sleep(3)
-        m = proj.meta
-        if m.get("status") == "error":
-            break
+    # WP2b F1: wait for the preparation thread (render + bounded AI step), not for an empty
+    # message — a failed AI step leaves its reason in the message and used to hang this loop.
+    while reg.is_preparing(proj.id):
+        time.sleep(1)
     print("状态：%s %s" % (proj.meta.get("status"), proj.meta.get("message", "")))
     return 0 if proj.meta.get("status") == "ready" else 1
 

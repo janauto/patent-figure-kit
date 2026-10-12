@@ -131,9 +131,26 @@ def _parse_json(text: str) -> Any:
             raise LLMError("模型返回的 JSON 无法解析：%s" % exc)
 
 
+def _budget(deadline: Optional[float], cap: float) -> float:
+    """Seconds this step may take: ``cap``, cut to what is left before ``deadline`` (monotonic).
+    Raises LLMError once the deadline has passed (WP2b F1: an AI step with its own short
+    timeout must actually stop, not retry past it)."""
+    if deadline is None:
+        return cap
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise LLMError("大模型调用超时（超过本步骤的时限）")
+    return min(cap, left)
+
+
 def chat_json(system: str, user: str, *, max_tokens: int = 12000,
-              cfg: Optional[dict] = None) -> Any:
+              cfg: Optional[dict] = None, timeout_s: Optional[float] = None) -> Any:
+    """One JSON reply from the configured channel. ``timeout_s`` (WP2b F1) bounds the WHOLE call
+    — every HTTP attempt, the back-off sleeps between them and the CodeBuddy subprocess — so a
+    dead channel fails within it instead of 4 × 300 s; ``None`` keeps the per-attempt
+    ``TIMEOUT_S`` behaviour."""
     s = settings(cfg)
+    deadline = (time.monotonic() + float(timeout_s)) if timeout_s else None
     if s["provider"] == "deepseek":
         if not s["api_key"]:
             raise LLMError("没有配置 DeepSeek API 密钥")
@@ -152,16 +169,19 @@ def chat_json(system: str, user: str, *, max_tokens: int = 12000,
         limit = max_tokens
         for attempt in range(4):
             body["max_tokens"] = limit
+            if deadline is not None and deadline - time.monotonic() <= 0:
+                raise LLMError("大模型调用超时（%s）" % (last or "超过本步骤的时限"))
             try:
-                r = httpx.post(s["base_url"] + "/chat/completions", json=body, timeout=TIMEOUT_S,
+                r = httpx.post(s["base_url"] + "/chat/completions", json=body,
+                               timeout=_budget(deadline, TIMEOUT_S),
                                headers={"Authorization": "Bearer " + s["api_key"]})
             except httpx.HTTPError as exc:
                 last = "网络错误：%s" % type(exc).__name__
-                time.sleep(1.5 * (attempt + 1))
+                _sleep_within(1.5 * (attempt + 1), deadline)
                 continue
             if r.status_code in (429, 500, 502, 503):
                 last = "DeepSeek 返回 %d" % r.status_code
-                time.sleep(2.0 * (attempt + 1))
+                _sleep_within(2.0 * (attempt + 1), deadline)
                 continue
             if r.status_code == 401:
                 raise LLMError("DeepSeek 拒绝了密钥（401）——请在设置里核对")
@@ -198,17 +218,26 @@ def chat_json(system: str, user: str, *, max_tokens: int = 12000,
                   "\n\n只输出一个 JSON 对象，不要解释，不要使用任何工具。")
         work = CONFIG_DIR / "codebuddy-cwd"
         work.mkdir(parents=True, exist_ok=True)
+        budget = _budget(deadline, TIMEOUT_S)
         try:
             proc = subprocess.run([exe, "-p", "--model", CODEBUDDY_MODEL, "--tools", "Read",
                                    prompt], capture_output=True, text=True,
-                                  timeout=TIMEOUT_S, cwd=str(work))
+                                  timeout=budget, cwd=str(work))
         except subprocess.TimeoutExpired:
-            raise LLMError("CodeBuddy 超时（%ds）" % TIMEOUT_S)
+            raise LLMError("CodeBuddy 超时（%ds）" % int(budget))
         if proc.returncode != 0 or not proc.stdout.strip():
             raise LLMError("CodeBuddy 调用失败（exit=%d）：%s"
                            % (proc.returncode, (proc.stderr or "无输出")[-300:]))
         return _parse_json(proc.stdout)
     raise LLMError("没有可用的大模型通道：请在设置里填 DeepSeek API 密钥")
+
+
+def _sleep_within(seconds: float, deadline: Optional[float]) -> None:
+    """Back-off sleep that never runs past ``deadline``."""
+    if deadline is not None:
+        seconds = min(seconds, max(0.0, deadline - time.monotonic()))
+    if seconds > 0:
+        time.sleep(seconds)
 
 
 # --------------------------------------------------------------------------- #
@@ -404,13 +433,15 @@ def _structure_input(assembly: dict, plan: dict) -> dict:
 
 
 def analyze_structure(assembly: dict, plan: dict, *, glossary: Optional[Dict[str, str]] = None,
-                      bom: Optional[Dict[str, str]] = None, cfg: Optional[dict] = None) -> dict:
+                      bom: Optional[Dict[str, str]] = None, cfg: Optional[dict] = None,
+                      timeout_s: Optional[float] = None) -> dict:
     data = _structure_input(assembly, plan)
     if glossary:
         data["术语库（已递交专利用过的名字）"] = glossary
     if bom:
         data["BOM 匹配到的物料名称"] = bom
-    out = chat_json(STRUCT_SYSTEM, json.dumps(data, ensure_ascii=False), max_tokens=24000, cfg=cfg)
+    out = chat_json(STRUCT_SYSTEM, json.dumps(data, ensure_ascii=False), max_tokens=24000, cfg=cfg,
+                    timeout_s=timeout_s)
     if not isinstance(out, dict):
         raise LLMError("模型返回的不是 JSON 对象")
     return clean_structure(out, assembly, plan, source="ai",

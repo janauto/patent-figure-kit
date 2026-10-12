@@ -2620,3 +2620,90 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   每一次原生释放（显式 `close()` 或析构回调，都经同一个 `_close_template`）都记录到发生时 `_RENDER_LOCK.locked()` 为真，
   `gc.collect()` 之后没有任何锁外的原生释放、没有存活的 pypdfium2 对象；两次都失败时结果为 `unverified`，同样无锁外释放。
   `PFK_PDF_RENDERER` 取其他值（含被移除的备选名）时 `render_backend()` 为空；`_render_gray` 只接受 pypdfium2。
+
+## 15. WP2b 金路径后端根因修复（2026-10-13）
+
+WP3b 接线验收（报告 §7 F1–F5）在真实后端上发现的金路径问题，按根因在后端修掉；前端的规避逻辑仍兼容。
+出图链路（渲染器、DXF、§5.4 摘要、N10/N10b 金样）**没有改动**：分类与白话层全部发生在渲染之后，
+只读冻结输入与渲染器自己的 `--json` 报告。openapi 改动全部是**新增的可选字段**（不新增必需字段、不删字段）。
+
+### 15.1 准备作业的 AI 结构识别：独立短超时、失败不阻塞（F1）
+
+- **根因**：准备作业以「就绪且工程 `message` 为空」为完成条件，而 `_auto_structure` 把识别失败的原因写进
+  `message` 且从不清空 → 已接入 AI 但通道失效时，上传 / 载入示例的准备作业空等到 1800 s 超时。
+- **完成条件改为「就绪 + 准备线程结束」**：`Registry` 记录本进程里存活的准备线程（`is_preparing`）；
+  `prepare_outcome` 是两个准备作业（`POST /v1/projects`、`/from-example`）共用的判定，`cmd_seed` 同样等线程而不是等
+  `message`。`message` 只作给人看的提示（AI 失败时仍写「结构识别未完成：…」）。上一进程中断留下的 `preparing`
+  工程（本进程没有准备线程）由作业重新发起准备，不再空等。
+- **AI 步骤自带时限**：默认 60 s，`PFK_AI_STRUCTURE_TIMEOUT_S` 或配置 `ai_structure_timeout_s` 可改（上限 1800）。
+  调用在独立线程里跑，`LLM.analyze_structure(timeout_s=…)` → `chat_json(timeout_s=…)` 把**整次**调用（每次 HTTP
+  尝试的超时、重试间隔、CodeBuddy 子进程）裁到剩余时间内；外层再 `join(时限 + 5 s)` 兜底，超时即放弃，迟到的结果
+  丢弃（不写 `structure.json`），状态与磁盘一致。
+- **结果**：作业 result = `PrepareResult{project_id, status: ready, ai_status ∈ ok|failed|skipped|not_configured,
+  ai_error?, example?}`；工程 meta 同步 `ai_status / ai_error`，经摘要的 `structure.ai_status / ai_error` 可读
+  （顶层摘要键集不变——WP3b 的 mock 对它做了钉住）。AI 识别进行中作业发一次 stage「AI 识别结构（最多 N 秒，
+  失败不影响出图）」。
+
+### 15.2 下载地址按请求生成（F2）
+
+- **根因**：`download_url` 在导出作业里写死 `http://127.0.0.1:<port>`；从 `localhost` 打开的页面，会话 Cookie 属于
+  `localhost`，跨主机下载 401。
+- 作业记录（以及封口的 `result.json`）里存**相对路径** `/v1/exports/<id>/download`（与主机无关）；读出时按
+  「对外地址（`--public-url`）→ 本次请求的 Host（守卫只放行 127.0.0.1 / localhost）→ 相对路径」生成绝对地址：
+  `GET /v1/exports/{id}`、`GET /v1/jobs/{id}`、SSE 的 `done` 帧都如此，另给同源相对的 `download_path`。MCP
+  `get_job` 没有请求上下文，用服务自身地址。WP2b 之前写下的绝对地址记录同样按导出 id 重建。
+- **对外地址的来源**：`build_workbench` 的 `base`——默认值（本机回环）不算配置；WP4 合并后 `base =
+  public_base(port, --public-url)` 即自动生效。`app.state.public_url` 可显式覆盖（嵌入 / 测试）。
+- **WP4 合并注意**：服务器形态的部署闸门把内层 Host 归一成 `127.0.0.1`；只给 `--allowed-host`、不给 `--public-url`
+  时，按 Host 生成的绝对地址会指向 127.0.0.1——此时浏览器应使用 `download_path`（WP4 侧宜要求远程形态必须给
+  `--public-url`，或把原 Host 传给内层）。
+
+### 15.3 出图失败的结构化错误（F3）
+
+- **根因**：失败一律 `E_RENDER_NOT_OK`「出图未全部过闸/有图缺失」，计划校验没过（上传的模型零件还没起名）时渲染器在
+  写报告前就退出，真正原因只在日志里。
+- `patent_figure/render_errors.py`（纯函数）在渲染作业失败时，按**本作业冻结的** `inputs/plan.json`、
+  `inputs/assembly.json` 与渲染结果归类：
+  - 术语表有空白行 → `code: E_TERMS_MISSING`，`hint_plain`「还有 N 个零件没有名称，去术语页填写或用 AI 起名」
+    （N = 会出图、管辖术语行为空的零件数），`fix_action: {open_terms, target{figure: 第一张图, focus: names}}`，
+    另带 `unnamed_count / unnamed_parts（≤50）/ blank_term_rows / issues`；
+  - 其他计划校验错误 → `E_RENDER_NOT_OK`（伞形码不变：启动对账、旧客户端照旧），`cause_code` = 第一条错误码，
+    白话与修复动作取 §15.4 的表，`issues` 列出；
+  - 渲染跑了但有图没交付 → `E_RENDER_NOT_OK`，`figures[]` 逐图 `{figure, number, code, check, title_zh, hint_plain,
+    fix_action, detail}`（排版阶段错误、`E_QA_FAILED` 取第一项未过检查、`E_HLR_DROPPED`、`E_FIGURE_MISSING`），
+    顶层 `title_zh / hint_plain / fix_action / figure / cause_code` 取第一张失败的图（白话里用「图N」）；全部过闸但
+    标注 / 产物不完整 → `cause_code: E_ARTEFACTS_MISSING`、`fix_action: null`。
+- `jobs.run` 把异常上的 `error_fields` 并进 `job.error`（不覆盖 code / message / hint），于是 SSE `error` 事件、
+  `GET /v1/jobs/{id}`、子应用 `api/render/status.job.error`、`?wait=1` 的失败体都带上这些字段。分类本身出错时回落到
+  原来的错误体，绝不掩盖失败。
+
+### 15.4 排版阶段错误的白话与修复动作（F4）
+
+- `qa.py` 增补 `error_plain_fields(code, figure, message)`：与某个 QA 检查同义的错误**直接取 `CHECK_PLAIN` 那一行**
+  的白话与修复动作（两表结构上不会漂移）——`E_LAYOUT_UNSOLVABLE`（填充不足 → `sheet_fill` / change_view；
+  字高不够 → `text_height_mm` / open_terms·standard_parts；其他 → change_view）、`E_LABELS_UNPLACEABLE` →
+  `label_overlap_pairs`（open_terms·standard_parts）、`E_TOO_MANY_LABELS` → `labels_per_figure`（split_figure）、
+  `E_TERM_LOOKS_LIKE_PART_CODE` → `forbidden_text`；没有同义检查的单列（`E_MEMBER_NO_MATCH` / `E_DUPLICATE_FIGURE_ID`
+  → split_figure，`E_NO_CURVES` / `E_AXIS_PARALLEL` → change_view，`E_SELECTOR_NO_MATCH` → open_terms·names）；
+  其余（渲染器 / OCC / 版面内部错误）`fix_action: null`、白话说明请反馈。白话不含 ASCII 字母与 JSON 符号。
+- 候选分图：未过闸候选新增顶层 `fix_action`（QA 未过取第一项；排版阶段被拦按上表，`qa` 里另给 `title_zh /
+  hint_plain / fix_action`；pass 与写出端问题为 null）。候选还不在计划里，候选上的所有修复动作（含 `qa.failed[]`）
+  `target.figure` 一律是**候选 id**，不再是试渲染计划里的 `fig1`（那会指向用户计划里无关的图）。原有 `reason /
+  suggestion` 文案不变。
+
+### 15.5 接受候选时移除未过闸的初始兜底图（F5）
+
+- `suggest_plan.DEFAULT_FIGURE` = `plan_studio.blank_plan` 给新上传模型的兜底图
+  `{id: fig1, caption: 整体结构示意图, kind: assembly, members: ["*"]}`（测试钉住两者相等）；只认**完全未改动**的这一张。
+- `POST /plan/candidates/accept`：`mode=append`、请求未给 `keep_default_figure: true`、计划仍含兜底图、且本次候选作业的
+  整机候选（`source.kind = whole`）全部为 fail → 在同一次 `update_plan` 里、`accept_into` 分配新图号之后移除兜底图
+  （新图号仍从 fig2 起，不复用 fig1；移除后至少保留一张图）。响应 `removed_default_figure` = 兜底图写入前在、写入后
+  不在（append 默认移除，或 replace 替换掉）。
+
+### 15.6 工程详情的 render_job 摘要（F6）
+
+- `GET /v1/projects/{id}` 增补 `render_job`（openapi `ProjectRenderJob`；没渲染过为 null）：最近一次渲染作业（任一入口）的
+  `{job_id, state, stage, progress, ok, published, plan_etag, error{code,message,hint,title_zh,hint_plain,fix_action},
+  created_at, updated_at, url: /v1/jobs/<id>, status_url: /p/<pid>/api/render/status}`；完整记录与「已发布 vs 本次」
+  仍在 `url` / `status_url`。响应整体登记为 openapi `ProjectDetail`，`tests/test_wp2b_goldenpath.py` 按 schema 双向
+  核对（无契约外的键、必需键齐全）。

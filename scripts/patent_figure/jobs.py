@@ -420,6 +420,14 @@ class JobStore:
                 code = getattr(exc, "code", "E_JOB_FAILED")
                 job.error = {"code": str(code), "message": str(exc),
                              "hint": getattr(exc, "hint", "") or ""}
+                # WP2b F3: a structured failure may carry plain-language fields for people
+                # (``title_zh`` / ``hint_plain`` / ``fix_action`` / per-figure rows …). They ride
+                # on the job's ``error`` — and therefore on the SSE ``error`` event and
+                # ``GET /v1/jobs/{id}`` — without ever overriding code / message / hint.
+                extra = getattr(exc, "error_fields", None)
+                if isinstance(extra, dict):
+                    for k, v in extra.items():
+                        job.error.setdefault(str(k), v)
                 # A structured failure (e.g. a render that ran but did not pass QA) may carry a
                 # result payload with the per-figure diagnostics — keep it queryable (R1 #5).
                 payload = getattr(exc, "result", None)

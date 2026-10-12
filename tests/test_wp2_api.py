@@ -154,6 +154,23 @@ def test_export_package_is_checked_page_by_page(live, export_job):
     assert res["note"].startswith("精确图片参数")
 
 
+def test_download_works_from_localhost_and_127_with_the_session_cookie(live, export_job):
+    """WP2b F2: the download URL follows the host the page was opened on (it used to be
+    hard-wired to 127.0.0.1, so a page opened from localhost got 401 — its session cookie
+    belongs to localhost). Both entries download the real export with the cookie alone."""
+    from starlette.testclient import TestClient
+    _W, _reg, c = live
+    for host in ("localhost", "127.0.0.1"):
+        b = TestClient(c.app, base_url="http://%s:8802" % host)
+        assert b.get("/?token=" + TOKEN).status_code == 200            # session cookie only
+        res = b.get("/v1/exports/%s" % export_job["id"]).json()["result"]
+        assert res["download_url"] == "http://%s:8802/v1/exports/%s/download" % (
+            host, export_job["id"])
+        d = b.get(res["download_url"])
+        assert d.status_code == 200 and d.content[:2] == b"PK", d.status_code
+        assert b.get(res["download_path"]).status_code == 200
+
+
 def test_a_tampered_export_is_not_served(live):
     """R2k: the download verifies the sealed export directory first — one changed byte of the
     stored zip (or any sealed file) → 409, the zip is not served."""
@@ -334,6 +351,12 @@ def test_accept_writes_exact_selectors_and_returns_the_new_etag(live, suggestion
     fig = next(f for f in plan["figures"] if f["id"] == out["added_figures"][0])
     assert fig["members"] == sorted(m["part"] for m in passed["members"])
     assert fig["caption"] == passed["caption"] and fig["kind"] == passed["kind"]
+    # WP2b F5 negative case: the synthetic example's whole-machine candidate passes the gate, so
+    # its 整体结构示意图 (same shape as the upload fallback) is kept.
+    whole = [x for x in j["result"]["candidates"] if x["source"]["kind"] == "whole"]
+    if whole and all(x["status"] == "pass" for x in whole):
+        assert out["removed_default_figure"] is False
+        assert any(f["id"] == "fig1" for f in plan["figures"])
 
 
 # ---- AI 起名接力

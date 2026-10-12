@@ -18,6 +18,12 @@ info:
     逐页核验，`ExportResult`）；QA 每项的 `title_zh / hint_plain / fix_action`（`QACheck`）；AI 起名
     接力语义冻结（`DraftTermsResult`）；`?token=` 仅兼容期，命中时响应带 `Deprecation: true` 与
     `Warning` 头。
+
+    WP2b 增补（契约 §15，全部为新增可选字段）：准备作业的 AI 结构识别有独立短超时、失败不阻塞
+    （`PrepareResult.ai_status`）；导出下载地址按请求生成（`download_url` / `download_path`）；出图失败的
+    结构化错误（`Error` 的 `title_zh / hint_plain / fix_action / figures[]`，`E_TERMS_MISSING`）；候选的
+    `fix_action`；接受候选默认移除未过闸的初始兜底图（`keep_default_figure` / `removed_default_figure`）；
+    工程详情的 `render_job` 摘要（`ProjectDetail`）。
 servers:
   - url: http://127.0.0.1:8790
     description: 本机默认实例
@@ -44,11 +50,65 @@ components:
         `X-Auth-Deprecated: query-token`。首页 `/?token=` 是下发会话 Cookie 的引导，不算弃用。
   schemas:
     Error:
+      description: >
+        作业错误（Job.error，亦即 SSE error 事件的 data）。code / message / hint 恒有；WP2b 起出图失败另带
+        给人看的白话层（以下字段均可选）：E_TERMS_MISSING = 计划里还有零件没起名（未渲染任何图，
+        fix_action 直达术语页）；E_RENDER_NOT_OK = 伞形错误码（计划校验未过或有图未过闸 / 排版失败），
+        具体原因在 cause_code，逐图在 figures[]。
       type: object
       properties:
-        code: {type: string, example: E_JOB_FAILED}
+        code: {type: string, example: E_TERMS_MISSING}
         message: {type: string}
-        hint: {type: string}
+        hint: {type: string, description: 给 Agent 的计划级精确指令（可含字段名）}
+        title_zh: {type: string, example: 零件未起名}
+        hint_plain:
+          type: string
+          description: 白话（不含 JSON 字段名），例：还有 12 个零件没有名称，去术语页填写或用 AI 起名
+        fix_action: {$ref: '#/components/schemas/FixAction'}
+        cause_code:
+          type: string
+          description: >
+            E_RENDER_NOT_OK 的具体原因：计划校验错误码（E_MEMBER_NO_MATCH…）、排版阶段错误码
+            （E_LAYOUT_UNSOLVABLE / E_LABELS_UNPLACEABLE…）、E_QA_FAILED、E_HLR_DROPPED、E_FIGURE_MISSING、
+            E_ARTEFACTS_MISSING
+        figure: {type: string, description: 第一张失败的图（顶层白话与修复动作取它）}
+        figures:
+          type: array
+          description: 逐张未交付的图（计划顺序）
+          items: {$ref: '#/components/schemas/RenderFigureError'}
+        unnamed_count: {type: integer, description: E_TERMS_MISSING：会出图但名称为空的零件数}
+        unnamed_parts: {type: array, items: {type: string}, description: 其中前 50 个零件名}
+        blank_term_rows: {type: integer, description: E_TERMS_MISSING：术语表里名称为空的行数}
+        issues: {type: array, items: {type: object}, description: 计划校验错误（code/severity/message/hint/pointer），前 50 条}
+        missing_artefacts: {type: array, items: {type: string}}
+    RenderFigureError:
+      description: 一张没有交付的图的原因（白话与修复动作与 qa.py F4 表同一来源）。
+      type: object
+      properties:
+        figure: {type: string}
+        number: {type: integer, nullable: true, description: 图号（计划顺序，与图面「图N」一致）}
+        code: {type: string, description: 排版阶段错误码，或 E_QA_FAILED / E_HLR_DROPPED / E_FIGURE_MISSING}
+        check: {type: string, nullable: true, description: 白话与修复动作所取的 QA 检查项 id}
+        title_zh: {type: string}
+        hint_plain: {type: string}
+        fix_action: {$ref: '#/components/schemas/FixAction'}
+        detail: {type: string, description: 渲染器原文（技术细节）}
+    PrepareResult:
+      description: >
+        准备作业（kind=prepare / from-example）成功后的 Job.result（WP2b F1）。作业在工程 ready 且准备线程
+        结束后成功；其中的 AI 结构识别有独立短超时（默认 60 s，环境变量 PFK_AI_STRUCTURE_TIMEOUT_S 或
+        配置 ai_structure_timeout_s），失败 / 超时**不阻塞**准备：作业照常成功，ai_status=failed + ai_error。
+      type: object
+      required: [project_id, status, ai_status]
+      properties:
+        project_id: {type: string}
+        status: {type: string, enum: [ready]}
+        ai_status:
+          type: string
+          enum: [ok, failed, skipped, not_configured]
+          description: ok = 本次识别成功；failed = 失败或超时（见 ai_error）；skipped = 已有结构结果 / 本次未识别；not_configured = 没有大模型通道
+        ai_error: {type: string, description: 仅 ai_status=failed 时给出}
+        example: {type: string, description: from-example 作业的示例名}
     JobRef:
       type: object
       required: [project_id, job_id]
@@ -94,7 +154,8 @@ components:
             每种格式的结果（ok/skip/fail/unverified）。dwg 在无转换器时为 skip；PDF 在没有独立渲染器
             （pypdfium2）时为 unverified——不是 ok、不是通过。
         files: {type: array, items: {type: string}}
-        download_url: {type: string}
+        download_url: {type: string, description: 见 ExportResult.download_url}
+        download_path: {type: string}
     RenderJobDiag:
       description: 本次作业版本的诊断信息（失败时用来定位问题；不代表已发布）。
       type: object
@@ -145,7 +206,7 @@ components:
         kind: {type: string, enum: [open_terms, split_figure, change_view, change_density]}
         target:
           type: object
-          description: "至少含 figure（图 id）；可选 focus（standard_parts|names）、density（loose）、engineering_table（false）"
+          description: "至少含 figure（图 id；候选卡片上的修复动作为候选 id，因候选还不在计划里）；可选 focus（standard_parts|names）、density（loose）、engineering_table（false）"
           properties:
             figure: {type: string}
             focus: {type: string, enum: [standard_parts, names]}
@@ -219,6 +280,12 @@ components:
         detail: {type: string, nullable: true, description: 渲染器原始报错（技术细节，可折叠显示）}
         suggestion: {type: string, nullable: true}
         plan_errors: {type: array, items: {type: object}}
+        fix_action:
+          allOf: [{$ref: '#/components/schemas/FixAction'}]
+          nullable: true
+          description: >
+            WP2b F4：未过闸候选的修复动作（QA 未过取第一项未过检查；排版阶段被拦按错误码映射，与 qa.py F4
+            表一致）；target.figure 为候选 id。pass 或写出端问题为 null。
         qa:
           type: object
           nullable: true
@@ -236,6 +303,9 @@ components:
             text_height_mm: {type: number, nullable: true}
             labels: {type: integer, nullable: true}
             error_code: {type: string}
+            title_zh: {type: string, description: 排版阶段被拦时的中文名（WP2b F4）}
+            hint_plain: {type: string, description: 排版阶段被拦时的白话（WP2b F4）}
+            fix_action: {$ref: '#/components/schemas/FixAction'}
         version: {type: string, nullable: true, description: 候选专属版本 id（<job_id>-c<k>，在 <工程>/candidates/ 版本库，从不成为 current）}
         preview:
           type: object
@@ -295,6 +365,12 @@ components:
           description: 可选：按候选 id 覆盖成员（用户在界面上改组后提交），值为 MemberRef 数组
           additionalProperties: {type: array, items: {$ref: '#/components/schemas/MemberRef'}}
         plan_etag: {type: string, description: 与 If-Match 等价}
+        keep_default_figure:
+          type: boolean
+          default: false
+          description: >
+            WP2b F5：append 模式下，若计划仍含未改动过的初始兜底图（fig1「整体结构示意图」、members ["*"]）
+            且本次候选作业的整机候选未过闸，默认把它从计划移除（否则整次出图常因它失败）；true = 保留
     AcceptCandidatesResult:
       type: object
       properties:
@@ -305,6 +381,7 @@ components:
         standard_labels_set: {type: array, items: {type: string}}
         standard_labels_skipped: {type: array, items: {type: string}}
         accepted_failed: {type: array, items: {type: string}, description: 被接受但试渲染未过闸的候选 id（允许，仅提示）}
+        removed_default_figure: {type: boolean, description: WP2b F5：初始兜底图在本次写入前存在、写入后不在（append 默认移除，或 replace 替换掉）}
         plan_valid: {type: boolean}
         issues: {type: array, items: {type: object}}
     PageCheck:
@@ -437,7 +514,76 @@ components:
         note: {type: string, example: 精确图片参数以当期《电子申请文件格式要求说明》为准}
         notes: {type: array, items: {type: string}}
         dwg_log: {type: array, items: {type: string}}
-        download_url: {type: string}
+        download_url:
+          type: string
+          description: >
+            WP2b F2：按请求生成——配置了对外地址（--public-url）用它，否则用本次请求的 Host（从 localhost
+            打开就是 localhost，会话 Cookie 随之可用），无请求上下文时为相对路径（MCP 用服务地址）。作业记录里
+            存的是相对路径
+        download_path: {type: string, example: /v1/exports/0123abcd/download, description: 同源相对路径（浏览器直接用）}
+    ProjectRenderJob:
+      description: >
+        WP2b F6：GET /v1/projects/{id} 的 render_job——该工程最近一次渲染作业（浏览器 / REST / MCP 任一入口）的
+        摘要；完整记录在 url，浏览器的「已发布版本 vs 本次作业」在 status_url（RenderStatus）。
+      type: object
+      required: [job_id, state, ok, published, url, status_url]
+      properties:
+        job_id: {type: string}
+        state: {type: string, enum: [queued, running, succeeded, failed, cancelled, interrupted]}
+        stage: {type: string}
+        progress: {type: number}
+        ok: {type: boolean, nullable: true, description: 终态时是否成功；未结束为 null}
+        published: {type: boolean, description: 本作业的版本是否就是当前已发布版本}
+        plan_etag: {type: string, description: 作业提交时冻结的 plan ETag}
+        error:
+          type: object
+          nullable: true
+          description: Error 的摘要（code / message / hint / title_zh / hint_plain / fix_action）
+        created_at: {type: number}
+        updated_at: {type: number}
+        url: {type: string, example: /v1/jobs/0123abcd}
+        status_url: {type: string, example: /p/example-vise/api/render/status}
+    ProjectDetail:
+      description: >
+        GET /v1/projects/{id}：GET /v1/projects 条目（工程摘要）+ plan_etag + candidates + render_job。
+      type: object
+      required: [id, plan_etag, candidates, render_job]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        status: {type: string, enum: [preparing, ready, error]}
+        message: {type: string}
+        example: {type: boolean}
+        description: {type: string}
+        created: {type: string, nullable: true}
+        step_name: {type: string}
+        figures: {type: integer}
+        figures_pass: {type: integer}
+        flowcharts: {type: integer}
+        rendered_at: {type: string, nullable: true}
+        version: {type: string, nullable: true, description: 当前已发布版本 id}
+        structure:
+          type: object
+          properties:
+            source: {type: string, nullable: true}
+            groups: {type: array, items: {type: object}}
+            ai_status: {type: string, nullable: true, enum: [pending, running, ok, failed, skipped, not_configured, null], description: WP2b F1：准备时 AI 结构识别的结果（null = 早于 WP2b 的工程）}
+            ai_error: {type: string, nullable: true}
+        thumb: {type: string, nullable: true}
+        plan_etag: {type: string}
+        candidates:
+          type: object
+          nullable: true
+          properties:
+            job_id: {type: string}
+            state: {type: string}
+            summary: {type: object, nullable: true}
+            empty_reason: {type: string, nullable: true}
+            url: {type: string}
+        render_job:
+          allOf: [{$ref: '#/components/schemas/ProjectRenderJob'}]
+          nullable: true
+          description: 没渲染过为 null
     Capabilities:
       type: object
       properties:
@@ -546,7 +692,8 @@ paths:
       summary: 新建工程（异步准备）
       description: >
         接收 STEP：multipart/form-data 字段 `step`（可选 `title`），或 application/octet-stream
-        原始体（`title`/`name` 走查询参数）。202 返回 {project_id, job_id}，准备在后台作业跑。
+        原始体（`title`/`name` 走查询参数）。202 返回 {project_id, job_id}，准备在后台作业跑；作业成功时
+        result 为 PrepareResult（AI 结构识别独立短超时、失败不阻塞：ai_status=failed + ai_error）。
       parameters:
         - {in: query, name: title, schema: {type: string}}
         - {in: query, name: name, schema: {type: string}}
@@ -573,7 +720,8 @@ paths:
       summary: 从内置示例新建/引用工程
       description: >
         gearbox / vise / valve 是三个公开演示模型（WP2）：首次使用时作业里现场生成 STEP（OCP 只在
-        生成器子进程里）、建工程 example-<名> 并装入示例计划；作业等到工程 ready 才 succeeded。
+        生成器子进程里）、建工程 example-<名> 并装入示例计划；作业等到工程 ready 才 succeeded（result 为
+        PrepareResult，另带 example）。
         synthetic 为仓库自带合成装配体。已存在则直接引用。
       requestBody:
         required: true
@@ -603,11 +751,15 @@ paths:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
     get:
       tags: [工程]
-      summary: 工程摘要（含 plan_etag 与最近一次候选分图状态）
+      summary: 工程摘要（含 plan_etag、最近一次候选分图状态与最近一次渲染作业摘要）
       responses:
         "200":
           description: >
             工程摘要 + plan_etag + candidates（{job_id, state, summary, empty_reason, url}，没生成过为 null）
+            + render_job（ProjectRenderJob，没渲染过为 null）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectDetail'}
   /v1/projects/{pid}/plan:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
     get:
