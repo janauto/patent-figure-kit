@@ -90,16 +90,31 @@ def test_from_example_unknown_is_404(tmp_path):
 def live(tmp_path_factory):
     if not _HAS_OCP:
         pytest.skip("需要 cadquery-ocp")
-    W, reg, c = _app(tmp_path_factory.mktemp("wp2api"))
-    W.ensure_synthetic(reg)
-    t0 = time.time()
-    while True:
-        st = c.get("/api/wb/projects/%s" % PID, headers=BEARER).json()
-        if st["status"] == "ready" and not st["message"]:
-            break
-        assert time.time() - t0 < 300, "示例工程准备超时"
-        time.sleep(1)
-    return W, reg, c
+    import workbench_llm as L
+    # WP2b: the example's preparation must never reach a real model (not even the
+    # auto-detected local CodeBuddy CLI); AI tests below patch their own fake channel.
+    mp = pytest.MonkeyPatch()
+    cfg = tmp_path_factory.mktemp("wp2api-cfg")
+    mp.setattr(L, "CONFIG_DIR", cfg)
+    mp.setattr(L, "CONFIG_FILE", cfg / "config.json")
+    mp.delenv("DEEPSEEK_API_KEY", raising=False)
+    mp.setattr(L, "_codebuddy_path", lambda: None)
+    try:
+        assert L.public_settings()["provider"] == "none"          # no channel reachable
+        W, reg, c = _app(tmp_path_factory.mktemp("wp2api"))
+        W.ensure_synthetic(reg)
+        t0 = time.time()
+        while True:
+            # WP2b F1: prepared = ready AND the preparation thread finished (not "message empty")
+            st = c.get("/api/wb/projects/%s" % PID, headers=BEARER).json()
+            assert st["status"] != "error", st
+            if st["status"] == "ready" and not reg.is_preparing(PID):
+                break
+            assert time.time() - t0 < 300, "示例工程准备超时"
+            time.sleep(1)
+        yield W, reg, c
+    finally:
+        mp.undo()
 
 
 def _poll(c, job_id, timeout=600):

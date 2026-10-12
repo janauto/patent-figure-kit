@@ -86,19 +86,34 @@ def client(tmp_path_factory):
         pytest.skip("需要 cadquery-ocp")
     import workbench as W
     from starlette.testclient import TestClient
-    data = tmp_path_factory.mktemp("jobsapi")
-    reg = W.Registry(data / "data", "t0k")
-    W.ensure_synthetic(reg)
-    c = TestClient(W.Dispatcher(W.build_workbench(reg, "t0k", 8790), reg),
-                   base_url="http://127.0.0.1:8790")
-    t0 = time.time()
-    while True:
-        st = c.get("/api/wb/projects/example-synthetic", headers=H).json()
-        if st["status"] == "ready" and not st["message"]:
-            break
-        assert time.time() - t0 < 300, "示例工程准备超时"
-        time.sleep(1)
-    return c
+    # Module-scoped: set up BEFORE the function-scoped _isolated_config, so it isolates the LLM
+    # channel itself (WP2b: the example's preparation must never reach a real model — not even
+    # the auto-detected local CodeBuddy CLI).
+    mp = pytest.MonkeyPatch()
+    cfg = tmp_path_factory.mktemp("jobsapi-cfg")
+    mp.setattr(L, "CONFIG_DIR", cfg)
+    mp.setattr(L, "CONFIG_FILE", cfg / "config.json")
+    mp.delenv("DEEPSEEK_API_KEY", raising=False)
+    mp.setattr(L, "_codebuddy_path", lambda: None)
+    try:
+        assert L.public_settings()["provider"] == "none"          # no channel reachable
+        data = tmp_path_factory.mktemp("jobsapi")
+        reg = W.Registry(data / "data", "t0k")
+        W.ensure_synthetic(reg)
+        c = TestClient(W.Dispatcher(W.build_workbench(reg, "t0k", 8790), reg),
+                       base_url="http://127.0.0.1:8790")
+        t0 = time.time()
+        while True:
+            # WP2b F1: prepared = ready AND the preparation thread finished (not "message empty")
+            st = c.get("/api/wb/projects/example-synthetic", headers=H).json()
+            assert st["status"] != "error", st
+            if st["status"] == "ready" and not reg.is_preparing("example-synthetic"):
+                break
+            assert time.time() - t0 < 300, "示例工程准备超时"
+            time.sleep(1)
+        yield c
+    finally:
+        mp.undo()
 
 
 PID = "example-synthetic"
