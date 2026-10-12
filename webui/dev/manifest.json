@@ -1,53 +1,286 @@
 {
- "schema": "inkline-static-manifest/1",
- "version": "2026-10-11",
+ "schema": "inkline-static/2",
+ "version": 2,
  "display_name": "墨线",
- "data_dir": "（静态演示站 · 预计算展示）",
- "llm": {
-  "provider": "deepseek",
-  "provider_label": "DeepSeek V3.2（API）",
-  "configured": true
+ "note": "后端响应快照（GET /v1/capabilities、/v1/projects、/v1/projects/{id}、/plan、/plan/candidates、/p/{id}/api/state）；静态站只读，不发任何写请求。",
+ "capabilities": {
+  "display_name": "墨线",
+  "export": {
+   "formats": [
+    "pdf",
+    "docx",
+    "dxf",
+    "dwg"
+   ],
+   "primary_formats": [
+    "pdf",
+    "docx"
+   ],
+   "source_formats": [
+    "dxf",
+    "dwg"
+   ],
+   "variants": {
+    "filing": "递交版（仅图号）",
+    "disclosure": "交底版（图号 + 件号表）",
+    "both": "两版"
+   },
+   "pdf_available": true,
+   "pdf_check_available": true,
+   "pdf_render_check_available": true,
+   "pdf_renderer": "pypdfium2",
+   "pdf_render_required": true,
+   "docx_available": true,
+   "dwg_available": true,
+   "dwg_route": "libredwg",
+   "unavailable_reasons": {},
+   "sheet_presets": {
+    "standard": {
+     "area_mm": [
+      170.0,
+      257.0
+     ],
+     "label": "标准版心 170×257 mm"
+    },
+    "conservative": {
+     "area_mm": [
+      165.0,
+      245.0
+     ],
+     "label": "保守版心 165×245 mm"
+    }
+   },
+   "default_preset": "standard",
+   "dpi": {
+    "default": 300,
+    "min": 72,
+    "max": 600
+   },
+   "page": {
+    "size_mm": [
+     210.0,
+     297.0
+    ],
+    "margins_mm": {
+     "top": 25.0,
+     "left": 25.0,
+     "bottom": 15.0,
+     "right": 15.0
+    }
+   },
+   "min_text_mm": 3.5,
+   "min_text_px": 24,
+   "note": "按国家知识产权局专利审查指南与《电子申请文件格式要求说明》的附图形式要求排版（A4、黑白线条、图号、页边与字高下限）；精确图片参数以当期《电子申请文件格式要求说明》为准，最终以受理为准。",
+   "layout_verification": {
+    "pdf": "file-geometry",
+    "docx": "structural",
+    "docx_note": "Word 按文档结构核验，实际排版以 Word 打开为准"
+   },
+   "statuses": [
+    "ok",
+    "skip",
+    "fail",
+    "unverified"
+   ],
+   "integrity": {
+    "algorithm": "sha256",
+    "note": "核验只对导出包原文件有效"
+   },
+   "files": [
+    "说明书附图_递交版.pdf",
+    "说明书附图_递交版.docx",
+    "说明书附图_交底版.pdf",
+    "说明书附图_交底版.docx",
+    "附图说明.txt",
+    "核对清单.txt",
+    "核验报告.json"
+   ]
+  },
+  "ai": {
+   "configured": false,
+   "provider": "none",
+   "provider_label": "静态演示站不连接 AI 通道",
+   "outbound_fields": [
+    "part_names",
+    "part_codes"
+   ],
+   "outbound_note": "AI 起名会把选中零件的 STEP 零件名（常含内部件号）、包围盒尺寸与装配路径发给所配置的大模型通道；几何模型本身不出本机。"
+  },
+  "suggest": {
+   "max_candidates": 8,
+   "max_candidates_hard": 16
+  },
+  "examples": [
+   "gearbox",
+   "valve",
+   "vise"
+  ],
+  "auth": {
+   "bearer": true,
+   "session_cookie": "wb_token",
+   "query_token": "deprecated"
+  }
  },
  "projects": [
   {
    "id": "gearbox",
    "summary": {
-    "project_id": "gearbox",
+    "id": "gearbox",
     "title": "行星齿轮减速器",
     "description": "电机 + 行星齿轮系 + 轴承端盖，同轴堆叠",
     "step_name": "demo-planetary-gearbox.stp",
     "example": true,
     "status": "ready",
     "message": "",
-    "plan_etag": "W/\"gearbox-1\"",
-    "llm": {
-     "provider": "deepseek",
-     "provider_label": "DeepSeek V3.2（API）",
-     "configured": true
+    "created": "2026-10-11 10:00:00",
+    "flowcharts": 0,
+    "structure": {
+     "source": null,
+     "groups": []
     },
     "figures": 2,
     "figures_pass": 2,
-    "flowcharts": 0,
+    "rendered_at": "2026-10-11 10:31",
+    "version": "seed-gearbox",
     "thumb": "dev/fixtures/gearbox/fig1_annotated.svg"
    },
-   "detail": {
-    "project_id": "gearbox",
+   "project": {
+    "id": "gearbox",
     "title": "行星齿轮减速器",
     "description": "电机 + 行星齿轮系 + 轴承端盖，同轴堆叠",
     "step_name": "demo-planetary-gearbox.stp",
     "example": true,
     "status": "ready",
     "message": "",
-    "plan_etag": "W/\"gearbox-1\"",
-    "llm": {
-     "provider": "deepseek",
-     "provider_label": "DeepSeek V3.2（API）",
-     "configured": true
+    "created": "2026-10-11 10:00:00",
+    "flowcharts": 0,
+    "structure": {
+     "source": null,
+     "groups": []
     },
     "figures": 2,
     "figures_pass": 2,
-    "flowcharts": 0,
+    "rendered_at": "2026-10-11 10:31",
+    "version": "seed-gearbox",
     "thumb": "dev/fixtures/gearbox/fig1_annotated.svg",
+    "plan_etag": "gearbox-1",
+    "candidates": {
+     "job_id": "seed-suggest-gearbox",
+     "state": "succeeded",
+     "summary": {
+      "total": 2,
+      "pass": 2,
+      "fail": 0,
+      "pending": 0
+     },
+     "empty_reason": null,
+     "url": "/v1/projects/gearbox/plan/candidates"
+    }
+   },
+   "plan": {
+    "schema": "patent-figure-plan/1",
+    "source": {
+     "step": "demo-planetary-gearbox.stp",
+     "include": [
+      "PGB-*"
+     ],
+     "exclude": []
+    },
+    "terms": [
+     {
+      "selector": "PGB-MOTOR-HOUSING",
+      "term": "电机壳体"
+     },
+     {
+      "selector": "PGB-MOTOR-REAR-CAP",
+      "term": "电机后盖"
+     },
+     {
+      "selector": "PGB-MOUNT-FLANGE",
+      "term": "安装法兰"
+     },
+     {
+      "selector": "PGB-RING-GEAR",
+      "term": "内齿圈"
+     },
+     {
+      "selector": "PGB-END-COVER",
+      "term": "端盖"
+     },
+     {
+      "selector": "PGB-OUTPUT-SHAFT",
+      "term": "输出轴"
+     },
+     {
+      "selector": "PGB-SUN-GEAR",
+      "term": "太阳轮"
+     },
+     {
+      "selector": "PGB-PLANET-GEAR",
+      "term": "行星轮"
+     },
+     {
+      "selector": "PGB-PLANET-PIN",
+      "term": "行星销"
+     },
+     {
+      "selector": "PGB-PLANET-CARRIER",
+      "term": "行星架"
+     },
+     {
+      "selector": "PGB-OUTPUT-BEARING",
+      "term": "输出轴承"
+     },
+     {
+      "selector": "PGB-OIL-SEAL",
+      "term": "油封"
+     },
+     {
+      "selector": "PGB-SCREW-*",
+      "term": "紧固螺钉",
+      "label": "none"
+     }
+    ],
+    "figures": [
+     {
+      "id": "fig1",
+      "caption": "行星齿轮减速器整体结构示意图",
+      "kind": "assembly",
+      "members": [
+       "PGB-MOTOR-HOUSING",
+       "PGB-MOTOR-REAR-CAP",
+       "PGB-MOUNT-FLANGE",
+       "PGB-RING-GEAR",
+       "PGB-END-COVER",
+       "PGB-OUTPUT-SHAFT",
+       "PGB-SCREW-*"
+      ]
+     },
+     {
+      "id": "fig2",
+      "caption": "行星齿轮减速器齿轮系分解示意图",
+      "kind": "exploded",
+      "members": [
+       "PGB-SUN-GEAR",
+       "PGB-PLANET-GEAR",
+       "PGB-PLANET-PIN",
+       "PGB-PLANET-CARRIER",
+       "PGB-RING-GEAR",
+       "PGB-OUTPUT-SHAFT",
+       "PGB-OUTPUT-BEARING",
+       "PGB-END-COVER",
+       "PGB-OIL-SEAL"
+      ]
+     }
+    ],
+    "layout": {
+     "max_labels_per_figure": 20
+    }
+   },
+   "plan_etag": "gearbox-1",
+   "state": {
+    "step": "demo-planetary-gearbox.stp",
+    "workdir": "",
     "assembly": {
      "schema": "patent-assembly/1",
      "source": {
@@ -579,151 +812,110 @@
      "split_suggestions": [],
      "warnings": []
     },
-    "structure": {
-     "source": "ai",
-     "provider": "DeepSeek V3.2",
-     "created": "2026-10-11 10:22",
-     "groups": [
+    "plan": {
+     "schema": "patent-figure-plan/1",
+     "source": {
+      "step": "demo-planetary-gearbox.stp",
+      "include": [
+       "PGB-*"
+      ],
+      "exclude": []
+     },
+     "terms": [
       {
-       "id": "g-motor",
-       "name": "电机子装配",
-       "role": "提供旋转动力",
-       "parts": [
+       "selector": "PGB-MOTOR-HOUSING",
+       "term": "电机壳体"
+      },
+      {
+       "selector": "PGB-MOTOR-REAR-CAP",
+       "term": "电机后盖"
+      },
+      {
+       "selector": "PGB-MOUNT-FLANGE",
+       "term": "安装法兰"
+      },
+      {
+       "selector": "PGB-RING-GEAR",
+       "term": "内齿圈"
+      },
+      {
+       "selector": "PGB-END-COVER",
+       "term": "端盖"
+      },
+      {
+       "selector": "PGB-OUTPUT-SHAFT",
+       "term": "输出轴"
+      },
+      {
+       "selector": "PGB-SUN-GEAR",
+       "term": "太阳轮"
+      },
+      {
+       "selector": "PGB-PLANET-GEAR",
+       "term": "行星轮"
+      },
+      {
+       "selector": "PGB-PLANET-PIN",
+       "term": "行星销"
+      },
+      {
+       "selector": "PGB-PLANET-CARRIER",
+       "term": "行星架"
+      },
+      {
+       "selector": "PGB-OUTPUT-BEARING",
+       "term": "输出轴承"
+      },
+      {
+       "selector": "PGB-OIL-SEAL",
+       "term": "油封"
+      },
+      {
+       "selector": "PGB-SCREW-*",
+       "term": "紧固螺钉",
+       "label": "none"
+      }
+     ],
+     "figures": [
+      {
+       "id": "fig1",
+       "caption": "行星齿轮减速器整体结构示意图",
+       "kind": "assembly",
+       "members": [
         "PGB-MOTOR-HOUSING",
         "PGB-MOTOR-REAR-CAP",
-        "PGB-MOUNT-FLANGE"
+        "PGB-MOUNT-FLANGE",
+        "PGB-RING-GEAR",
+        "PGB-END-COVER",
+        "PGB-OUTPUT-SHAFT",
+        "PGB-SCREW-*"
        ]
       },
       {
-       "id": "g-gear",
-       "name": "行星齿轮系",
-       "role": "减速与扭矩放大",
-       "parts": [
+       "id": "fig2",
+       "caption": "行星齿轮减速器齿轮系分解示意图",
+       "kind": "exploded",
+       "members": [
         "PGB-SUN-GEAR",
         "PGB-PLANET-GEAR",
         "PGB-PLANET-PIN",
         "PGB-PLANET-CARRIER",
-        "PGB-RING-GEAR"
-       ]
-      },
-      {
-       "id": "g-output",
-       "name": "输出与密封",
-       "role": "输出轴承、端盖与密封",
-       "parts": [
+        "PGB-RING-GEAR",
         "PGB-OUTPUT-SHAFT",
         "PGB-OUTPUT-BEARING",
         "PGB-END-COVER",
         "PGB-OIL-SEAL"
        ]
-      },
-      {
-       "id": "g-std",
-       "name": "标准件",
-       "role": "紧固螺钉（默认不发标记）",
-       "parts": [
-        "PGB-SCREW-M3",
-        "PGB-SCREW-M4"
-       ]
       }
      ],
-     "names": {
-      "PGB-MOTOR-HOUSING": {
-       "name": "电机壳体",
-       "confidence": "high"
-      },
-      "PGB-MOTOR-REAR-CAP": {
-       "name": "电机后盖",
-       "confidence": "high"
-      },
-      "PGB-MOUNT-FLANGE": {
-       "name": "安装法兰",
-       "confidence": "high"
-      },
-      "PGB-RING-GEAR": {
-       "name": "内齿圈",
-       "confidence": "high"
-      },
-      "PGB-END-COVER": {
-       "name": "端盖",
-       "confidence": "high"
-      },
-      "PGB-OUTPUT-SHAFT": {
-       "name": "输出轴",
-       "confidence": "high"
-      },
-      "PGB-SUN-GEAR": {
-       "name": "太阳轮",
-       "confidence": "high"
-      },
-      "PGB-PLANET-GEAR": {
-       "name": "行星轮",
-       "confidence": "high"
-      },
-      "PGB-PLANET-PIN": {
-       "name": "行星销",
-       "confidence": "low"
-      },
-      "PGB-PLANET-CARRIER": {
-       "name": "行星架",
-       "confidence": "high"
-      },
-      "PGB-OUTPUT-BEARING": {
-       "name": "输出轴承",
-       "confidence": "high"
-      },
-      "PGB-OIL-SEAL": {
-       "name": "油封",
-       "confidence": "high"
-      }
+     "layout": {
+      "max_labels_per_figure": 20
      }
     },
-    "candidates": [
-     {
-      "fig_id": "fig1",
-      "caption": "整体结构示意图",
-      "kind": "assembly",
-      "members": [
-       {
-        "group": "g-motor"
-       },
-       {
-        "group": "g-output"
-       },
-       {
-        "part": "PGB-RING-GEAR"
-       }
-      ],
-      "members_display": [
-       "电机子装配",
-       "输出与密封",
-       "内齿圈"
-      ],
-      "status": "pass",
-      "reason": "字高 7.0 mm、占用 0.79，13 项 QA 全过",
-      "labels": 6
-     },
-     {
-      "fig_id": "fig2",
-      "caption": "齿轮系分解示意图",
-      "kind": "exploded",
-      "members": [
-       {
-        "group": "g-gear"
-       },
-       {
-        "part": "PGB-OUTPUT-SHAFT"
-       }
-      ],
-      "members_display": [
-       "行星齿轮系",
-       "输出轴"
-      ],
-      "status": "pass",
-      "reason": "沿轴 121.9° 爆炸，9 个标记无交叉，13 项 QA 全过",
-      "labels": 9
-     }
-    ],
+    "validate": {
+     "ok": true,
+     "issues": []
+    },
     "render": {
      "ok": true,
      "figures": [
@@ -1214,152 +1406,437 @@
      "render_job_id": "seed-gearbox",
      "version": "seed-gearbox"
     },
-    "plan": {
-     "schema": "patent-figure-plan/1",
-     "source": {
-      "step": "demo-planetary-gearbox.stp",
-      "include": [
-       "PGB-*"
-      ],
-      "exclude": []
-     },
-     "terms": [
+    "version": "seed-gearbox",
+    "render_job": {
+     "id": null,
+     "state": null,
+     "stage": null,
+     "running": false,
+     "ok": null,
+     "error": null,
+     "result": null,
+     "diag": null
+    },
+    "rendering": false,
+    "home_url": "./home.html",
+    "flowcharts": [],
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true,
+     "dwg_available": true
+    },
+    "structure": {
+     "source": "ai",
+     "provider": "DeepSeek V3.2",
+     "created": "2026-10-11 10:22",
+     "groups": [
       {
-       "selector": "PGB-MOTOR-HOUSING",
-       "term": "电机壳体"
-      },
-      {
-       "selector": "PGB-MOTOR-REAR-CAP",
-       "term": "电机后盖"
-      },
-      {
-       "selector": "PGB-MOUNT-FLANGE",
-       "term": "安装法兰"
-      },
-      {
-       "selector": "PGB-RING-GEAR",
-       "term": "内齿圈"
-      },
-      {
-       "selector": "PGB-END-COVER",
-       "term": "端盖"
-      },
-      {
-       "selector": "PGB-OUTPUT-SHAFT",
-       "term": "输出轴"
-      },
-      {
-       "selector": "PGB-SUN-GEAR",
-       "term": "太阳轮"
-      },
-      {
-       "selector": "PGB-PLANET-GEAR",
-       "term": "行星轮"
-      },
-      {
-       "selector": "PGB-PLANET-PIN",
-       "term": "行星销"
-      },
-      {
-       "selector": "PGB-PLANET-CARRIER",
-       "term": "行星架"
-      },
-      {
-       "selector": "PGB-OUTPUT-BEARING",
-       "term": "输出轴承"
-      },
-      {
-       "selector": "PGB-OIL-SEAL",
-       "term": "油封"
-      },
-      {
-       "selector": "PGB-SCREW-*",
-       "term": "紧固螺钉",
-       "label": "none"
-      }
-     ],
-     "figures": [
-      {
-       "id": "fig1",
-       "caption": "行星齿轮减速器整体结构示意图",
-       "kind": "assembly",
-       "members": [
+       "id": "g-motor",
+       "name": "电机子装配",
+       "role": "提供旋转动力",
+       "parts": [
         "PGB-MOTOR-HOUSING",
         "PGB-MOTOR-REAR-CAP",
-        "PGB-MOUNT-FLANGE",
-        "PGB-RING-GEAR",
-        "PGB-END-COVER",
-        "PGB-OUTPUT-SHAFT",
-        "PGB-SCREW-*"
+        "PGB-MOUNT-FLANGE"
        ]
       },
       {
-       "id": "fig2",
-       "caption": "行星齿轮减速器齿轮系分解示意图",
-       "kind": "exploded",
-       "members": [
+       "id": "g-gear",
+       "name": "行星齿轮系",
+       "role": "减速与扭矩放大",
+       "parts": [
         "PGB-SUN-GEAR",
         "PGB-PLANET-GEAR",
         "PGB-PLANET-PIN",
         "PGB-PLANET-CARRIER",
-        "PGB-RING-GEAR",
+        "PGB-RING-GEAR"
+       ]
+      },
+      {
+       "id": "g-output",
+       "name": "输出与密封",
+       "role": "输出轴承、端盖与密封",
+       "parts": [
         "PGB-OUTPUT-SHAFT",
         "PGB-OUTPUT-BEARING",
         "PGB-END-COVER",
         "PGB-OIL-SEAL"
        ]
+      },
+      {
+       "id": "g-std",
+       "name": "标准件",
+       "role": "紧固螺钉（默认不发标记）",
+       "parts": [
+        "PGB-SCREW-M3",
+        "PGB-SCREW-M4"
+       ]
       }
      ],
-     "layout": {
-      "max_labels_per_figure": 20
+     "names": {
+      "PGB-MOTOR-HOUSING": {
+       "name": "电机壳体",
+       "confidence": "high"
+      },
+      "PGB-MOTOR-REAR-CAP": {
+       "name": "电机后盖",
+       "confidence": "high"
+      },
+      "PGB-MOUNT-FLANGE": {
+       "name": "安装法兰",
+       "confidence": "high"
+      },
+      "PGB-RING-GEAR": {
+       "name": "内齿圈",
+       "confidence": "high"
+      },
+      "PGB-END-COVER": {
+       "name": "端盖",
+       "confidence": "high"
+      },
+      "PGB-OUTPUT-SHAFT": {
+       "name": "输出轴",
+       "confidence": "high"
+      },
+      "PGB-SUN-GEAR": {
+       "name": "太阳轮",
+       "confidence": "high"
+      },
+      "PGB-PLANET-GEAR": {
+       "name": "行星轮",
+       "confidence": "high"
+      },
+      "PGB-PLANET-PIN": {
+       "name": "行星销",
+       "confidence": "low"
+      },
+      "PGB-PLANET-CARRIER": {
+       "name": "行星架",
+       "confidence": "high"
+      },
+      "PGB-OUTPUT-BEARING": {
+       "name": "输出轴承",
+       "confidence": "high"
+      },
+      "PGB-OIL-SEAL": {
+       "name": "油封",
+       "confidence": "high"
+      }
      }
     },
-    "validate": {
-     "ok": true,
-     "issues": []
+    "structure_job": {
+     "running": false,
+     "started": null,
+     "error": null,
+     "finished": null
+    }
+   },
+   "candidates": {
+    "id": "seed-suggest-gearbox",
+    "kind": "suggest",
+    "project_id": "gearbox",
+    "state": "succeeded",
+    "stage": "succeeded",
+    "progress": 1.0,
+    "inputs": {
+     "plan_etag": "gearbox-1"
     },
-    "model_url": "dev/fixtures/models/planetary-gearbox.glb"
-   }
+    "result": {
+     "schema": "patent-figure-candidates/1",
+     "project_id": "gearbox",
+     "job_id": "seed-suggest-gearbox",
+     "plan_etag": "gearbox-1",
+     "assembly_sha256": "mock-gearbox",
+     "standard_part_rule": {
+      "pattern": "SCREW|BOLT|NUT|WASHER|PIN|BEARING|螺钉|螺栓|螺母|垫圈|销|轴承",
+      "except": "(?:LEAD|BALL)[-_ ]?(?:SCREW|NUT)|丝杠|丝母",
+      "whole_word_latin": true
+     },
+     "label_standard_parts": false,
+     "standard_parts": [
+      "PGB-OUTPUT-BEARING"
+     ],
+     "instances_exact": true,
+     "candidates": [
+      {
+       "id": "c1",
+       "fig_id": "c1",
+       "caption": "行星架组件分解示意图",
+       "kind": "exploded",
+       "source": {
+        "kind": "subassembly",
+        "id": "sub:PGB/CARRIER",
+        "label": "子装配 行星齿轮系"
+       },
+       "members": [
+        {
+         "part": "PGB-SUN-GEAR"
+        },
+        {
+         "part": "PGB-PLANET-GEAR"
+        },
+        {
+         "part": "PGB-PLANET-PIN"
+        },
+        {
+         "part": "PGB-PLANET-CARRIER"
+        },
+        {
+         "part": "PGB-RING-GEAR"
+        },
+        {
+         "part": "PGB-OUTPUT-SHAFT"
+        }
+       ],
+       "members_display": [
+        "太阳轮",
+        "行星轮",
+        "行星销",
+        "行星架",
+        "内齿圈",
+        "输出轴"
+       ],
+       "labels": 6,
+       "standard_parts": [],
+       "placeholder_terms": 0,
+       "ambiguous_members": [
+        {
+         "part": "PGB-PLANET-GEAR",
+         "selected": 3,
+         "in_group": null,
+         "outside_paths": [],
+         "message": "按名称选中 3 处（同轴组只含其中一部分）"
+        }
+       ],
+       "status": "pass",
+       "reason": "13 项质量检查全部通过：字高 7.0 mm，6 个标号",
+       "detail": null,
+       "suggestion": null,
+       "plan_errors": [],
+       "qa": {
+        "pass": true,
+        "failed": [],
+        "text_height_mm": 7.0,
+        "labels": 6
+       },
+       "version": "seed-c1",
+       "preview": {
+        "svg": "dev/fixtures/gearbox/fig2_annotated.svg"
+       }
+      },
+      {
+       "id": "c2",
+       "fig_id": "c2",
+       "caption": "电机与输出组件分解示意图",
+       "kind": "exploded",
+       "source": {
+        "kind": "coaxial",
+        "id": "coax:g1",
+        "label": "同轴组 g1"
+       },
+       "members": [
+        {
+         "part": "PGB-MOTOR-HOUSING"
+        },
+        {
+         "part": "PGB-MOTOR-REAR-CAP"
+        },
+        {
+         "part": "PGB-MOUNT-FLANGE"
+        },
+        {
+         "part": "PGB-OUTPUT-SHAFT"
+        },
+        {
+         "part": "PGB-OUTPUT-BEARING"
+        },
+        {
+         "part": "PGB-END-COVER"
+        },
+        {
+         "part": "PGB-OIL-SEAL"
+        },
+        {
+         "part": "PGB-RING-GEAR"
+        }
+       ],
+       "members_display": [
+        "电机壳体",
+        "电机后盖",
+        "安装法兰",
+        "输出轴",
+        "输出轴承",
+        "端盖",
+        "油封",
+        "内齿圈"
+       ],
+       "labels": 8,
+       "standard_parts": [
+        "PGB-OUTPUT-BEARING"
+       ],
+       "placeholder_terms": 0,
+       "ambiguous_members": [],
+       "status": "pass",
+       "reason": "13 项质量检查全部通过：字高 5.0 mm，8 个标号",
+       "detail": null,
+       "suggestion": null,
+       "plan_errors": [],
+       "qa": {
+        "pass": true,
+        "failed": [],
+        "text_height_mm": 7.0,
+        "labels": 8
+       },
+       "version": "seed-c2",
+       "preview": {
+        "svg": "dev/fixtures/gearbox/fig1_annotated.svg"
+       }
+      }
+     ],
+     "summary": {
+      "total": 2,
+      "pass": 2,
+      "fail": 0,
+      "pending": 0
+     },
+     "empty_reason": null,
+     "guide": null,
+     "warnings": []
+    },
+    "error": null,
+    "idempotency_key": null,
+    "committed": true,
+    "created_at": 1791824483.2430122,
+    "updated_at": 1791824483.2430122,
+    "logs": [],
+    "last_event_id": 0
+   },
+   "model_url": "dev/fixtures/models/planetary-gearbox.glb"
   },
   {
    "id": "bench-vise",
    "summary": {
-    "project_id": "bench-vise",
+    "id": "bench-vise",
     "title": "台虎钳",
     "description": "固定钳身 / 活动钳身 / 丝杠手柄三个子装配",
     "step_name": "demo-bench-vise.stp",
     "example": true,
     "status": "ready",
     "message": "",
-    "plan_etag": "W/\"bench-vise-1\"",
-    "llm": {
-     "provider": "deepseek",
-     "provider_label": "DeepSeek V3.2（API）",
-     "configured": true
+    "created": "2026-10-11 10:00:00",
+    "flowcharts": 0,
+    "structure": {
+     "source": null,
+     "groups": []
     },
     "figures": 0,
     "figures_pass": 0,
-    "flowcharts": 0,
+    "rendered_at": null,
+    "version": null,
     "thumb": null
    },
-   "detail": {
-    "project_id": "bench-vise",
+   "project": {
+    "id": "bench-vise",
     "title": "台虎钳",
     "description": "固定钳身 / 活动钳身 / 丝杠手柄三个子装配",
     "step_name": "demo-bench-vise.stp",
     "example": true,
     "status": "ready",
     "message": "",
-    "plan_etag": "W/\"bench-vise-1\"",
-    "llm": {
-     "provider": "deepseek",
-     "provider_label": "DeepSeek V3.2（API）",
-     "configured": true
+    "created": "2026-10-11 10:00:00",
+    "flowcharts": 0,
+    "structure": {
+     "source": null,
+     "groups": []
     },
     "figures": 0,
     "figures_pass": 0,
-    "flowcharts": 0,
+    "rendered_at": null,
+    "version": null,
     "thumb": null,
+    "plan_etag": "bench-vise-1",
+    "candidates": {
+     "job_id": "seed-suggest-bench-vise",
+     "state": "succeeded",
+     "summary": {
+      "total": 3,
+      "pass": 1,
+      "fail": 2,
+      "pending": 0
+     },
+     "empty_reason": null,
+     "url": "/v1/projects/bench-vise/plan/candidates"
+    }
+   },
+   "plan": {
+    "schema": "patent-figure-plan/1",
+    "source": {
+     "step": "demo-bench-vise.stp",
+     "include": [
+      "VISE-*"
+     ],
+     "exclude": []
+    },
+    "terms": [
+     {
+      "selector": "VISE-BASE",
+      "term": "钳座"
+     },
+     {
+      "selector": "VISE-FIXED-JAW",
+      "term": "固定钳身"
+     },
+     {
+      "selector": "VISE-MOVABLE-JAW",
+      "term": "活动钳身"
+     },
+     {
+      "selector": "VISE-JAW-PLATE",
+      "term": "钳口板"
+     },
+     {
+      "selector": "VISE-LEAD-SCREW",
+      "term": "丝杠"
+     },
+     {
+      "selector": "VISE-LEAD-NUT",
+      "term": "丝杠螺母"
+     },
+     {
+      "selector": "VISE-HANDLE-BAR",
+      "term": "手柄杆"
+     },
+     {
+      "selector": "VISE-HANDLE-HUB",
+      "term": "手柄座"
+     },
+     {
+      "selector": "VISE-HANDLE-KNOB",
+      "term": "手柄球"
+     },
+     {
+      "selector": "VISE-THRUST-COLLAR",
+      "term": "止推环"
+     },
+     {
+      "selector": "VISE-BASE-BOLT",
+      "term": "底座螺栓"
+     },
+     {
+      "selector": "VISE-PLATE-SCREW",
+      "term": "钳口板螺钉"
+     }
+    ],
+    "figures": [],
+    "layout": {
+     "max_labels_per_figure": 20
+    }
+   },
+   "plan_etag": "bench-vise-1",
+   "state": {
+    "step": "demo-bench-vise.stp",
+    "workdir": "",
     "assembly": {
      "schema": "patent-assembly/1",
      "source": {
@@ -1778,6 +2255,95 @@
      "split_suggestions": [],
      "warnings": []
     },
+    "plan": {
+     "schema": "patent-figure-plan/1",
+     "source": {
+      "step": "demo-bench-vise.stp",
+      "include": [
+       "VISE-*"
+      ],
+      "exclude": []
+     },
+     "terms": [
+      {
+       "selector": "VISE-BASE",
+       "term": "钳座"
+      },
+      {
+       "selector": "VISE-FIXED-JAW",
+       "term": "固定钳身"
+      },
+      {
+       "selector": "VISE-MOVABLE-JAW",
+       "term": "活动钳身"
+      },
+      {
+       "selector": "VISE-JAW-PLATE",
+       "term": "钳口板"
+      },
+      {
+       "selector": "VISE-LEAD-SCREW",
+       "term": "丝杠"
+      },
+      {
+       "selector": "VISE-LEAD-NUT",
+       "term": "丝杠螺母"
+      },
+      {
+       "selector": "VISE-HANDLE-BAR",
+       "term": "手柄杆"
+      },
+      {
+       "selector": "VISE-HANDLE-HUB",
+       "term": "手柄座"
+      },
+      {
+       "selector": "VISE-HANDLE-KNOB",
+       "term": "手柄球"
+      },
+      {
+       "selector": "VISE-THRUST-COLLAR",
+       "term": "止推环"
+      },
+      {
+       "selector": "VISE-BASE-BOLT",
+       "term": "底座螺栓"
+      },
+      {
+       "selector": "VISE-PLATE-SCREW",
+       "term": "钳口板螺钉"
+      }
+     ],
+     "figures": [],
+     "layout": {
+      "max_labels_per_figure": 20
+     }
+    },
+    "validate": {
+     "ok": true,
+     "issues": []
+    },
+    "render": null,
+    "version": null,
+    "render_job": {
+     "id": null,
+     "state": null,
+     "stage": null,
+     "running": false,
+     "ok": null,
+     "error": null,
+     "result": null,
+     "diag": null
+    },
+    "rendering": false,
+    "home_url": "./home.html",
+    "flowcharts": [],
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true,
+     "dwg_available": true
+    },
     "structure": {
      "source": "ai",
      "provider": "DeepSeek V3.2",
@@ -1868,274 +2434,429 @@
       }
      }
     },
-    "candidates": [
-     {
-      "fig_id": "whole",
-      "caption": "台虎钳整机装配图（兜底候选）",
-      "kind": "assembly",
-      "members": [
-       {
-        "group": "v-fixed"
+    "structure_job": {
+     "running": false,
+     "started": null,
+     "error": null,
+     "finished": null
+    }
+   },
+   "candidates": {
+    "id": "seed-suggest-bench-vise",
+    "kind": "suggest",
+    "project_id": "bench-vise",
+    "state": "succeeded",
+    "stage": "succeeded",
+    "progress": 1.0,
+    "inputs": {
+     "plan_etag": "bench-vise-1"
+    },
+    "result": {
+     "schema": "patent-figure-candidates/1",
+     "project_id": "bench-vise",
+     "job_id": "seed-suggest-bench-vise",
+     "plan_etag": "bench-vise-1",
+     "assembly_sha256": "mock-bench-vise",
+     "standard_part_rule": {
+      "pattern": "SCREW|BOLT|NUT|WASHER|PIN|BEARING|螺钉|螺栓|螺母|垫圈|销|轴承",
+      "except": "(?:LEAD|BALL)[-_ ]?(?:SCREW|NUT)|丝杠|丝母",
+      "whole_word_latin": true
+     },
+     "label_standard_parts": false,
+     "standard_parts": [
+      "VISE-BASE-BOLT",
+      "VISE-PLATE-SCREW"
+     ],
+     "instances_exact": true,
+     "candidates": [
+      {
+       "id": "c1",
+       "fig_id": "c1",
+       "caption": "整体结构示意图",
+       "kind": "assembly",
+       "source": {
+        "kind": "whole",
+        "id": "whole",
+        "label": "整机装配图（兜底候选）"
        },
-       {
-        "group": "v-move"
-       },
-       {
-        "group": "v-screw"
-       }
-      ],
-      "members_display": [
-       "固定钳身组",
-       "活动钳身组",
-       "丝杠手柄组"
-      ],
-      "status": "fail",
-      "qa": {
-       "schema": "patent-figure-qa/1",
-       "file": "whole.dxf",
-       "pass": false,
-       "checks": [
+       "members": [
         {
-         "id": "geometry_occupancy",
-         "pass": true,
-         "value": 0.71,
-         "threshold": ">=0.55",
-         "detail": "几何占用 0.71",
-         "hint": ""
+         "part": "VISE-BASE"
         },
         {
-         "id": "sheet_fill",
-         "pass": true,
-         "value": 0.63,
-         "threshold": ">=0.55",
-         "detail": "纸面填充 0.63",
-         "hint": ""
+         "part": "VISE-FIXED-JAW"
         },
         {
-         "id": "text_height_mm",
-         "pass": false,
-         "value": 2.4,
-         "threshold": ">=3.5",
-         "detail": "NUM 图层最小字高 2.40 mm（共 22 个标记）",
-         "hint": "字太小意味着被标注件在图面上太小：对标准件设 terms[].label=\"none\"，按 assembly.json:split_suggestions 拆图，或把 layout.density 改成 \"compact\"。"
+         "part": "VISE-BASE-BOLT"
         },
         {
-         "id": "text_slot_ratio",
-         "pass": false,
-         "value": 0.74,
-         "threshold": "<=0.6",
-         "detail": "最小被标注几何簇外廓 18.0 mm，最小字高 2.40 mm",
-         "hint": "被标注件相对字号太小：对该零件设 terms[].label=\"none\"，或按 assembly.json:split_suggestions 拆图。"
+         "part": "VISE-MOVABLE-JAW"
         },
         {
-         "id": "label_overlap_pairs",
-         "pass": true,
-         "value": 0,
-         "threshold": "<=0",
-         "detail": "无标记互相碾压",
-         "hint": ""
+         "part": "VISE-JAW-PLATE"
         },
         {
-         "id": "leader_hits_numeral_box",
-         "pass": true,
-         "value": 0,
-         "threshold": "<=0",
-         "detail": "引线未压数字",
-         "hint": ""
+         "part": "VISE-PLATE-SCREW"
         },
         {
-         "id": "leader_crossing",
-         "pass": false,
-         "value": 3,
-         "threshold": "<=0",
-         "detail": "检测到 3 对引线交叉",
-         "hint": "引线交叉：减少本图标记数（terms[].label=\"none\"）或按 assembly.json:split_suggestions 拆图。"
+         "part": "VISE-LEAD-SCREW"
         },
         {
-         "id": "leader_anchor_gap",
-         "pass": true,
-         "value": 0.4,
-         "threshold": "<=0.5",
-         "detail": "引线均落在轮廓上",
-         "hint": ""
+         "part": "VISE-LEAD-NUT"
         },
         {
-         "id": "part_bbox_overlap_pairs",
-         "pass": true,
-         "value": 0,
-         "threshold": "<=0",
-         "detail": "零件无压叠",
-         "hint": ""
+         "part": "VISE-THRUST-COLLAR"
         },
         {
-         "id": "labels_per_figure",
-         "pass": false,
-         "value": 22,
-         "threshold": "<=20",
-         "detail": "本图 22 个标记，超过上限 20",
-         "hint": "拆图：按 assembly.json:split_suggestions 把该 figure 拆成多张，或对标准件设 terms[].label=\"none\" 减少标记。"
+         "part": "VISE-HANDLE-BAR"
         },
         {
-         "id": "non_numeral_text_ratio",
-         "pass": true,
-         "value": 0.0,
-         "threshold": "<=0.05",
-         "detail": "无多余文字",
-         "hint": ""
+         "part": "VISE-HANDLE-HUB"
         },
         {
-         "id": "non_continuous",
-         "pass": true,
-         "value": 0,
-         "threshold": "<=0",
-         "detail": "全部实体连续线型",
-         "hint": ""
-        },
-        {
-         "id": "forbidden_text",
-         "pass": true,
-         "value": 0,
-         "threshold": "==0",
-         "detail": "无内部件号 / 图号形状字符串",
-         "hint": ""
+         "part": "VISE-HANDLE-KNOB"
         }
        ],
-       "summary": {
-        "passed": 9,
-        "failed": 4
-       }
-      },
-      "reason": "整机 22 个标记塞进一张图：字高 2.4<3.5 mm、标记 22>20、引线 3 处交叉。建议按结构拆成「固定钳身 / 活动钳身 / 丝杠手柄」三张分解图。",
-      "labels": 22
-     },
-     {
-      "fig_id": "v-screw",
-      "caption": "丝杠手柄机构分解图",
-      "kind": "exploded",
-      "members": [
-       {
-        "group": "v-screw"
-       }
-      ],
-      "members_display": [
-       "丝杠手柄组"
-      ],
-      "status": "pass",
-      "reason": "6 个标记、字高 5.0 mm，13 项 QA 全过",
-      "labels": 6
-     }
-    ],
-    "render": null,
-    "plan": {
-     "schema": "patent-figure-plan/1",
-     "source": {
-      "step": "demo-bench-vise.stp",
-      "include": [
-       "VISE-*"
-      ],
-      "exclude": []
-     },
-     "terms": [
-      {
-       "selector": "VISE-BASE",
-       "term": "钳座"
+       "members_display": [
+        "钳座",
+        "固定钳身",
+        "底座螺栓",
+        "活动钳身",
+        "钳口板",
+        "钳口板螺钉",
+        "丝杠",
+        "丝杠螺母",
+        "止推环",
+        "手柄杆",
+        "手柄座",
+        "手柄球"
+       ],
+       "labels": 10,
+       "standard_parts": [
+        "VISE-BASE-BOLT",
+        "VISE-PLATE-SCREW"
+       ],
+       "placeholder_terms": 0,
+       "ambiguous_members": [],
+       "status": "fail",
+       "reason": "被闸门拦下：整组图形太扁或太长，铺不满纸面（填充 0.308，要求不低于 0.55）",
+       "detail": null,
+       "suggestion": "一张图放不下这些零件（字太小或图形太扁）：改用分组更小的候选，或在 3D 里框选分组；标准件已默认不标号。",
+       "plan_errors": [],
+       "qa": {
+        "pass": false,
+        "failed": [],
+        "error_code": "E_LAYOUT_UNSOLVABLE"
+       },
+       "version": "seed-c1",
+       "preview": null
       },
       {
-       "selector": "VISE-FIXED-JAW",
-       "term": "固定钳身"
+       "id": "c2",
+       "fig_id": "c2",
+       "caption": "整体分解示意图",
+       "kind": "exploded",
+       "source": {
+        "kind": "axis",
+        "id": "axis",
+        "label": "沿主轴（x）整机分解"
+       },
+       "members": [
+        {
+         "part": "VISE-BASE"
+        },
+        {
+         "part": "VISE-FIXED-JAW"
+        },
+        {
+         "part": "VISE-BASE-BOLT"
+        },
+        {
+         "part": "VISE-MOVABLE-JAW"
+        },
+        {
+         "part": "VISE-JAW-PLATE"
+        },
+        {
+         "part": "VISE-PLATE-SCREW"
+        },
+        {
+         "part": "VISE-LEAD-SCREW"
+        },
+        {
+         "part": "VISE-LEAD-NUT"
+        },
+        {
+         "part": "VISE-THRUST-COLLAR"
+        },
+        {
+         "part": "VISE-HANDLE-BAR"
+        },
+        {
+         "part": "VISE-HANDLE-HUB"
+        },
+        {
+         "part": "VISE-HANDLE-KNOB"
+        }
+       ],
+       "members_display": [
+        "钳座",
+        "固定钳身",
+        "底座螺栓",
+        "活动钳身",
+        "钳口板",
+        "钳口板螺钉",
+        "丝杠",
+        "丝杠螺母",
+        "止推环",
+        "手柄杆",
+        "手柄座",
+        "手柄球"
+       ],
+       "labels": 22,
+       "standard_parts": [
+        "VISE-BASE-BOLT",
+        "VISE-PLATE-SCREW"
+       ],
+       "placeholder_terms": 0,
+       "ambiguous_members": [],
+       "status": "fail",
+       "reason": "未过闸：标号字高——标号的字太小，打印出来看不清。",
+       "detail": null,
+       "suggestion": "把螺钉等标准件设为不标号，或按子装配拆成几张分图。",
+       "plan_errors": [],
+       "qa": {
+        "pass": false,
+        "failed": [
+         {
+          "id": "text_height_mm",
+          "title_zh": "标号字高",
+          "hint_plain": "标号的字太小，打印出来看不清。把螺钉等标准件设为不标号，或把这张图拆成几张。",
+          "fix_action": {
+           "kind": "open_terms",
+           "target": {
+            "focus": "standard_parts",
+            "figure": "c2"
+           }
+          }
+         },
+         {
+          "id": "labels_per_figure",
+          "title_zh": "标号数量",
+          "hint_plain": "这张图的标号超过上限。拆成几张图，或把标准件设为不标号。",
+          "fix_action": {
+           "kind": "split_figure",
+           "target": {
+            "figure": "c2"
+           }
+          }
+         },
+         {
+          "id": "leader_crossing",
+          "title_zh": "引线交叉",
+          "hint_plain": "引线互相交叉，读图时容易认错零件。减少标号或把这张图拆开。",
+          "fix_action": {
+           "kind": "split_figure",
+           "target": {
+            "figure": "c2"
+           }
+          }
+         }
+        ],
+        "text_height_mm": 2.4,
+        "labels": 22
+       },
+       "version": "seed-c2",
+       "preview": null
       },
       {
-       "selector": "VISE-MOVABLE-JAW",
-       "term": "活动钳身"
-      },
-      {
-       "selector": "VISE-JAW-PLATE",
-       "term": "钳口板"
-      },
-      {
-       "selector": "VISE-LEAD-SCREW",
-       "term": "丝杠"
-      },
-      {
-       "selector": "VISE-LEAD-NUT",
-       "term": "丝杠螺母"
-      },
-      {
-       "selector": "VISE-HANDLE-BAR",
-       "term": "手柄杆"
-      },
-      {
-       "selector": "VISE-HANDLE-HUB",
-       "term": "手柄座"
-      },
-      {
-       "selector": "VISE-HANDLE-KNOB",
-       "term": "手柄球"
-      },
-      {
-       "selector": "VISE-THRUST-COLLAR",
-       "term": "止推环"
-      },
-      {
-       "selector": "VISE-BASE-BOLT",
-       "term": "底座螺栓"
-      },
-      {
-       "selector": "VISE-PLATE-SCREW",
-       "term": "钳口板螺钉"
+       "id": "c3",
+       "fig_id": "c3",
+       "caption": "丝杠组件分解示意图",
+       "kind": "exploded",
+       "source": {
+        "kind": "subassembly",
+        "id": "sub:VISE/SPINDLE",
+        "label": "子装配 丝杠手柄组"
+       },
+       "members": [
+        {
+         "part": "VISE-LEAD-SCREW"
+        },
+        {
+         "part": "VISE-LEAD-NUT"
+        },
+        {
+         "part": "VISE-THRUST-COLLAR"
+        },
+        {
+         "part": "VISE-HANDLE-BAR"
+        },
+        {
+         "part": "VISE-HANDLE-HUB"
+        },
+        {
+         "part": "VISE-HANDLE-KNOB"
+        }
+       ],
+       "members_display": [
+        "丝杠",
+        "丝杠螺母",
+        "止推环",
+        "手柄杆",
+        "手柄座",
+        "手柄球"
+       ],
+       "labels": 6,
+       "standard_parts": [],
+       "placeholder_terms": 0,
+       "ambiguous_members": [],
+       "status": "pass",
+       "reason": "13 项质量检查全部通过：字高 5.0 mm，6 个标号",
+       "detail": null,
+       "suggestion": null,
+       "plan_errors": [],
+       "qa": {
+        "pass": true,
+        "failed": [],
+        "text_height_mm": 7.0,
+        "labels": 6
+       },
+       "version": "seed-c3",
+       "preview": null
       }
      ],
-     "figures": [],
-     "layout": {
-      "max_labels_per_figure": 20
-     }
+     "summary": {
+      "total": 3,
+      "pass": 1,
+      "fail": 2,
+      "pending": 0
+     },
+     "empty_reason": null,
+     "guide": null,
+     "warnings": []
     },
-    "validate": {
-     "ok": true,
-     "issues": []
-    },
-    "model_url": "dev/fixtures/models/bench-vise.glb"
-   }
+    "error": null,
+    "idempotency_key": null,
+    "committed": true,
+    "created_at": 1791824483.2430809,
+    "updated_at": 1791824483.2430809,
+    "logs": [],
+    "last_event_id": 0
+   },
+   "model_url": "dev/fixtures/models/bench-vise.glb"
   },
   {
    "id": "ball-valve",
    "summary": {
-    "project_id": "ball-valve",
+    "id": "ball-valve",
     "title": "球阀",
     "description": "法兰阀体、开孔球芯、阀座、阀杆填料与手柄",
     "step_name": "demo-ball-valve.stp",
     "example": true,
     "status": "ready",
     "message": "",
-    "plan_etag": "W/\"ball-valve-1\"",
-    "llm": {
-     "provider": "deepseek",
-     "provider_label": "DeepSeek V3.2（API）",
-     "configured": true
+    "created": "2026-10-11 10:00:00",
+    "flowcharts": 0,
+    "structure": {
+     "source": null,
+     "groups": []
     },
     "figures": 0,
     "figures_pass": 0,
-    "flowcharts": 0,
+    "rendered_at": null,
+    "version": null,
     "thumb": null
    },
-   "detail": {
-    "project_id": "ball-valve",
+   "project": {
+    "id": "ball-valve",
     "title": "球阀",
     "description": "法兰阀体、开孔球芯、阀座、阀杆填料与手柄",
     "step_name": "demo-ball-valve.stp",
     "example": true,
     "status": "ready",
     "message": "",
-    "plan_etag": "W/\"ball-valve-1\"",
-    "llm": {
-     "provider": "deepseek",
-     "provider_label": "DeepSeek V3.2（API）",
-     "configured": true
+    "created": "2026-10-11 10:00:00",
+    "flowcharts": 0,
+    "structure": {
+     "source": null,
+     "groups": []
     },
     "figures": 0,
     "figures_pass": 0,
-    "flowcharts": 0,
+    "rendered_at": null,
+    "version": null,
     "thumb": null,
+    "plan_etag": "ball-valve-1",
+    "candidates": {
+     "job_id": "seed-suggest-ball-valve",
+     "state": "succeeded",
+     "summary": {
+      "total": 1,
+      "pass": 0,
+      "fail": 1,
+      "pending": 0
+     },
+     "empty_reason": "没有候选通过闸门：这台装配体的子装配层级不够清晰，程序给不出能过闸的分组——需要你在 3D 里框选分组。",
+     "url": "/v1/projects/ball-valve/plan/candidates"
+    }
+   },
+   "plan": {
+    "schema": "patent-figure-plan/1",
+    "source": {
+     "step": "demo-ball-valve.stp",
+     "include": [
+      "BV-*"
+     ],
+     "exclude": []
+    },
+    "terms": [
+     {
+      "selector": "VALVE-BALL",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-BODY",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-FLANGE-BOLT",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-GLAND-NUT",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-HANDLE",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-HANDLE-NUT",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-PACKING-RING",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-SEAT",
+      "term": ""
+     },
+     {
+      "selector": "VALVE-STEM",
+      "term": ""
+     }
+    ],
+    "figures": [],
+    "layout": {
+     "max_labels_per_figure": 20
+    }
+   },
+   "plan_etag": "ball-valve-1",
+   "state": {
+    "step": "demo-ball-valve.stp",
+    "workdir": "",
     "assembly": {
      "schema": "patent-assembly/1",
      "source": {
@@ -2474,39 +3195,6 @@
      "split_suggestions": [],
      "warnings": []
     },
-    "structure": {
-     "source": "fallback",
-     "provider": "",
-     "created": "",
-     "groups": [
-      {
-       "id": "bv-body",
-       "name": "子装配 1",
-       "role": "",
-       "parts": [
-        "VALVE-BALL",
-        "VALVE-BODY",
-        "VALVE-FLANGE-BOLT",
-        "VALVE-GLAND-NUT",
-        "VALVE-HANDLE"
-       ]
-      },
-      {
-       "id": "bv-trim",
-       "name": "子装配 2",
-       "role": "",
-       "parts": [
-        "VALVE-HANDLE-NUT",
-        "VALVE-PACKING-RING",
-        "VALVE-SEAT",
-        "VALVE-STEM"
-       ]
-      }
-     ],
-     "names": {}
-    },
-    "candidates": [],
-    "render": null,
     "plan": {
      "schema": "patent-figure-plan/1",
      "source": {
@@ -2563,9 +3251,185 @@
      "ok": true,
      "issues": []
     },
-    "model_url": "dev/fixtures/models/ball-valve.glb"
-   }
+    "render": null,
+    "version": null,
+    "render_job": {
+     "id": null,
+     "state": null,
+     "stage": null,
+     "running": false,
+     "ok": null,
+     "error": null,
+     "result": null,
+     "diag": null
+    },
+    "rendering": false,
+    "home_url": "./home.html",
+    "flowcharts": [],
+    "llm": {
+     "provider": "deepseek",
+     "provider_label": "DeepSeek V3.2（API）",
+     "configured": true,
+     "dwg_available": true
+    },
+    "structure": {
+     "source": "fallback",
+     "provider": "",
+     "created": "",
+     "groups": [
+      {
+       "id": "bv-body",
+       "name": "子装配 1",
+       "role": "",
+       "parts": [
+        "VALVE-BALL",
+        "VALVE-BODY",
+        "VALVE-FLANGE-BOLT",
+        "VALVE-GLAND-NUT",
+        "VALVE-HANDLE"
+       ]
+      },
+      {
+       "id": "bv-trim",
+       "name": "子装配 2",
+       "role": "",
+       "parts": [
+        "VALVE-HANDLE-NUT",
+        "VALVE-PACKING-RING",
+        "VALVE-SEAT",
+        "VALVE-STEM"
+       ]
+      }
+     ],
+     "names": {}
+    },
+    "structure_job": {
+     "running": false,
+     "started": null,
+     "error": null,
+     "finished": null
+    }
+   },
+   "candidates": {
+    "id": "seed-suggest-ball-valve",
+    "kind": "suggest",
+    "project_id": "ball-valve",
+    "state": "succeeded",
+    "stage": "succeeded",
+    "progress": 1.0,
+    "inputs": {
+     "plan_etag": "ball-valve-1"
+    },
+    "result": {
+     "schema": "patent-figure-candidates/1",
+     "project_id": "ball-valve",
+     "job_id": "seed-suggest-ball-valve",
+     "plan_etag": "ball-valve-1",
+     "assembly_sha256": "mock-ball-valve",
+     "standard_part_rule": {
+      "pattern": "SCREW|BOLT|NUT|WASHER|PIN|BEARING|螺钉|螺栓|螺母|垫圈|销|轴承",
+      "except": "(?:LEAD|BALL)[-_ ]?(?:SCREW|NUT)|丝杠|丝母",
+      "whole_word_latin": true
+     },
+     "label_standard_parts": false,
+     "standard_parts": [],
+     "instances_exact": true,
+     "candidates": [
+      {
+       "id": "c1",
+       "fig_id": "c1",
+       "caption": "整体结构示意图",
+       "kind": "assembly",
+       "source": {
+        "kind": "whole",
+        "id": "whole",
+        "label": "整机装配图（兜底候选）"
+       },
+       "members": [
+        {
+         "part": "VALVE-BALL"
+        },
+        {
+         "part": "VALVE-BODY"
+        },
+        {
+         "part": "VALVE-FLANGE-BOLT"
+        },
+        {
+         "part": "VALVE-GLAND-NUT"
+        },
+        {
+         "part": "VALVE-HANDLE"
+        },
+        {
+         "part": "VALVE-HANDLE-NUT"
+        },
+        {
+         "part": "VALVE-PACKING-RING"
+        },
+        {
+         "part": "VALVE-SEAT"
+        },
+        {
+         "part": "VALVE-STEM"
+        }
+       ],
+       "members_display": [
+        "VALVE-BALL",
+        "VALVE-BODY",
+        "VALVE-FLANGE-BOLT",
+        "VALVE-GLAND-NUT",
+        "VALVE-HANDLE",
+        "VALVE-HANDLE-NUT",
+        "VALVE-PACKING-RING",
+        "VALVE-SEAT",
+        "VALVE-STEM"
+       ],
+       "labels": 9,
+       "standard_parts": [],
+       "placeholder_terms": 0,
+       "ambiguous_members": [],
+       "status": "fail",
+       "reason": "被闸门拦下：标号太多，找不到互不交叉、不压线的位置",
+       "detail": null,
+       "suggestion": "标号太多、无处可放：改用分组更小的候选，或框选分组。",
+       "plan_errors": [],
+       "qa": {
+        "pass": false,
+        "failed": [],
+        "error_code": "E_LABELS_UNPLACEABLE"
+       },
+       "version": "seed-c1",
+       "preview": null
+      }
+     ],
+     "summary": {
+      "total": 1,
+      "pass": 0,
+      "fail": 1,
+      "pending": 0
+     },
+     "empty_reason": "没有候选通过闸门：这台装配体的子装配层级不够清晰，程序给不出能过闸的分组——需要你在 3D 里框选分组。",
+     "guide": {
+      "action": "box_select",
+      "title": "请框选分组",
+      "steps": [
+       "在 3D 视口按 B 进入框选，或在左侧结构树里点组名选中整组",
+       "框住要放进同一张图的零件（左→右窗选 / 右→左交叉选）",
+       "到「图纸」页点「＋新建图」，或在图卡上点「加入所选」，然后出图"
+      ]
+     },
+     "warnings": []
+    },
+    "error": null,
+    "idempotency_key": null,
+    "committed": true,
+    "created_at": 1791824483.2431722,
+    "updated_at": 1791824483.2431722,
+    "logs": [],
+    "last_event_id": 0
+   },
+   "model_url": "dev/fixtures/models/ball-valve.glb"
   }
- ],
- "note": "预计算展示，只读。"
+ ]
 }

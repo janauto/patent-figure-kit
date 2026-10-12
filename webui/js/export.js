@@ -10,6 +10,8 @@ import { esc } from './esc.js';
 
 let host; let variant = 'both'; const picked = new Set(['pdf', 'docx', 'dxf']);
 let dwgOk = true; let packing = false; let result = null;
+let preset = 'standard';             // 版心预设（standard 170×257 / conservative 165×245）
+let expCaps = null;                  // 能力接口 export 段：dwg_available / pdf_check_available / note / sheet_presets / dpi
 const params = new URLSearchParams(location.search);
 
 // ---- 打包结果的版本绑定（Codex R3e #3）----
@@ -37,11 +39,13 @@ bus.on('render-stale', invalidate);
 bus.on('rendered', invalidate);
 
 const FORMATS = [
-  { k: 'pdf', name: '递交版 PDF', what: '每图一页 PDF，按形式要求排版的说明书附图文档（最终以受理为准）', tag: '递交' },
-  { k: 'docx', name: '交底版 Word', what: '附图 + 件号名称表 + 附图说明，交代理所', tag: '交底' },
+  { k: 'pdf', name: 'PDF', what: '每图一页 A4，按形式要求排版；写出后逐页核验页幅、页边、字高与图号（最终以受理为准）', tag: '主交付' },
+  { k: 'docx', name: 'Word', what: '每图一页 A4 的说明书附图文档，结构核验；实际排版以 Word 打开为准', tag: '主交付' },
   { k: 'dxf', name: 'DXF', what: '矢量源文件，供在 CAD 里再编辑', tag: '源文件' },
   { k: 'dwg', name: 'DWG', what: 'AutoCAD 源文件，供在 CAD 里再编辑', tag: '源文件' },
 ];
+// 保守版心提示（WP2 报告 §6.2）：165×245 对外廓高于 245 mm 的图必须缩小，字高可能被如实判不达标
+const CONSERVATIVE_HINT = '保守版心可能使个别图字高不达标（缩小后低于 3.5 mm 会被如实判为不通过），届时请改用标准版心或拆图。';
 
 function gatePassed() {
   if (api.isLegacy) return false;           // 兼容模式：导出恒锁定，不凭任何本地记录解锁
@@ -112,12 +116,15 @@ function render() {
           const noDwg = f.k === 'dwg' && !dwgOk;
           const disabled = noDwg;
           const on = picked.has(f.k) && !disabled;
-          const why = noDwg ? '本机未检出 DWG 转换器（ODA / LibreDWG），不可用' : '';
+          const reasons = expCaps?.unavailable_reasons || {};
+          const why = noDwg ? (reasons.dwg || '本机未检出 DWG 转换器（AutoCAD Core Console 或 LibreDWG），不可用')
+            : (f.k === 'pdf' && expCaps && expCaps.pdf_check_available === false
+              ? `可以生成，但会标「未核验」：${reasons.pdf || '缺少 pypdfium2，无法核验 PDF 可见性'}` : '');
           return `<label class="fmt-card ${on ? 'on' : ''} ${disabled ? 'disabled' : ''}">
             <input type="checkbox" data-fmt="${f.k}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
             <div class="fmt-head"><b>${esc(f.name)}</b><span class="fmt-tag ${f.tag === '源文件' ? 'src' : ''}">${esc(f.tag)}</span></div>
             <p class="fmt-what">${esc(f.what)}</p>
-            ${why ? `<p class="fmt-why">${esc(why)}</p>` : ''}
+            ${why ? `<p class="fmt-why" data-why="${f.k}">${esc(why)}</p>` : ''}
           </label>`;
         }).join('')}</div>
         <div class="reco">
@@ -125,6 +132,14 @@ function render() {
           <b>递交版 PDF + 交底版 Word</b>
           <span class="muted">递交版只放图号，按形式要求排版，供代理所用于递交稿（最终以受理为准）；交底版带件号表，给代理所核对。DXF/DWG 是给要再编辑的人的源文件，不用于递交。</span>
         </div>
+      </section>
+
+      <section class="exp-sec">
+        <h3>③ 版心</h3>
+        <div class="seg">${Object.entries(presetOptions()).map(([k, v]) =>
+          `<button class="seg-btn ${preset === k ? 'on' : ''}" data-preset="${esc(k)}">${esc(v.label || k)}</button>`).join('')}</div>
+        ${preset === 'conservative' ? `<p class="exp-warn" id="preset-hint" role="note">${esc(CONSERVATIVE_HINT)}</p>` : ''}
+        ${expCaps?.note ? `<p class="hint exp-cnipa" id="cnipa-note">${esc(expCaps.note)}</p>` : ''}
       </section>
 
       <section class="exp-sec">
@@ -137,6 +152,7 @@ function render() {
     </div>`;
 
   host.querySelectorAll('[data-v]').forEach((b) => b.addEventListener('click', () => { variant = b.dataset.v; render(); }));
+  host.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => { preset = b.dataset.preset; render(); }));
   host.querySelectorAll('[data-fmt]').forEach((c) => c.addEventListener('change', () => {
     if (c.checked) picked.add(c.dataset.fmt); else picked.delete(c.dataset.fmt); render();
   }));
@@ -166,10 +182,13 @@ function renderLegacyLocked() {
     </div></div>`;
 }
 
-// 导出作业（WP1：GET /v1/exports/{id} 返回 Job，清单在 result 内）→ 视图：
-//   manifest 键「图号/版本/格式」→ 逐图矩阵；按格式汇总 ok / partial / skip / fail；notes 为失败明细。
-const FMT_LABEL = { pdf: '递交版 PDF', docx: '交底版 Word', dxf: 'DXF 源文件', dwg: 'DWG 源文件', png: 'PNG 图片' };
-const SKIP_WHY = { pdf: 'PDF 主交付由新版后端（WP2）提供', docx: 'Word 只出交底版', dwg: '未检出 DWG 转换器（ODA / LibreDWG）', png: '该版本不出 PNG' };
+// 导出作业（GET /v1/exports/{id} 返回 Job，清单在 result 内，openapi ExportResult）→ 视图（WP3b #8）：
+//   items[]{variant, format, status, reason, figures, file, role}：逐「版本 × 格式」一行，四态 ok / skip / fail / unverified；
+//   documents{文件名: DocumentCheck}：对写出的 PDF / Word 文件本身逐页核验的结果（不通过 / 未核验的在 _未通过核验/ 下）；
+//   manifest 键「图号/版本/格式」→ 逐图矩阵；ok=false 时不报「完成」。
+const FMT_LABEL = { pdf: 'PDF', docx: 'Word', dxf: 'DXF 源文件', dwg: 'DWG 源文件', png: 'PNG 图片', svg: 'SVG' };
+const ST_LABEL = { ok: '通过', skip: '跳过', fail: '未通过', unverified: '未核验', partial: '部分' };
+const MARK = { ok: '✓', skip: '—', fail: '✕', pending: '…', partial: '◐', unverified: '?' };
 function exportView(job) {
   const r = job?.result || {};
   const rows = Object.entries(r.manifest || {}).map(([key, st]) => {
@@ -177,39 +196,60 @@ function exportView(job) {
     return { key, fig, ver, fmt, st };
   });
   const fmts = [...new Set(rows.map((x) => x.fmt))];
-  const summary = fmts.map((fmt) => {
-    const sts = rows.filter((x) => x.fmt === fmt).map((x) => x.st);
-    const status = sts.includes('fail') ? 'fail' : (sts.includes('ok') ? (sts.every((x) => x === 'ok') ? 'ok' : 'partial') : 'skip');
-    const notes = (r.notes || []).filter((n) => n.includes(`/${fmt}`) || n.toLowerCase().startsWith(fmt));
-    return { fmt, status, label: FMT_LABEL[fmt] || fmt,
-      reason: status === 'fail' ? (notes[0] || '生成失败') : (status === 'skip' ? (notes[0] || SKIP_WHY[fmt] || '已跳过')
-        : (status === 'partial' ? (SKIP_WHY[fmt] ? `部分生成：${SKIP_WHY[fmt]}` : '部分生成') : '')) };
-  });
   const groups = [...new Set(rows.map((x) => `${x.fig}/${x.ver}`))];
+  const fmtOrder = ['pdf', 'docx', 'dxf', 'dwg', 'png', 'svg'];
+  const items = (r.items || []).map((it) => ({ ...it, quarantined: /_未通过核验\//.test(it.file || '') }))
+    .sort((a, b) => String(b.variant).localeCompare(String(a.variant), 'zh') || fmtOrder.indexOf(a.format) - fmtOrder.indexOf(b.format));
+  const docs = Object.entries(r.documents || {}).map(([name, d]) => {
+    const pcs = d.page_checks || [];
+    const mins = pcs.map((pc) => pc.min_text_mm).filter((x) => typeof x === 'number');
+    return { name, ...d, status: d.status || (d.ok ? 'ok' : 'fail'), minText: mins.length ? Math.min(...mins) : null,
+      quarantined: /_未通过核验\//.test(d.path || '') };
+  });
+  const bad = items.filter((it) => it.status === 'fail' || it.status === 'unverified');
   return { exportId: r.export_id || job?.id || '', renderJobId: r.render_job_id || '', downloadUrl: r.download_url || '',
-    rows, fmts, groups, summary, notes: r.notes || [] };
+    ok: r.ok !== false && !bad.length, rows, fmts, groups, items, docs, bad, notes: r.notes || [], note: r.note || '',
+    reasons: r.reasons || {}, spec: r.spec || {} };
 }
-const MARK = { ok: '✓', skip: '—', fail: '✕', pending: '…', partial: '◐' };
 // 后端给的下载地址可能是绝对地址（基于 public-url），也可能是相对的
 const hrefOf = (u) => (/^https?:\/\//i.test(u || '') ? u : api.previewUrl(u || '#'));
 
 function renderDone() {
   const v = exportView(result);
   const cell = (fig, ver, fmt) => v.rows.find((x) => x.fig === fig && x.ver === ver && x.fmt === fmt)?.st || '';
+  const head = v.ok
+    ? `<p class="ok-line"><span class="stamp-pass big">完成</span>附图包已打包并逐页核验通过${v.renderJobId
+      ? `（出图版本 <span class="mono">${esc(v.renderJobId)}</span>）` : ''}。</p>`
+    : `<div class="exp-bad" role="alert"><p class="bad-line"><span class="stamp-fail big">未全部通过</span>
+        <span>附图包已打包，但有 <b>${v.bad.length}</b> 项未通过核验或未核验——这些文件放在包内的
+        <span class="mono">_未通过核验/</span>，不要直接递交。</span></p>
+      <ul>${v.bad.map((it) => `<li><b>${esc(it.variant)} ${esc(FMT_LABEL[it.format] || it.format)}</b>：${esc(ST_LABEL[it.status] || it.status)}
+        ${it.reason ? `——${esc(it.reason)}` : ''}</li>`).join('')}</ul></div>`;
   host.innerHTML = `<div class="exp-done">
-    <p class="ok-line"><span class="stamp-pass big">完成</span>附图包已打包好${v.renderJobId
-      ? `（出图版本 <span class="mono">${esc(v.renderJobId)}</span>）` : ''}。</p>
-    <div class="fmt-result">${v.summary.map((it) => `<div class="fr-row ${it.status}">
-      <span class="fr-mark">${MARK[it.status] || '?'}</span>
-      <b>${esc(it.label)}</b>
-      <span class="muted">${it.status === 'ok' ? '已生成' : esc(it.reason)}</span>
-    </div>`).join('')}</div>
-    ${v.groups.length ? `<table class="exp-matrix">
+    ${head}
+    ${v.items.length ? `<table class="exp-items">
+      <thead><tr><th>版本</th><th>格式</th><th>结果</th><th>说明</th><th>文件</th></tr></thead>
+      <tbody>${v.items.map((it) => `<tr class="${esc(it.status)}" data-item="${esc(`${it.variant}/${it.format}`)}">
+        <td>${esc(it.variant)}</td><td>${esc(FMT_LABEL[it.format] || it.format)}${it.role ? `<span class="hint"> · ${esc(it.role)}</span>` : ''}</td>
+        <td><span class="st st-${esc(it.status)}">${MARK[it.status] || '?'} ${esc(ST_LABEL[it.status] || it.status)}</span></td>
+        <td>${esc(it.reason || (it.status === 'ok' ? `${it.figures ?? ''} 张图` : ''))}</td>
+        <td class="mono">${esc(it.file || '—')}</td></tr>`).join('')}</tbody></table>` : ''}
+    ${v.docs.length ? `<section class="exp-docs"><h3>逐页核验报告（对写出的文件本身）</h3>
+      ${v.docs.map((d) => `<div class="doc-row ${esc(d.status)}" data-doc="${esc(d.name)}">
+        <b class="mono">${esc(d.name)}</b>
+        <span class="st st-${esc(d.status)}">${MARK[d.status] || '?'} ${esc(ST_LABEL[d.status] || d.status)}</span>
+        <span class="muted">${d.pages ?? '?'}/${d.expected_pages ?? '?'} 页${d.minText != null ? ` · 最小字高 ${d.minText.toFixed(2)} mm` : ''}
+          ${d.render_check ? ` · 独立渲染：${esc(d.render_check === 'unavailable' ? '不可用' : d.render_check)}` : ''}</span>
+        ${(d.errors || []).length ? `<ul class="doc-errs">${d.errors.slice(0, 6).map((e) => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
+        ${d.layout_note ? `<p class="hint">${esc(d.layout_note)}</p>` : ''}
+      </div>`).join('')}</section>` : ''}
+    ${v.groups.length ? `<details class="exp-matrix-wrap" open><summary>逐图明细</summary><table class="exp-matrix">
       <thead><tr><th>图 / 版本</th>${v.fmts.map((f) => `<th>${esc(FMT_LABEL[f] || f)}</th>`).join('')}</tr></thead>
       <tbody>${v.groups.map((g) => { const [fig, ver] = g.split('/'); return `<tr><th class="mono">${esc(fig)} · ${esc(ver)}</th>${
-        v.fmts.map((f) => { const st = cell(fig, ver, f); return `<td class="${esc(st)}" title="${esc(`${fig}/${ver}/${f}：${st || '无'}`)}">${MARK[st] || ''}</td>`; }).join('')}</tr>`; }).join('')}</tbody>
-    </table>` : ''}
+        v.fmts.map((f) => { const st = cell(fig, ver, f); return `<td class="${esc(st)}" title="${esc(`${fig}/${ver}/${f}：${ST_LABEL[st] || st || '无'}${v.reasons[`${fig}/${ver}/${f}`] ? `（${v.reasons[`${fig}/${ver}/${f}`]}）` : ''}`)}">${MARK[st] || ''}</td>`; }).join('')}</tr>`; }).join('')}</tbody>
+    </table></details>` : ''}
     ${v.notes.length ? `<ul class="exp-notes">${v.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+    ${v.note ? `<p class="hint exp-cnipa">${esc(v.note)}</p>` : ''}
     <div class="exp-zip">
       <div><b class="mono">附图包 · ${esc(v.exportId)}</b></div>
       <div class="exp-zip-acts">
@@ -218,7 +258,7 @@ function renderDone() {
         <button class="btn ghost sm" id="pack-again">重新打包</button>
       </div>
     </div>
-    <p class="hint">M1 暂无说明书件号对表功能，请人工核对件号。下载链接仅本机可达，不要贴到公开的地方。</p>
+    <p class="hint">M1 暂无说明书件号对表功能，请人工核对件号（包内附《核对清单.txt》）。下载链接仅本机可达，不要贴到公开的地方。</p>
   </div>`;
   host.querySelector('#pack-again')?.addEventListener('click', () => { result = null; render(); });
   // 下载 / 复制链接前再核对一次：页面停留期间若计划或渲染结果变了，旧包不得被取走
@@ -259,16 +299,19 @@ async function doPack() {
   try {
     // render_job_id = 页面上这份结果的版本 ID；plan_etag = 前端认为的当前计划版本。后端把后者与该渲染的
     // 冻结输入比对（而不是与服务端当前计划比），不符 409——所以这里发的是当前计划 ETag，不是结果自带的那个。
-    const res = await api.export(state.projectId, { variant, formats, dpi: 300,
-      render_job_id: state.renderInputs.version, plan_etag: state.planEtag });
+    const res = await api.export(state.projectId, { variant, formats, dpi: expCaps?.dpi?.default || 300,
+      sheet_preset: preset, render_job_id: state.renderInputs.version, plan_etag: state.planEtag });
     if (!mine() || !ticketValid(ticket)) { late(); return; }
-    api.jobEvents(res.job_id, {
+    let settled = false;                     // 同一作业只采纳一次终态（SSE 终态与断线校准可能先后到达）
+    const sub = api.jobEvents(res.job_id, {
       stage(d) {
         if (!mine()) return;
         const fill = host.querySelector('#pack-fill'); const log = host.querySelector('#pack-log');
-        if (fill) fill.style.width = `${(d.progress || 0) * 100}%`; if (log && d.label) log.textContent = d.label + '…';
+        if (fill) fill.style.width = `${(d.progress || 0) * 100}%`;
+        if (log && d.label && d.label !== 'running') log.textContent = d.label + '…';
       },
       async done() {
+        if (settled) return; settled = true;
         if (!mine() || !ticketValid(ticket)) { late(); return; }
         let exportJob;
         try { exportJob = await api.getExport(res.export_id); } catch (err) {
@@ -280,9 +323,18 @@ async function doPack() {
           end(); toast('打包失败：' + (exportJob.error?.message || exportJob.state), 'bad'); render(); return;
         }
         result = { ...exportJob, ticket }; end(); render();
-        toast('打包完成', 'ok');
+        if (exportView(result).ok) toast('打包完成，逐页核验全部通过', 'ok');
+        else toast('已打包，但有项目未通过核验或未核验——见清单', 'bad', 5000);
       },
-      fail(d) { if (!mine()) return; end(); toast('打包失败：' + d.message, 'bad'); render(); },
+      fail(d) { if (settled) return; settled = true; if (!mine()) return; end(); toast('打包失败：' + (d.message || '') + (d.hint ? `（${d.hint}）` : ''), 'bad'); render(); },
+      disconnect() {                       // 断线：GET 导出作业校准终态
+        api.getExport(res.export_id).then((j) => {
+          if (!mine()) return;
+          if (j.state === 'succeeded' || ['failed', 'cancelled', 'interrupted'].includes(j.state)) sub?.close?.();
+          if (j.state === 'succeeded') this.done();
+          else if (['failed', 'cancelled', 'interrupted'].includes(j.state)) this.fail(j.error || { message: j.state });
+        }).catch(() => { /* 继续等重连 */ });
+      },
     });
   } catch (err) {
     if (!mine()) return;
@@ -297,8 +349,14 @@ async function doPack() {
   }
 }
 
+function presetOptions() {
+  return expCaps?.sheet_presets || { standard: { label: '标准版心 170×257 mm' }, conservative: { label: '保守版心 165×245 mm' } };
+}
+
 export async function mountExport(el) {
   host = el;
   try { const llm = await api.llmStatus(); dwgOk = llm.dwg_available !== false; } catch { /* 默认可用 */ }
+  expCaps = api.caps?.export || null;
+  if (expCaps?.default_preset && !host._presetInit) { preset = expCaps.default_preset; host._presetInit = true; }
   render();
 }

@@ -1,46 +1,45 @@
-# 墨线 Web 工作台 · 前端开发（WP3）
+# 墨线 Web 工作台 · 前端开发（WP3 / WP3b 接线）
 
-本目录是 **WP3 界面重做**的前端开发脚手架：一个纯标准库的 mock 服务器、三个公开示例的真实
-资产、静态只读 manifest，以及截图 / 性能自测脚本。**后端（WP1/WP2）尚未接线，前端对 mock 开发。**
+本目录是前端的开发脚手架：一个纯标准库的 mock 服务器（按 `docs/openapi.yaml` 对齐真实后端的响应形状）、
+三个公开示例的真实资产、静态只读 manifest（后端响应快照），以及回归 / 端到端 / 截图脚本。
+**WP3b 起前端已接到真实后端（`scripts/workbench.py`）**：真实后端上的金路径由 `e2e_live.py` 证明。
 
-> 文件归属（架构 §7.3）：WP3 只拥有 `webui/`。`scripts/ tests/ acceptance/ docs/ README.md`
-> 一律不动。与后端接线由 WP2 之后的工作包做。
+> 文件归属（架构 §7.3）：前端只拥有 `webui/`。WP3b 没有改 `scripts/`（后端的挂载与路由形态无需调整）。
 
-## 一、起 mock 并打开
+## 一、三种运行形态
 
-```bash
-# 正常实例（AI 已接入、DWG 可用）
-python3 webui/dev/mock_server.py --port 8803
-# 失败场景实例（AI 未接入、DWG 转换器不可用）
-python3 webui/dev/mock_server.py --port 8804 --no-ai --no-dwg
-```
+| 形态 | 怎么起 | 前端判定 |
+| --- | --- | --- |
+| 真实后端 | `python3 scripts/workbench.py --data ~/.patent-workbench-wp3b serve --no-browser --port 8806`，浏览器开终端打印的 `/?token=…` 地址一次 | `GET /v1/capabilities` 200 → **live** |
+| mock（新版） | `python3 webui/dev/mock_server.py --port 8803` → `http://127.0.0.1:8803/home.html` | 同上 → live（`/p/{id}/` 是新版子应用；开发入口 `index.html?project=` 也可） |
+| mock（旧版工作台） | `python3 webui/dev/mock_server.py --port 8805 --old-backend` | `/v1/capabilities` **404** → legacy 兼容模式 |
+| 静态演示站 | `python3 webui/dev/build_static.py && (cd webui/dev/static-site && python3 -m http.server 8808)` | 注入的 meta / `?static` → static（只读） |
 
-浏览器打开：
+失败场景：`--no-ai`（AI 未配置）、`--no-dwg`（DWG 转换器不可用）、`--no-pdf-check`（缺 pypdfium2 → PDF 未核验）。
 
-- 首页 / 工程列表：`http://127.0.0.1:8803/home.html`
-- 规划台：`http://127.0.0.1:8803/index.html?project=gearbox`
-- 静态只读站（读 `manifest.json`，模拟 GitHub Pages）：`http://127.0.0.1:8803/home.html?static`
-- 旧版后端兼容模式（见下方「legacy 的定位」）：`http://127.0.0.1:8803/p/gearbox/?stage=qa`——mock 的 `/p/{id}/`
-  子应用（同步 `/api/*`、无 ETag；`api/render/status` 按 openapi `RenderStatus` 给 `result/version/job`），
-  页面走 `api.js` 的真实 legacy 分支（`verify_ui.py` 的兼容模式用例即对它跑）。
+### 模式与鉴权（WP3b #1 / #10）
+
+- **按能力判定，不按路径**：首页与 `/p/{pid}/` 都先探测工作台根的 `GET /v1/capabilities`：200 → live；401 → live
+  （新版后端但没会话：首页 / 规划台显示「需要 token，从终端完整地址进入」）；只有 404 → legacy。
+- **live 只用会话 Cookie**（`wb_token`，HttpOnly）：不发 token 头、不存 sessionStorage、链接不带 token。地址栏带
+  `?token=` 时先用它探测一次——服务端优先认有效 Cookie，只靠 query 通过时回 `Deprecation` 头，前端据此提示「已弃用」并请求
+  `/?token=` 下发 Cookie，随后抹掉地址栏 token。legacy 维持旧行为（旧子应用不认 Cookie）。
+- 两个根：`/v1/*`、`/files/*`、`/api/wb/*` 在工作台根；`api/state`、`api/render/status`、`api/preview/*`、`api/model.glb`、
+  `api/structure*`、`api/flowcharts*` 在子应用 `/p/{pid}/`。live 无论页面在哪都按工程 ID 拼子应用前缀。
 
 ### legacy 的定位：开发兼容模式，不随产品发布（修复轮 7 架构裁决）
 
-- `api.js` 的 `legacy` 分支（页面在 `/p/{id}/`、走旧同步 `/api/*`）只为**开发期**在旧后端上看新界面，
-  **不随产品发布**。真正要发布的是 `live` 路径（WP1 的 `/v1/*` 契约）。
-- 兼容模式保留：浏览工程与 3D、出图、编辑术语与分图、预览与查看 QA。
-- 兼容模式**导出一律锁定**：旧接口出图不冻结输入、结果没有版本 ID、打包读共享输出目录——跨页面竞态
-  只能由后端关闭（Codex R3g），前端回读无法证明打包内容对应哪一版计划。导出屏只给原因与「升级到新版后端」指引，
-  不凭任何本地摘要 / 结果身份解锁；顶栏显示中性提示「旧版后端兼容模式：导出需升级后端」。
-- 接线（WP1 合并后）：WP1 的工作台同样在 `/p/{id}/` 挂子应用，届时需按后端能力（如 `api/state` 带
-  `version` / `render_job`、根路径有 `/v1`）把这类页面切到 `live`，不能继续按路径判成兼容模式。
+- `api.js` 的 `legacy` 分支只为**开发期**在旧后端上看新界面，**不随产品发布**；导出一律锁定（旧接口出图不冻结输入、
+  结果无版本 ID）。新版后端一律判 live。
 
-三个示例工程：`gearbox`（行星齿轮减速器，全套真实资产）、`bench-vise`（台虎钳，整机候选被闸门拦下的教学样例）、`ball-valve`（球阀，候选为空 → 提示手动框选）。
+三个 mock 示例工程：`gearbox`（候选全过）、`bench-vise`（整机候选被拦 + QA 未过的候选，带修复直达）、
+`ball-valve`（候选全被拦 → 「请框选分组」）。
 
 ## 二、五屏四态怎么触发
 
-界面是数据驱动的；为了四态截图确定（不依赖 SSE 时序），加了只读的 `?scene=` / `?upload=` /
-`?state=` 开关（仅开发用）。
+**真实后端上的五屏四态**由 `capture_live.py` 拍到 `docs/assets/screens/`（每张都是真实接口返回的真实状态，见同目录
+`screens.json` 的说明）。下表是 **mock 上的**开发开关：为了截图确定（不依赖 SSE 时序），加了只读的 `?scene=`（只有 mock 认）/
+`?upload=` / `?state=` 开关（仅开发用）。
 
 | 屏 | 空 | 加载 | 成功 | 失败 |
 |---|---|---|---|---|
@@ -60,41 +59,41 @@ python3 webui/dev/mock_server.py --port 8804 --no-ai --no-dwg
   3D / 预览恒白）。产品名与署名只走 `webui/js/brand.js` 的 `DISPLAY_NAME="墨线"`、`BRAND="品胜 AI Lab"`。
 - 界面任何地方不出现「千问办公」：接入入口写「MCP / API」，对话框措辞为「MCP 客户端（如 Claude Code、Codex）」。
 - 数据契约不变：预览 SVG 的 `text[data-numeral]` 点击联动、GLB 节点名→零件名映射、`name#index` 实例标识。
-- `api.js` 是适配器：`live`（§6 `/v1/*`）与 `static`（读 `manifest.json`）；无 token 不 fatal。
+- `api.js` 是适配器：`live`（openapi 的 `/v1/*` + 子应用）、`legacy`（旧后端，开发兼容）与 `static`（读 `manifest.json`，
+  manifest 是后端响应快照，与 live 共用归一化函数）。
 - 首页零 three.js；规划台进入时动态 `import('./viewer.js')`。`viewer.js` 按需渲染
   （`requestRender`）、拾取 rAF 合帧、拖转 pixelRatio 降 1。
 
-## 四、接线阶段清单（WP1 合并后，由接线工作包验收）
+## 四、接线（WP3b 已完成，逐项对真实后端验收）
 
-前端对 mock 已按 WP1 契约实现（逐条见 `CONTRACT_NOTES.md`「已对齐」）；下面这些**只能对着真实 WP1 后端验收**，
-不在 WP3 范围内关闭：
-
-1. **按后端能力判定 live，不按路径**。WP1 的工作台同样在 `/p/{pid}/` 挂子应用；现在 `api.js` 把 `/p/{pid}/`
-   一律判成兼容模式（legacy）。接线时改为能力探测（例如 `api/state` 带 `version / render_job`、根路径有
-   `/v1/*`）→ live；只有真的旧后端才进兼容模式（导出恒锁定）。
-2. **数据来源**：已发布结果、版本与本次作业从 `/p/{pid}/api/state`（`render + version + render_job`）取；
-   渲染状态从 `/p/{pid}/api/render/status`（`RenderStatus`：`result` = 已发布、`job` = 本次）取——
-   `api.getRenderStatus()` 已按此归一，只需换数据源。WP1 的 `GET /v1/projects/{id}` 只是摘要。
-   作业、导出、plan 的读写走根路径 `/v1/*`（`api.js` 的 `base` 需区分子应用前缀与根路径）。
-3. **SSE 帧**：按 WP1 的 `data = {stage, progress, data}` 解包（见 `CONTRACT_NOTES.md` 待联调 #3），确认
-   `Last-Event-ID` 重放、终态事件（`done` / `error`）与刷新恢复（`resumeRender()`）在真实后端上成立；SSE 不与 GZip 同用。
-4. **Cookie 鉴权**：会话 Cookie 下 SSE（`EventSource` 不能带自定义头）、预览 SVG（`?v=<rid>`）、导出下载、
-   REST 与 MCP 六条路径都要通过；首页地址栏 token 的清理（`tidyToken`）在子应用认 Cookie 后生效，
-   届时首页那条 Cookie 能力探测的 401 应消失。无 / 失效 token 返回 401 时，`home.js` 的错误态应改为
-   「需要 token，从终端启动日志里的完整地址进入」的引导，而不是「连接失败」。
-5. **失败 / 取消 / 断线恢复**：渲染失败（`E_RENDER_NOT_OK` / `E_PLAN_INVALID`）显示本次作业诊断、预览与导出
-   仍属上一成功版本；取消（`DELETE /v1/jobs/{id}` 后的 `error` 终态）；断线后 `GET /v1/jobs/{id}` 校准；
-   后端重启后作业丢失（404）时界面收尾不卡「渲染中」；刷新 / 重进时接上 running 作业、期间禁用再次渲染。
-6. **导出闭环**：请求带 `render_job_id` + 当前计划 `plan_etag`，409 时界面锁定并提示重新出图；完成页按
-   `Job.result.manifest`（「图号/版本/格式」）逐图展示；下载 zip 内容与出图版本一致。
-7. **数据契约不变**：预览 SVG 仍带 `text[data-numeral]`；GLB 节点名仍等于零件名；渲染结果的
-   `numerals.numerals[].parts` 用于点击联动。
+| # | 项 | 前端做法 | 真实后端证据 |
+| --- | --- | --- | --- |
+| 1 | 能力探测与模式判定 | `api.init()` 探测 `/v1/capabilities`，200/401 → live，404 → legacy | e2e 全部用例；verify_ui 的 legacy 用例跑在 `--old-backend` |
+| 2 | 资源挂载 | 首页 `/static/*`，规划台 `/p/{pid}/` 子应用的静态页 + importmap；后端无需改挂载 | e2e 每条用例断言零 4xx/5xx 资源 |
+| 3 | 数据源 | 详情 = `GET /v1/projects/{id}`（摘要、plan_etag、候选状态）+ 子应用 `api/state`（装配体、已发布 render、版本、本次作业）+ `GET /plan/candidates`；渲染状态读 `api/render/status`（result / job 分开）；已发布版本的输入证据取 `GET /v1/jobs/{rid}` 的 `inputs.plan_etag` | golden_*、refresh_resume、vise_blocked_fix |
+| 4 | SSE | 帧 `{stage, progress, data}` 解包；CONNECTING 由浏览器带 `Last-Event-ID` 重连，CLOSED 由前端按 `?last_event_id=` 重连；终态后回读 | sse_reconnect |
+| 5 | 候选分图 | 作业 SSE「试渲染候选 k/N」→ `GET /plan/candidates`；卡片显示 status / reason / suggestion / ambiguous / 标准件 / 修复直达；接受走 `POST /plan/candidates/accept`（If-Match，422 列 unresolved，409 提示重载）；`empty_reason + guide` →「请框选分组」 | golden_*、empty_candidates、etag_409 |
+| 6 | 渲染与证据 | 202 → SSE → 读 `api/render/status`，版本 = 作业 ID、证据 = 冻结输入 plan_etag；失败显示 job 诊断并标明预览 / 导出属上一成功版本；排版阶段失败从日志行取错误码给白话 | golden_*、vise_blocked_fix |
+| 7 | QA | 后端 `title_zh / hint_plain / fix_action` 优先；`fix_action.target` 直达控件；`null` →「不是你的操作问题」 | vise_blocked_fix |
+| 8 | 导出 | 请求带 variant / formats / dpi / sheet_preset / render_job_id / plan_etag；能力事前禁选 DWG、提示 PDF 未核验；结果按 items / documents 四态展示，`_未通过核验/` 给原因；CNIPA 旁注；保守版心提示 | golden_*、dwg_conservative_note、pdf_unverified |
+| 9 | AI 起名 | 外发确认（outbound_fields / note）→ `apply=false` 预览 → `apply=true` + If-Match 写入；`ai_not_configured` 中性 | ai_configured（假 LLM 通道）、ai_not_configured |
+| 10 | 鉴权 | 见上 | cookie_only |
+| 11 | 示例 | `POST /v1/projects/from-example` → 时间线（准备示例 / 解析 / 候选 / 试渲染 k/N，已用秒数 + 首次耗时说明） | first_run_example、golden_* |
+| 12 | 静态站 | manifest = 后端响应快照，与 live 共用归一化；`build_static.py` 生成后按 openapi 核对漂移 | `tests/test_e2e_contract_mock.py` |
 
 ## 五、脚本
 
 ```bash
+# 真实后端端到端（自动起 / 复用 8806 等实例；数据与配置隔离，不写 ~/.patent-workbench）
+python3 webui/dev/e2e_live.py
+# 真实后端上重拍五屏四态 → docs/assets/screens/
+python3 webui/dev/capture_live.py
+# 前端回归（mock + 静态站；缺的服务会自动起）
+python3 webui/dev/verify_ui.py
+# 静态站 manifest 与 openapi 的字段核对
+python3 webui/dev/build_static.py --check
 # 五屏四态截图 → webui/dev/screens/
-python3 webui/dev/capture_screens.py          # 需要 8803 与 8804 都在跑
+python3 webui/dev/capture_screens.py          # mock 上的开发截图 → webui/dev/screens/；需要 8803 与 8804（--no-ai --no-dwg）在跑
 # 按需渲染前后对比 + 首页体积/TTI
 python3 webui/dev/perf_measure.py              # 需要 8803 在跑
 ```

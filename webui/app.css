@@ -379,3 +379,56 @@ input, select, textarea { font: inherit; color: var(--ink-1); }
   #left { width: 240px; } #right { width: 300px; }
   .qa-body { grid-template-columns: 1fr 320px; }
 }
+
+/* ---- WP3b 接线：候选作业 / 修复直达 / 导出核验 / 鉴权提示 ---- */
+.page-notice { display: flex; align-items: center; gap: var(--s-3); padding: 8px 16px; font: var(--t-body-sm);
+  background: var(--warn-bg); color: var(--ink-1); border-bottom: 1px solid var(--hair-strong); }
+.page-notice span { flex: 1; }
+.cand-running { padding: 16px; }
+.cand-running p { font: var(--t-body-sm); margin: 6px 0; }
+.cand-std { margin: 4px 0; font: var(--t-caption); }
+.cand-amb { list-style: none; margin: 4px 0; padding: 6px 8px; background: var(--warn-bg); border-radius: var(--r-1); }
+.cand-amb li { font: var(--t-caption); color: var(--warn); }
+.cand-sugg { font: var(--t-caption); color: var(--ink-1); margin: 4px 0; }
+.cand-qa li { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font: var(--t-caption); }
+.cand-qa li b { color: var(--seal-deep); }
+.cand-unresolved { margin: 6px 0; padding: 8px 10px; border: 1px solid var(--seal); border-radius: var(--r-1);
+  background: var(--seal-wash); font: var(--t-caption); }
+.cand-unresolved ul { margin: 4px 0 0 16px; }
+.qa-fix-notyou { font: var(--t-caption); color: var(--ink-muted); display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.fix-target { outline: 2px solid var(--seal); outline-offset: 2px; box-shadow: 0 0 0 6px var(--seal-wash); }
+.afb-list { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 12px; font: var(--t-caption); max-width: 520px; }
+.outbound-fields { margin: 8px 0 8px 18px; font: var(--t-body-sm); }
+.exp-warn { margin-top: var(--s-2); padding: 8px 10px; font: var(--t-body-sm); background: var(--warn-bg); color: var(--ink-1);
+  border-left: 3px solid var(--warn); border-radius: var(--r-1); }
+.exp-cnipa { margin-top: var(--s-2); }
+.exp-bad { padding: var(--s-3) var(--s-4); border: 1px solid var(--seal); border-radius: var(--r-2); background: var(--seal-wash); }
+.exp-bad ul { margin: 6px 0 0 18px; font: var(--t-body-sm); }
+.exp-items { border-collapse: collapse; width: 100%; font: var(--t-body-sm); }
+.exp-items th, .exp-items td { border: 1px solid var(--hair); padding: 5px 8px; text-align: left; vertical-align: top; }
+.exp-items thead th { background: var(--surface-2); font-weight: 600; }
+.exp-items tr.fail td { background: var(--seal-wash); }
+.exp-items tr.unverified td { background: var(--warn-bg); }
+.st { font: var(--t-mono); white-space: nowrap; }
+.st-ok { color: var(--ok); } .st-fail { color: var(--seal); } .st-skip { color: var(--ink-faint); } .st-unverified { color: var(--warn); }
+.exp-docs h3 { font-size: 15px; margin-bottom: var(--s-2); }
+.doc-row { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--hair); }
+.doc-row .doc-errs { flex-basis: 100%; margin-left: 18px; font: var(--t-caption); color: var(--seal-deep); }
+.doc-row .hint { flex-basis: 100%; }
+.exp-matrix-wrap summary { cursor: pointer; font: var(--t-body-sm); color: var(--ink-muted); margin-bottom: 6px; }
+.cand-fixes { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.exp-bad .bad-line { display: flex; align-items: flex-start; gap: var(--s-3); font: var(--t-body); }
+.exp-bad .bad-line .stamp-fail { flex: none; }
+.exp-items td:nth-child(1), .exp-items td:nth-child(2), .exp-items td:nth-child(3) { white-space: nowrap; }
+.sel-actions { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font: var(--t-caption); color: var(--ink-muted);
+  border-top: 1px solid var(--hair); }
+/* 外发确认对话框（规划台用；与首页 .dlg 同款） */
+.dlg { border: none; border-radius: var(--r-3); padding: 0; max-width: 92vw; background: var(--surface-1); color: var(--ink-1); box-shadow: var(--e-3); }
+.dlg::backdrop { background: #1e1c1766; }
+.dlg-body { padding: var(--s-6); display: flex; flex-direction: column; gap: var(--s-3); width: min(520px, 92vw); }
+.dlg-title { display: flex; align-items: center; gap: var(--s-2); font: var(--t-h2); }
+.dlg-actions { display: flex; gap: var(--s-2); justify-content: flex-end; align-items: center; margin-top: var(--s-2); }
+.dlg { margin: auto; }
+.validate-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0 0 var(--s-3); padding: 10px 14px;
+  background: var(--warn-bg); border-left: 3px solid var(--warn); border-radius: var(--r-1); font: var(--t-body-sm); text-align: left; }
+.validate-bar .qa-issues { flex-basis: 100%; }
