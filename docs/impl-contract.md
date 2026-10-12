@@ -2549,3 +2549,27 @@ AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from
   时仍按好文件判）；无渲染器时 N17 形态的导出包 PDF 全部 `unverified`、导出 `ok=false`、Word / DXF 不受影响；导出后
   按封印复核：原文件通过、改一字节失败。原有 PDF 回归在两种配置下：好文件 `none` 为 `unverified`、`pypdfium2` 为 `ok`，
   坏文件两种配置下都必须是 `fail`（不是 `unverified`）。
+
+### 14.18 修复轮 11（Codex R2k）：渲染核验改为与源图的空间比对；导出目录封口
+
+- **问题**：修复轮 10 的独立渲染只看墨迹比例（图号区 ≥ 1.5%、图片区 > 0）。整页均匀灰底（PDFium 全像素 115）在每个位置
+  都算「墨迹」，仍判 ok。比例不是可见性。
+- **空间比对**（每页，PDF 有渲染器时）：渲染 dpi = 导出 dpi，至多 300；用写出端同一函数 `deliverable.rasterize` 把该页
+  源 DXF 按同一 dpi 栅格（含图号），放到写出端的版面位置（`place()` 的 x / top，像素取整），得到预期整页。两者用**同一
+  固定阈值**二值化：墨迹 = 灰度 < 128（`INK_LEVEL`），非白 = 灰度 < 250（`WHITE_LEVEL`）。容差 = 2 px（方形膨胀，
+  `MATCH_TOL_PX`）。指标：
+  - 找回率 recall = 预期墨迹中 2 px 内有渲染墨迹的占比；对上率 precision = 渲染墨迹中 2 px 内有预期墨迹的占比；
+    **墨迹 IoU = 1 / (1/recall + 1/precision − 1)**（容差为 0 时即标准 IoU），须 **≥ 0.90**（`MATCH_IOU_MIN`）；
+  - **图号区 IoU**（图号框四周外扩半个字高，同法计算）须 **≥ 0.80**（`CAPTION_IOU_MIN`）；
+  - **背景非白占比** = 预期非白区域膨胀 2 px 之外，渲染灰度 < 250 的像素占比，须 **≤ 0.5%**（`BACKGROUND_NONWHITE_MAX`）。
+  任一不满足 → 该页不通过并给出数值；指标记在每页 `render_match`。原有墨迹比例检查保留。写出端自产 PDF 在 72 / 150 /
+  300 / 600 dpi 下实测 IoU ≥ 0.9996、图号 IoU 1.0、背景非白 ≤ 0.02%。
+- **回归**（pypdfium2 下均不通过，无渲染器时仍为 `unverified`）：重复 xref 让 PDFium 画整页灰底（R2k 原样）、整页纯黑、图片
+  右移 5 mm、图片放大 5%（三者 pypdf 读到的仍是原内容流，结构核验全过）；只保留图号区的真实写出端 PDF（结构、几何、字高、
+  图号墨迹全过）。正常自产 PDF 通过。
+- **导出目录封口**：服务端导出作业把导出报告与作业结果写进导出自己的目录（`<jobs>/<export_id>/result.json`），连同
+  `bundle/` 全部文件与 `bundle.zip` 记入 `seal.json`（逐文件 size + sha256，同时内含 ok / manifest / reasons / documents /
+  sha256），fsync 后文件一律只读；`seal.json` 的 sha256 记在作业结果 `result.seal`（持久化的作业记录）——以此服务端封口
+  记录为准。`GET /v1/exports/{id}/download` 先校验封口（封口记录摘要、逐文件摘要、无多余文件），不符 → 409，不提供下载。
+  包内《核验报告.json》新增 `authority`：「以服务端封口记录为准」。CLI `export_figure_package.py` 与旧 Plan Studio 导出
+  不经服务端作业，不写封口（前者的 `--json` 输出含 `sha256`）。

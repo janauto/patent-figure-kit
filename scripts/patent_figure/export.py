@@ -493,6 +493,7 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
                       and DOC_BASENAME % (k.split("/")[1], rep["format"]) == name]:
                 put(k, "fail", "%s 在打包过程中被改动（sha256 与写出时不符）" % name)
     report = {"schema": "patent-figure-export-check/1", "render_job_id": pin.rid,
+              "authority": AUTHORITY_NOTE,
               "spec": sp, "documents": documents, "missing_files": missing_files,
               "manifest": manifest, "reasons": reasons, "sha256": sha256,
               "sha256_note": SHA256_NOTE}
@@ -510,6 +511,92 @@ def build_bundle(pin: Pin, dest: Path, *, variants: Iterable[str] = ("annotated"
 SHA256_NOTE = ("核验只对导出包原文件有效：sha256 在写出每个文件时记录（本报告自身除外）；"
                "复核时先比对，不一致即判「文件已被修改，请使用导出包原文件」，不再做其余核验。"
                "权威记录是服务端导出结果（result.sha256），包内本报告仅供对照。")
+
+
+AUTHORITY_NOTE = ("以服务端封口记录为准：本报告随包分发、可被一并改动，只作对照；权威记录是服务端导出目录里的"
+                  " seal.json（封住本包全部文件、bundle.zip、导出报告与作业结果），其 sha256 记在导出作业"
+                  "结果 result.seal.sha256")
+SEAL_NAME = "seal.json"
+RESULT_NAME = "result.json"
+
+
+def seal_export(export_dir: Path, result: Dict[str, Any]) -> Dict[str, str]:
+    """R2k — seal an export's OWN directory (the service's ``<jobs>/<export_id>/``): write the job
+    ``result`` (manifest, reasons, documents, sha256 …) as ``result.json``, then ``seal.json`` =
+    the export report (ok / manifest / reasons / documents / bundle sha256) + ``{path: {size,
+    sha256}}`` of EVERY file in the directory (``bundle/**``, ``bundle.zip``, ``result.json``),
+    fsynced; then every file is made read-only. Returns ``{file, sha256}`` — the digest of
+    ``seal.json`` goes into the job result, so the persisted job record and the sealed directory
+    vouch for each other. The bundle's own 《核验报告.json》 is only a copy for reference."""
+    import hashlib
+    from patent_figure import deliverable_check as _C
+    from patent_figure import project_io as _pio
+    export_dir = Path(export_dir)
+    _pio.atomic_write_json(export_dir / RESULT_NAME, result)
+    files: Dict[str, Dict[str, Any]] = {}
+    for p in sorted(export_dir.rglob("*")):
+        rel = p.relative_to(export_dir).as_posix()
+        if p.is_file() and rel != SEAL_NAME:
+            files[rel] = {"size": p.stat().st_size, "sha256": _C.sha256_of(p)}
+    seal = {"schema": "patent-figure-export-seal/1",
+            "export_id": result.get("export_id"), "render_job_id": result.get("render_job_id"),
+            "ok": result.get("ok"), "manifest": result.get("manifest"),
+            "reasons": result.get("reasons"), "documents": result.get("documents"),
+            "sha256": result.get("sha256"), "files": files}
+    data = json.dumps(seal, ensure_ascii=False, indent=1, sort_keys=True, default=str)
+    target = export_dir / SEAL_NAME
+    tmp = target.with_name("%s.%d.%s.tmp" % (target.name, os.getpid(), os.urandom(4).hex()))
+    try:
+        with open(str(tmp), "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(str(tmp), str(target))
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    for p in export_dir.rglob("*"):
+        if p.is_file():
+            try:
+                os.chmod(str(p), 0o444)
+            except OSError:
+                pass
+    return {"file": SEAL_NAME,
+            "sha256": hashlib.sha256((export_dir / SEAL_NAME).read_bytes()).hexdigest()}
+
+
+def verify_export_seal(export_dir: Path, seal_sha256: Optional[str]) -> List[str]:
+    """Errors (empty = intact) of a sealed export directory against the digest of its seal kept in
+    the job result: the seal itself unchanged, every sealed file present with its size and
+    sha256, and no file that the seal does not list."""
+    import hashlib
+    from patent_figure import deliverable_check as _C
+    export_dir = Path(export_dir)
+    try:
+        raw = (export_dir / SEAL_NAME).read_bytes()
+    except OSError:
+        return ["导出目录缺封口记录 %s" % SEAL_NAME]
+    if seal_sha256 and hashlib.sha256(raw).hexdigest() != seal_sha256:
+        return ["封口记录 %s 与导出作业里记录的 sha256 不符（被改动）" % SEAL_NAME]
+    try:
+        files = json.loads(raw.decode("utf-8"))["files"]
+    except (ValueError, KeyError, UnicodeDecodeError):
+        return ["封口记录 %s 读不了" % SEAL_NAME]
+    errors = []
+    for rel, info in sorted(files.items()):
+        p = export_dir / rel
+        if not p.is_file():
+            errors.append("封口文件缺失：%s" % rel)
+        elif p.stat().st_size != info.get("size") or _C.sha256_of(p) != info.get("sha256"):
+            errors.append("文件已被修改：%s（与封口记录的 sha256 不符）" % rel)
+    present = {p.relative_to(export_dir).as_posix() for p in export_dir.rglob("*") if p.is_file()}
+    extra = sorted(present - set(files) - {SEAL_NAME})
+    if extra:
+        errors.append("导出目录里有封口后多出的文件：%s" % "、".join(extra[:5]))
+    return errors
 
 
 def seal_files(dest: Path) -> Dict[str, str]:

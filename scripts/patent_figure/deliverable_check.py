@@ -858,6 +858,112 @@ def _render_caption_ink(path: Path, k: int, src: "Source", rect_mm, dpi: int = 1
             float((whole < _D.INK_LEVEL).mean()) if whole.size else 0.0)
 
 
+# --------------------------------------------------------------------------- render ↔ source (R2k)
+#
+# The independent render is compared SPATIALLY with what the page must look like: the page's
+# source DXF rasterised by the writer's own function (``deliverable.rasterize``) at the render dpi
+# and placed where the writer places it. Ink proportions alone are not enough — a uniformly gray
+# page has "ink" everywhere. Fixed thresholds (contract §14.18):
+RENDER_DPI_MAX = 300          # render at the export dpi, at most this
+INK_LEVEL = _D.INK_LEVEL       # gray < 128 is ink, in the expected raster and in the render alike
+WHITE_LEVEL = 250              # gray < 250 is "not white" (background check)
+MATCH_TOL_PX = 2               # spatial tolerance: masks dilated by 2 px (square)
+MATCH_IOU_MIN = 0.90           # ink IoU (with tolerance) over the whole page
+CAPTION_IOU_MIN = 0.80         # ink IoU (with tolerance) inside the figure-number box
+BACKGROUND_NONWHITE_MAX = 0.005  # share of non-white render pixels where nothing is expected
+
+
+def _dilate(mask, r: int):
+    """Binary dilation by a (2r+1)² square, numpy only (separable shifts)."""
+    import numpy as np
+    out = mask.copy()
+    for axis in (0, 1):
+        src = out.copy()
+        for d in range(1, r + 1):
+            a = np.roll(src, d, axis=axis)
+            b = np.roll(src, -d, axis=axis)
+            if axis == 0:
+                a[:d, :] = False
+                b[-d:, :] = False
+            else:
+                a[:, :d] = False
+                b[:, -d:] = False
+            out |= a | b
+    return out
+
+
+def _tolerant_iou(expected, rendered, r: int) -> Tuple[float, float, float]:
+    """``(iou, recall, precision)`` of two ink masks with an ``r``-px tolerance: recall = share of
+    expected ink with rendered ink within r px; precision = share of rendered ink with expected
+    ink within r px; iou = 1 / (1/recall + 1/precision − 1) (the IoU identity, exact at r = 0)."""
+    ne, nr = int(expected.sum()), int(rendered.sum())
+    if ne == 0 and nr == 0:
+        return 1.0, 1.0, 1.0
+    if ne == 0 or nr == 0:
+        return 0.0, 0.0 if ne else 1.0, 0.0 if nr else 1.0
+    recall = float((expected & _dilate(rendered, r)).sum()) / ne
+    precision = float((rendered & _dilate(expected, r)).sum()) / nr
+    if recall <= 0 or precision <= 0:
+        return 0.0, recall, precision
+    return 1.0 / (1.0 / recall + 1.0 / precision - 1.0), recall, precision
+
+
+def _render_match(path: Path, k: int, src: "Source", sp: Dict[str, Any],
+                  backend: str) -> Dict[str, Any]:
+    """Render page ``k`` with the independent engine and compare it with the EXPECTED page — the
+    source DXF rasterised by the writer's function at the same dpi, placed where the writer puts
+    it on a white A4 page. Returns the metrics (ink IoU, caption IoU, background non-white share,
+    recall / precision) and ``errors`` for every threshold not met."""
+    import numpy as np
+    dpi = int(min(int(sp["dpi"]), RENDER_DPI_MAX))
+    arr = _render_gray(path, k, dpi, backend)
+    spd = dict(sp, dpi=dpi)
+    exp = _D.rasterize(src.dxf, spd, src.figure, src.number)
+    page = np.full(arr.shape, 255, dtype=np.uint8)
+    to_px = dpi / 25.4
+    r0 = int(round(exp.placement["top"] * to_px))
+    c0 = int(round(exp.placement["x"] * to_px))
+    h, w = exp.gray.shape
+    rr0, cc0 = max(r0, 0), max(c0, 0)
+    rr1, cc1 = min(r0 + h, page.shape[0]), min(c0 + w, page.shape[1])
+    if rr1 > rr0 and cc1 > cc0:
+        page[rr0:rr1, cc0:cc1] = exp.gray[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0]
+    e_ink, r_ink = page < INK_LEVEL, arr < INK_LEVEL
+    iou, recall, precision = _tolerant_iou(e_ink, r_ink, MATCH_TOL_PX)
+    background = ~_dilate(page < WHITE_LEVEL, MATCH_TOL_PX)
+    bg_nonwhite = float((arr[background] < WHITE_LEVEL).mean()) if background.any() else 0.0
+    cap_iou = None
+    if src.caption is not None:
+        bx0, by0, bx1, by1 = _D.caption_box(src.caption)
+        wx0, wy0, wx1, wy1 = exp.window
+        pl = exp.placement
+        sx, sy = pl["w"] / (wx1 - wx0), pl["h"] / (wy1 - wy0)
+        # the caption box (central 80 % of the estimated glyph box) grown by half its height,
+        # so whole glyphs are inside; in page pixels
+        pad = 0.5 * (by1 - by0)
+        cx0 = int((pl["x"] + (bx0 - pad - wx0) * sx) * to_px)
+        cx1 = int((pl["x"] + (bx1 + pad - wx0) * sx) * to_px) + 1
+        cy0 = int((pl["top"] + (wy1 - by1 - pad) * sy) * to_px)
+        cy1 = int((pl["top"] + (wy1 - by0 + pad) * sy) * to_px) + 1
+        sl = (slice(max(cy0, 0), max(cy1, 0)), slice(max(cx0, 0), max(cx1, 0)))
+        cap_iou = _tolerant_iou(e_ink[sl], r_ink[sl], MATCH_TOL_PX)[0]
+    errors = []
+    where = "第 %d 页" % k
+    if iou < MATCH_IOU_MIN:
+        errors.append("%s渲染结果与源图不一致：墨迹重合度 IoU %.3f < %.2f（源图墨迹找回 %.1f%%，"
+                      "渲染墨迹能对上源图的 %.1f%%）——图形缺失、错位、缩放或被替换"
+                      % (where, iou, MATCH_IOU_MIN, recall * 100, precision * 100))
+    if bg_nonwhite > BACKGROUND_NONWHITE_MAX:
+        errors.append("%s渲染后背景（源图无墨迹处）有 %.2f%% 非白像素（上限 %.1f%%）——底色、遮盖或错位"
+                      % (where, bg_nonwhite * 100, BACKGROUND_NONWHITE_MAX * 100))
+    if cap_iou is not None and cap_iou < CAPTION_IOU_MIN:
+        errors.append("%s渲染后图号区域与源图重合度 IoU %.3f < %.2f——图号缺失、错位或被遮盖"
+                      % (where, cap_iou, CAPTION_IOU_MIN))
+    return {"dpi": dpi, "iou": round(iou, 4), "recall": round(recall, 4),
+            "precision": round(precision, 4), "caption_iou": None if cap_iou is None else
+            round(cap_iou, 4), "background_nonwhite": round(bg_nonwhite, 5), "errors": errors}
+
+
 def _pdf_page_report(path: Path, k: int, page, src: "Source", sp: Dict[str, Any],
                      render: str) -> Dict[str, Any]:
     box = page.mediabox
@@ -907,7 +1013,7 @@ def _pdf_page_report(path: Path, k: int, page, src: "Source", sp: Dict[str, Any]
             gray = np.fliplr(gray)
     px = (int(gray.shape[1]), int(gray.shape[0])) if gray is not None else (0, 0)
     rect_mm = (x0, ph - y1, x1 - x0, y1 - y0)
-    rendered = None
+    rendered = match = None
     if render != "unavailable" and src.caption is not None:
         try:
             cap_ink, whole_ink = _render_caption_ink(path, k, src, rect_mm, backend=render)
@@ -917,10 +1023,16 @@ def _pdf_page_report(path: Path, k: int, page, src: "Source", sp: Dict[str, Any]
                              % (where, cap_ink * 100, k))
             if whole_ink <= 0.0:
                 extra.append("%s渲染后图片区域一片空白" % where)
+            # R2k: the render must MATCH the source page spatially, not just carry some ink
+            match = _render_match(path, k, src, sp, render)
+            extra += match.pop("errors")
         except Exception as exc:
             extra.append("%s独立渲染核验失败：%s" % (where, exc))
+    elif render != "unavailable":
+        extra.append("%s源图没有图号，无法做渲染比对" % where)
     pc = _page_check(k, src, sp, rect_mm, px, gray, (pw, ph), extra)
     pc["render_caption_ink"] = rendered
+    pc["render_match"] = match
     return pc
 
 

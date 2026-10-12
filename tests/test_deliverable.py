@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -1255,3 +1256,136 @@ def test_an_exported_file_is_rechecked_against_the_seal(tmp_path, monkeypatch):
     _flip_byte(pdf, 10)
     rep = C.check_document(pdf, srcs, sp, expected_sha256=out["sha256"][pdf.name])
     assert _refused(rep) and rep["errors"][0].startswith(C.TAMPERED_REASON)
+
+
+# --------------------------------------------------------------------------- R2k: render ↔ source
+
+
+def _pdf_contents_variant(good: Path, fn) -> bytes:
+    """A duplicate-xref twin of page 1's content stream: pypdf keeps reading the ORIGINAL content
+    (every structural check passes), PDFium draws ``fn(original)`` — only the render comparison
+    can tell."""
+    from pypdf import PdfReader
+    page = PdfReader(str(good)).pages[0]
+    ref = page.raw_get("/Contents").idnum
+    content = fn(page.get_contents().get_data())
+    return _pdf_duplicate_xref(good.read_bytes(), ref, b"<< /Length %d >>\nstream\n%s\nendstream"
+                               % (len(content), content))
+
+
+_CM = rb"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+cm"
+
+
+def _cm_edit(index: int, edit):
+    def fn(content: bytes) -> bytes:
+        import re as _re
+        m = list(_re.finditer(_CM, content))[index]
+        vals = edit([float(v) for v in m.groups()])
+        return content[:m.start()] + b" ".join(b"%.4f" % v for v in vals) + b" cm" + \
+            content[m.end():]
+    return fn
+
+
+_A4_PT = (210.0 * C.PT_PER_MM, 297.0 * C.PT_PER_MM)
+_R2K = {
+    # Codex R2k: the later-registered content paints the whole page uniformly gray (PDFium 115)
+    "gray-page": lambda c: b"0.45 g 0 0 %.4f %.4f re f" % _A4_PT,
+    "black-page": lambda c: b"0 g 0 0 %.4f %.4f re f" % _A4_PT,
+    # the picture moved 5 mm right / scaled up 5 % (first cm = translation, second = size)
+    "shift-5mm": _cm_edit(0, lambda v: v[:4] + [v[4] + 5.0 * C.PT_PER_MM, v[5]]),
+    "scale-5pct": _cm_edit(1, lambda v: [v[0] * 1.05, v[1], v[2], v[3] * 1.05, v[4], v[5] * 1.05]),
+}
+
+
+def _caption_only_pdf(rows, sp, out: Path) -> None:
+    """A genuine writer PDF whose page-1 raster keeps ONLY the figure-number area: structure,
+    geometry, text height and the caption's own ink all pass — the drawing is gone."""
+    pages = [D.rasterize(r["dxf"], sp, r["figure"], r["number"]) for r in rows]
+    src = C.Source("fig1", 1, rows[0]["dxf"], sp["area_mm"])
+    bx0, by0, bx1, by1 = D.caption_box(src.caption)
+    wx0, wy0, wx1, wy1 = src.window
+    g = pages[0].gray
+    H, W = g.shape
+    pad = 0.6 * (by1 - by0)
+    c0, c1 = int((bx0 - pad - wx0) / (wx1 - wx0) * W), int((bx1 + pad - wx0) / (wx1 - wx0) * W)
+    r0, r1 = int((wy1 - by1 - pad) / (wy1 - wy0) * H), int((wy1 - by0 + pad) / (wy1 - wy0) * H)
+    keep = g[r0:r1, c0:c1].copy()
+    g[:] = 255
+    g[r0:r1, c0:c1] = keep
+    D.write_pdf(pages, out)
+
+
+@pytest.mark.parametrize("case", sorted(_R2K) + ["caption-only"])
+def test_render_must_match_the_source_page_spatially(two, renderer, case):
+    """R2k: ink PROPORTIONS are not visibility — a uniformly gray page has 'ink' everywhere. The
+    render is compared with the source DXF rasterised by the writer's function at the same dpi:
+    ink IoU ≥ 0.90 (2 px tolerance), caption IoU ≥ 0.80, ≤ 0.5 % non-white where nothing is
+    expected. Gray page, black page, picture shifted 5 mm or scaled 5 % (all PDFium-only, via a
+    duplicate xref entry of the content stream) and a caption-only page FAIL with pypdfium2;
+    without a renderer they stay ``unverified`` (never ok)."""
+    pytest.importorskip("pypdf")
+    tmp, rows = two
+    sp = D.spec("standard", 300)
+    good = tmp / "good.pdf"
+    _build(rows, sp, good, "pdf")
+    ok = _check(good, rows, sp)
+    assert _passes(ok)
+    if renderer != "none":
+        for p in ok["page_checks"]:
+            m = p["render_match"]
+            assert m["iou"] >= C.MATCH_IOU_MIN and m["caption_iou"] >= C.CAPTION_IOU_MIN
+            assert m["background_nonwhite"] <= C.BACKGROUND_NONWHITE_MAX
+    bad = tmp / "bad.pdf"
+    if case == "caption-only":
+        _caption_only_pdf(rows, sp, bad)
+    else:
+        bad.write_bytes(_pdf_contents_variant(good, _R2K[case]))
+    rep = _check(bad, rows, sp)
+    assert rep["ok"] is False
+    if renderer == "none":
+        assert rep["status"] == C.STATUS_UNVERIFIED                  # unverified stays unverified
+        return
+    assert _refused(rep)
+    msgs = " ".join(rep["errors"] + [e for p in rep["page_checks"] for e in p["errors"]])
+    assert "渲染结果与源图不一致" in msgs, msgs
+    if case in ("gray-page", "black-page"):
+        assert "非白像素" in msgs
+    assert rep["page_checks"][1]["ok"]                               # page 2 is untouched
+
+
+def test_export_directory_is_sealed_with_its_report(tmp_path, monkeypatch):
+    """R2k seal boundary: the export's own directory — bundle files, bundle.zip, and the export
+    report + job result written next to them — is sealed in seal.json (sha256 of every file), the
+    files become read-only, and the seal's own digest is what the job result keeps. One changed
+    byte in the zip, an edited seal, or an added file is reported."""
+    pytest.importorskip("pypdf")
+    monkeypatch.setenv("PFK_PDF_RENDERER", "none")              # the seal does not need a render
+    out = _bundle(tmp_path, "exp/bundle")
+    EX.zip_dir(tmp_path / "exp" / "bundle", tmp_path / "exp" / "bundle.zip")
+    result = {"export_id": "e1", "render_job_id": out["render_job_id"], "ok": out["ok"],
+              "manifest": out["manifest"], "reasons": out["reasons"],
+              "documents": out["documents"], "sha256": out["sha256"]}
+    seal = EX.seal_export(tmp_path / "exp", result)
+    assert seal["file"] == "seal.json" and len(seal["sha256"]) == 64
+    exp = tmp_path / "exp"
+    sealed = json.loads((exp / "seal.json").read_text(encoding="utf-8"))
+    assert {"bundle.zip", "result.json", "bundle/核验报告.json"} <= set(sealed["files"])
+    assert sealed["manifest"] == out["manifest"] and sealed["documents"] == json.loads(
+        json.dumps(out["documents"]))
+    report = json.loads((exp / "bundle" / EX.REPORT_NAME).read_text(encoding="utf-8"))
+    assert report["authority"].startswith("以服务端封口记录为准")
+    assert not os.access(str(exp / "bundle.zip"), os.W_OK)
+    assert EX.verify_export_seal(exp, seal["sha256"]) == []
+    z = exp / "bundle.zip"
+    os.chmod(str(z), 0o644)
+    _flip_byte(z, 20)
+    assert any("bundle.zip" in e for e in EX.verify_export_seal(exp, seal["sha256"]))
+    _flip_byte(z, 20)
+    assert EX.verify_export_seal(exp, seal["sha256"]) == []
+    (exp / "extra.pdf").write_bytes(b"%PDF")
+    assert any("多出的文件" in e for e in EX.verify_export_seal(exp, seal["sha256"]))
+    (exp / "extra.pdf").unlink()
+    os.chmod(str(exp / "seal.json"), 0o644)
+    (exp / "seal.json").write_text((exp / "seal.json").read_text(encoding="utf-8") + " ",
+                                   encoding="utf-8")
+    assert any("封口记录" in e for e in EX.verify_export_seal(exp, seal["sha256"]))

@@ -127,8 +127,13 @@ def export_job(live):
 
 
 def test_export_package_is_checked_page_by_page(live, export_job):
+    _W, reg, c = live
     res = export_job["result"]
     assert res["ok"] is True, res["reasons"]
+    # R2k: the export directory (bundle, zip, report, result) is sealed; download verifies it
+    from patent_figure import export as EX
+    assert EX.verify_export_seal(reg.data / "jobs" / export_job["id"], res["seal"]["sha256"]) == []
+    assert c.get("/v1/exports/%s/download" % export_job["id"], headers=BEARER).status_code == 200
     for name in ("说明书附图_递交版.pdf", "说明书附图_交底版.pdf", "说明书附图_递交版.docx",
                  "说明书附图_交底版.docx"):
         doc = res["documents"][name]
@@ -147,6 +152,25 @@ def test_export_package_is_checked_page_by_page(live, export_job):
     rows = {(i["variant"], i["format"]): i for i in res["items"]}
     assert rows[("递交版", "pdf")]["role"] == "主交付" and rows[("递交版", "dxf")]["status"] == "ok"
     assert res["note"].startswith("精确图片参数")
+
+
+def test_a_tampered_export_is_not_served(live):
+    """R2k: the download verifies the sealed export directory first — one changed byte of the
+    stored zip (or any sealed file) → 409, the zip is not served."""
+    import os
+    _W, reg, c = live
+    r = c.post("/v1/projects/%s/export" % PID, headers=BEARER,
+               json={"variant": "filing", "formats": ["dxf"]})
+    j = _poll(c, r.json()["export_id"])
+    assert j["state"] == "succeeded" and j["result"]["seal"]["sha256"], j
+    assert c.get("/v1/exports/%s/download" % j["id"], headers=BEARER).status_code == 200
+    z = reg.data / "jobs" / j["id"] / "bundle.zip"
+    os.chmod(str(z), 0o644)
+    data = bytearray(z.read_bytes())
+    data[len(data) // 2] ^= 0x01
+    z.write_bytes(bytes(data))
+    bad = c.get("/v1/exports/%s/download" % j["id"], headers=BEARER)
+    assert bad.status_code == 409 and "封口" in bad.text, bad.text
 
 
 def test_export_rejects_bad_preset_and_dpi_up_front(live):

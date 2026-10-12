@@ -324,6 +324,20 @@ components:
         caption: {type: string, nullable: true, example: 图1}
         caption_ink: {type: number, nullable: true, description: 图号位置的墨迹占比（从文件里的图片像素算，透明度合成到白底）}
         render_caption_ink: {type: number, nullable: true, description: 仅 PDF 且有独立渲染器：渲染整页后图号位置看得见的墨迹占比}
+        render_match:
+          type: object
+          nullable: true
+          description: >
+            仅 PDF 且有独立渲染器（R2k）：渲染结果与「源 DXF 按写出端同一函数、同 dpi 栅格并放到写出端位置」的
+            预期页面做空间比对。墨迹 = 灰度 < 128；容差 2 px；iou ≥ 0.90、caption_iou ≥ 0.80、
+            background_nonwhite（预期无墨迹处灰度 < 250 的占比）≤ 0.005，任一不满足即该页不通过
+          properties:
+            dpi: {type: integer, description: 渲染与预期栅格的 dpi（导出 dpi，至多 300）}
+            iou: {type: number}
+            recall: {type: number, description: 源图墨迹在 2 px 内找得到渲染墨迹的占比}
+            precision: {type: number, description: 渲染墨迹在 2 px 内对得上源图墨迹的占比}
+            caption_iou: {type: number, nullable: true}
+            background_nonwhite: {type: number}
     DocumentCheck:
       description: 对写出的 PDF / Word 文件本身逐页核验（deliverable_check），不信任写出端自报。
       type: object
@@ -397,6 +411,15 @@ components:
           additionalProperties: {$ref: '#/components/schemas/DocumentCheck'}
         missing_files: {type: array, items: {type: string}}
         files: {type: array, items: {type: string}}
+        seal:
+          type: object
+          description: >
+            R2k：导出目录封口。导出报告与本结果写进导出作业自己的目录（result.json），连同 bundle/ 全部文件与
+            bundle.zip 一起记入 seal.json（逐文件 size + sha256），文件随即只读；这里记 seal.json 的 sha256——
+            以此服务端封口记录为准。下载前先校验封口，不符返回 409
+          properties:
+            file: {type: string, example: seal.json}
+            sha256: {type: string}
         sha256:
           type: object
           additionalProperties: {type: string}
@@ -857,6 +880,7 @@ paths:
       responses:
         "200": {description: zip, content: {application/zip: {schema: {type: string, format: binary}}}}
         "404": {description: 还没就绪}
+        "409": {description: 导出目录封口校验不通过（zip 或任一封口文件被改动 / 缺失 / 多出）——不提供下载，请重新导出}
   /v1/flowcharts/guide:
     get: {tags: [流程图], summary: 流程图 JSON 格式说明, responses: {"200": {description: ok}}}
   /v1/flowcharts/render:

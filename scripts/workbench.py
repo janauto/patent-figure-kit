@@ -1428,16 +1428,21 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
                                              checklist_txt=True)
                 j.emit(JOBS.EV_STAGE, "逐页核验完成，打包", stage="export", progress=0.9)
                 EXPORT.zip_dir(dest, jobs.root / j.id / "bundle.zip")
-                return {"export_id": j.id, "render_job_id": render_job.id,
-                        "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
-                        "ok": bundle["ok"], "manifest": bundle["manifest"],
-                        "reasons": bundle["reasons"], "items": bundle["items"],
-                        "documents": bundle["documents"],
-                        "missing_files": bundle["missing_files"], "files": bundle["files"],
-                        "sha256": bundle["sha256"],
-                        "spec": bundle["spec"], "note": DELIV.CNIPA_NOTE,
-                        "notes": bundle["notes"], "dwg_log": bundle["dwg_log"],
-                        "download_url": base + "/v1/exports/%s/download" % j.id}
+                result = {"export_id": j.id, "render_job_id": render_job.id,
+                          "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
+                          "ok": bundle["ok"], "manifest": bundle["manifest"],
+                          "reasons": bundle["reasons"], "items": bundle["items"],
+                          "documents": bundle["documents"],
+                          "missing_files": bundle["missing_files"], "files": bundle["files"],
+                          "sha256": bundle["sha256"],
+                          "spec": bundle["spec"], "note": DELIV.CNIPA_NOTE,
+                          "notes": bundle["notes"], "dwg_log": bundle["dwg_log"],
+                          "download_url": base + "/v1/exports/%s/download" % j.id}
+                # R2k: the report + this result are written into the export's own directory and
+                # sealed with every file of it (bundle/, bundle.zip); files become read-only.
+                # The seal's digest lives in the persisted job result — the authority.
+                result["seal"] = EXPORT.seal_export(jobs.root / j.id, result)
+                return result
 
             jobs.start(job, fn, finalizer=pin.release)   # released on every run() exit path
         except BaseException:
@@ -1746,6 +1751,12 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         zip_path = jobs.root / export_id / "bundle.zip"
         if not zip_path.is_file():
             raise HTTPException(404, "导出包文件已不在")
+        seal = (job.result or {}).get("seal")
+        if seal:                     # R2k: serve only an export whose sealed directory is intact
+            problems = EXPORT.verify_export_seal(jobs.root / export_id, seal.get("sha256"))
+            if problems:
+                raise HTTPException(409, "导出包封口校验不通过（%s）——请重新导出"
+                                         % "；".join(problems[:3]))
         return FileResponse(str(zip_path), media_type="application/zip",
                             filename=zip_path.name)
 

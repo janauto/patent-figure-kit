@@ -705,6 +705,15 @@ def n17(ctx):
                 "%s %s：%d/%d 页 %s" % (ex, name, doc["pages"], nfig, doc["errors"])
             assert doc["status"] == "ok" and doc["sha256"] == res["sha256"][doc["path"]]
             assert name.endswith(".docx") or doc["render_check"] == caps["pdf_renderer"]
+            # R2k: the render matches the source page spatially (IoU / caption / background)
+            assert name.endswith(".docx") or all(
+                p["render_match"]["iou"] >= 0.9 for p in doc["page_checks"]), doc["page_checks"]
+        # R2k: the export's own directory (bundle, zip, report, result) is sealed and intact
+        from patent_figure import export as _EXPORT
+        assert res.get("seal", {}).get("sha256"), "导出结果缺封口记录"
+        problems = _EXPORT.verify_export_seal(env["reg"].data / "jobs" / j["id"],
+                                              res["seal"]["sha256"])
+        assert not problems, "%s 导出目录封口校验不通过：%s" % (ex, problems)
         total_pages += _recheck_zip(env, j, ctx["tmp"] / ("wp2-zip-" + ex))
         r72 = poll(c.post("/v1/projects/%s/export" % pid, headers=H,
                           json={"variant": "both", "formats": ["pdf", "docx", "dxf"],
@@ -722,7 +731,8 @@ def n17(ctx):
         assert all(v == "ok" for k, v in res72["manifest"].items() if k.endswith("/dxf"))
         assert not any(f.startswith("说明书附图_") for f in res72["files"]), res72["files"]
     return ("3 个模型 × 两版 × PDF/Word 服务端核验 + 下载包按服务端 sha256 封印比对后独立复核共 %d 页"
-            "全部通过（PDF 经 %s 渲染）；%d 份 PDF 逐对象严格解析（pypdf strict）无误；"
+            "全部通过（PDF 经 %s 渲染并与源图空间比对）；导出目录封口完好；"
+            "%d 份 PDF 逐对象严格解析（pypdf strict）无误；"
             "dpi 72 时 PDF/Word 全部判 fail（栅格字高 < 24 px）并隔离"
             % (total_pages, caps["pdf_renderer"], len(env.get("strict_pdfs", []))))
 
