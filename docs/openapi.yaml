@@ -12,6 +12,12 @@ info:
     轮询或 GET /v1/jobs/{id}/events（SSE，带 event id，支持 Last-Event-ID 重连）订阅。
     状态机：queued → running → {succeeded | failed | cancelled | interrupted}；进程崩溃后
     未完成作业标 interrupted（不假装恢复）。旧同步 render 以 `?wait=1` 保留。
+
+    WP2 增补（契约 §14）：能力接口 `GET /v1/capabilities`；候选分图作业 + 接受
+    （`/plan/suggest`、`/plan/candidates`、`/plan/candidates/accept`）；附图导出包（PDF/Word 主交付 +
+    逐页核验，`ExportResult`）；QA 每项的 `title_zh / hint_plain / fix_action`（`QACheck`）；AI 起名
+    接力语义冻结（`DraftTermsResult`）；`?token=` 仅兼容期，命中时响应带 `Deprecation: true` 与
+    `Warning` 头。
 servers:
   - url: http://127.0.0.1:8790
     description: 本机默认实例
@@ -32,7 +38,10 @@ components:
       name: token
       description: >
         旧版查询参数鉴权，保留一个版本用于兼容已配置的客户端，后续弃用；新客户端请用 Bearer
-        或会话 Cookie（见 docs/impl-contract 与工作台设置页的迁移说明）。
+        或会话 Cookie（见 docs/impl-contract 与工作台设置页的迁移说明）。WP2：只凭 ?token= 通过
+        鉴权的受保护请求（/api/wb、/v1、/mcp、/files 与子应用 /p/{pid}/api/*），响应带
+        `Deprecation: true`、`Warning: 299 - "Query-string token is deprecated; …"`、
+        `X-Auth-Deprecated: query-token`。首页 `/?token=` 是下发会话 Cookie 的引导，不算弃用。
   schemas:
     Error:
       type: object
@@ -80,8 +89,10 @@ components:
         export_id: {type: string}
         manifest:
           type: object
-          additionalProperties: {type: string, enum: [ok, skip, fail]}
-          description: 每种格式的结果（ok/skip/fail）。dwg 在无转换器时为 skip。
+          additionalProperties: {type: string, enum: [ok, skip, fail, unverified]}
+          description: >
+            每种格式的结果（ok/skip/fail/unverified）。dwg 在无转换器时为 skip；PDF 在没有独立渲染器
+            （pypdfium2）时为 unverified——不是 ok、不是通过。
         files: {type: array, items: {type: string}}
         download_url: {type: string}
     RenderJobDiag:
@@ -126,6 +137,399 @@ components:
         result: {type: object, nullable: true, description: 已发布版本的结果（含 version 字段）}
         version: {type: string, nullable: true}
         job: {$ref: '#/components/schemas/RenderJobStatus'}
+    FixAction:
+      description: QA 修复动作（F4）。kind 冻结为四种；null 表示不是用户可改的问题（写出端缺陷，请反馈）。
+      type: object
+      nullable: true
+      properties:
+        kind: {type: string, enum: [open_terms, split_figure, change_view, change_density]}
+        target:
+          type: object
+          description: "至少含 figure（图 id）；可选 focus（standard_parts|names）、density（loose）、engineering_table（false）"
+          properties:
+            figure: {type: string}
+            focus: {type: string, enum: [standard_parts, names]}
+            density: {type: string, enum: [loose, compact, normal]}
+            engineering_table: {type: boolean}
+    QACheck:
+      description: >
+        qa.json 每项检查（13 项，顺序固定）。WP2 F4 增补 title_zh / hint_plain / fix_action：
+        hint 是给 Agent 的精确计划级指令（含 terms[].label 等字段名）；hint_plain 是给人的白话，
+        不含 JSON 字段名。前端有静态映射时，后端字段存在则优先用后端。
+      type: object
+      required: [id, pass, value, threshold, detail, hint, title_zh, hint_plain, fix_action]
+      properties:
+        id:
+          type: string
+          enum: [geometry_occupancy, sheet_fill, text_height_mm, text_slot_ratio,
+                 label_overlap_pairs, leader_hits_numeral_box, leader_crossing,
+                 leader_anchor_gap, part_bbox_overlap_pairs, labels_per_figure,
+                 non_numeral_text_ratio, non_continuous, forbidden_text,
+                 file_readable, qa_internal_error]
+        pass: {type: boolean}
+        value: {description: 实测值}
+        threshold: {type: string}
+        detail: {type: string}
+        hint: {type: string}
+        title_zh: {type: string, example: 引线落点}
+        hint_plain: {type: string}
+        fix_action: {$ref: '#/components/schemas/FixAction'}
+    MemberRef:
+      description: >
+        候选成员引用（吸收 Codex R3c #6）：真实零件名 {part}，或稳定组引用 {group}
+        （sub:<装配路径> | coax:<同轴组 id> | split:<策略>/<序号>）。显示名从不出现在这里。
+      type: object
+      properties:
+        part: {type: string, description: "assembly.json parts[].name，原样"}
+        group: {type: string, example: "sub:DEMO-VISE-ASSY/VISE-SPINDLE-ASM"}
+    AmbiguousMember:
+      description: 同名跨子装配：按名称选中的实例多于本组（plan 按名称选零件）。
+      type: object
+      properties:
+        part: {type: string}
+        selected: {type: integer, description: 按名称会选中的实例数}
+        in_group: {type: integer, nullable: true, description: 其中属于本组的实例数（同轴组未知时 null）}
+        outside_paths: {type: array, items: {type: string}}
+        message: {type: string, example: 按名称选中 2 处（其中 1 处不在本组内）}
+    Candidate:
+      description: >
+        一个候选分图。只有实际渲染 + 过 QA 闸门之后 status 才是 pass/fail；没渲染为 pending。
+        members 只放真实零件 {part}（后端产出时从不用 {group}，接受时可用）；显示名在 members_display。
+      type: object
+      required: [id, fig_id, caption, kind, source, members, members_display, status, reason]
+      properties:
+        id: {type: string, example: c3}
+        fig_id: {type: string, description: 同 id（与 WP3 mock 字段对齐）}
+        caption: {type: string, example: 丝杠组件分解示意图}
+        kind: {type: string, enum: [assembly, exploded]}
+        source:
+          type: object
+          properties:
+            kind: {type: string, enum: [whole, axis, split, subassembly, coaxial]}
+            id: {type: string, example: "sub:DEMO-VISE-ASSY/VISE-SPINDLE-ASM"}
+            label: {type: string}
+        members: {type: array, items: {$ref: '#/components/schemas/MemberRef'}}
+        members_display: {type: array, items: {type: string}, description: 与 members 一一对应的显示名（中文名或零件名）}
+        labels: {type: integer, description: 试渲染计划下的有效标号数}
+        standard_parts: {type: array, items: {type: string}, description: 本候选里按标准件规则 label:none 的零件}
+        placeholder_terms: {type: integer, description: 试渲染时为空白术语填了几个占位名（不写回计划）}
+        ambiguous_members: {type: array, items: {$ref: '#/components/schemas/AmbiguousMember'}}
+        status: {type: string, enum: [pass, fail, pending]}
+        reason: {type: string, description: 白话原因（不含 JSON 字段名）}
+        detail: {type: string, nullable: true, description: 渲染器原始报错（技术细节，可折叠显示）}
+        suggestion: {type: string, nullable: true}
+        plan_errors: {type: array, items: {type: object}}
+        qa:
+          type: object
+          nullable: true
+          properties:
+            pass: {type: boolean}
+            failed:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: {type: string}
+                  title_zh: {type: string}
+                  hint_plain: {type: string}
+                  fix_action: {$ref: '#/components/schemas/FixAction'}
+            text_height_mm: {type: number, nullable: true}
+            labels: {type: integer, nullable: true}
+            error_code: {type: string}
+        version: {type: string, nullable: true, description: 候选专属版本 id（<job_id>-c<k>，在 <工程>/candidates/ 版本库，从不成为 current）}
+        preview:
+          type: object
+          nullable: true
+          description: 只对 pass 候选给出；URL 形如 /files/{pid}/cand/fig1.svg?v=<version>（只服务已封口的候选版本）
+          properties:
+            svg: {type: string}
+    SuggestRequest:
+      type: object
+      properties:
+        label_standard_parts: {type: boolean, default: false, description: true = 标准件也发标记（关闭默认 label:none）}
+        max_candidates: {type: integer, minimum: 1, maximum: 16, default: 8}
+        standard_part_rule:
+          type: object
+          description: 覆盖标准件规则（契约 §14.2）；pattern / except 为正则，IGNORECASE，英文按整词
+          properties:
+            pattern: {type: string, default: "SCREW|BOLT|NUT|WASHER|PIN|BEARING|螺钉|螺栓|螺母|垫圈|销|轴承"}
+            except: {type: string, default: "(?:LEAD|BALL)[-_ ]?(?:SCREW|NUT)|丝杠|丝母"}
+            whole_word_latin: {type: boolean, default: true}
+    SuggestResult:
+      description: 候选分图作业（kind=suggest）成功后的 Job.result。
+      type: object
+      properties:
+        schema: {type: string, example: patent-figure-candidates/1}
+        project_id: {type: string}
+        job_id: {type: string}
+        plan_etag: {type: string, description: 提交时的 plan ETag}
+        assembly_sha256: {type: string}
+        standard_part_rule: {type: object}
+        label_standard_parts: {type: boolean}
+        standard_parts: {type: array, items: {type: string}}
+        instances_exact: {type: boolean, description: false = 缺逐实例路径，同名跨子装配无法识别（见 warnings）}
+        candidates: {type: array, items: {$ref: '#/components/schemas/Candidate'}}
+        summary:
+          type: object
+          properties: {total: {type: integer}, pass: {type: integer}, fail: {type: integer}, pending: {type: integer}}
+        empty_reason: {type: string, nullable: true, description: 没有候选通过（或无可出图零件）时的白话原因；有通过的为 null}
+        guide:
+          type: object
+          nullable: true
+          description: 「请框选分组」引导（仅 empty_reason 非空时给出）
+          properties:
+            action: {type: string, enum: [box_select]}
+            title: {type: string, example: 请框选分组}
+            steps: {type: array, items: {type: string}}
+        warnings: {type: array, items: {type: string}}
+    AcceptCandidatesRequest:
+      type: object
+      required: [candidate_ids]
+      properties:
+        job_id: {type: string, description: 候选分图作业 id；缺省取该工程最近一次}
+        candidate_ids: {type: array, items: {type: string}, minItems: 1}
+        mode: {type: string, enum: [append, replace], default: append}
+        apply_standard_labels: {type: boolean, default: true, description: 把候选的 standard_parts 写成 label:none（仅当管辖该零件的术语行只覆盖标准件时）}
+        members:
+          type: object
+          description: 可选：按候选 id 覆盖成员（用户在界面上改组后提交），值为 MemberRef 数组
+          additionalProperties: {type: array, items: {$ref: '#/components/schemas/MemberRef'}}
+        plan_etag: {type: string, description: 与 If-Match 等价}
+    AcceptCandidatesResult:
+      type: object
+      properties:
+        ok: {type: boolean}
+        plan_etag: {type: string, description: 写入后的新 ETag（响应头 ETag 同值）}
+        mode: {type: string}
+        added_figures: {type: array, items: {type: string}, example: [fig2, fig3]}
+        standard_labels_set: {type: array, items: {type: string}}
+        standard_labels_skipped: {type: array, items: {type: string}}
+        accepted_failed: {type: array, items: {type: string}, description: 被接受但试渲染未过闸的候选 id（允许，仅提示）}
+        plan_valid: {type: boolean}
+        issues: {type: array, items: {type: object}}
+    PageCheck:
+      type: object
+      properties:
+        page: {type: integer}
+        figure: {type: string}
+        ok: {type: boolean}
+        errors: {type: array, items: {type: string}}
+        page_mm: {type: array, items: {type: number}}
+        image_mm: {type: object, properties: {left: {type: number}, top: {type: number}, width: {type: number}, height: {type: number}}}
+        image_px: {type: array, items: {type: integer}}
+        dpi_effective: {type: number}
+        scale: {type: number, description: 页面图宽 ÷ 源图取景窗宽（不放大，≤1）}
+        min_text_mm: {type: number, nullable: true}
+        min_text_px: {type: number, nullable: true}
+        caption: {type: string, nullable: true, example: 图1}
+        caption_ink: {type: number, nullable: true, description: 图号位置的墨迹占比（从文件里的图片像素算，透明度合成到白底）}
+        render_caption_ink: {type: number, nullable: true, description: 仅 PDF 且有独立渲染器：渲染整页后图号位置看得见的墨迹占比}
+        render_match:
+          type: object
+          nullable: true
+          description: >
+            仅 PDF 且有独立渲染器（R2k）：渲染结果与「源 DXF 按写出端同一函数、同 dpi 栅格并放到写出端位置」的
+            预期页面做空间比对。墨迹 = 灰度 < 128；容差 2 px；iou ≥ 0.90、caption_iou ≥ 0.80、
+            background_nonwhite（预期无墨迹处灰度 < 250 的占比）≤ 0.005，任一不满足即该页不通过
+          properties:
+            dpi: {type: integer, description: 渲染与预期栅格的 dpi（导出 dpi，至多 300）}
+            iou: {type: number}
+            recall: {type: number, description: 源图墨迹在 2 px 内找得到渲染墨迹的占比}
+            precision: {type: number, description: 渲染墨迹在 2 px 内对得上源图墨迹的占比}
+            caption_iou: {type: number, nullable: true}
+            background_nonwhite: {type: number}
+        render_unverified:
+          type: string
+          nullable: true
+          description: >
+            R2l：独立渲染器自身出错（重试 1 次后仍失败）或渲染比对无法完成时的原因。这不是对文件内容的判定：
+            没有其他不通过项时整份 PDF 为 status=unverified（不是 ok，也不是 fail）
+    DocumentCheck:
+      description: 对写出的 PDF / Word 文件本身逐页核验（deliverable_check），不信任写出端自报。
+      type: object
+      properties:
+        file: {type: string, example: 说明书附图_递交版.pdf}
+        format: {type: string, enum: [pdf, docx]}
+        ok: {type: boolean}
+        pages: {type: integer}
+        expected_pages: {type: integer, description: = 本版本结构附图数（流程图不进 PDF/Word）}
+        errors: {type: array, items: {type: string}}
+        page_checks: {type: array, items: {$ref: '#/components/schemas/PageCheck'}}
+        path: {type: string, nullable: true, description: 包内相对路径；不通过（含核验程序异常）的在 _未通过核验/ 下}
+        layout_verified:
+          type: string
+          enum: [file-geometry, structural]
+          description: >
+            file-geometry = PDF 的页幅与图片位置取自文件里的绘制指令与像素；structural = Word 按文档结构
+            严格等价核验（单节、规范页幅页边、每段恰一张行内图片、零缩进单倍行距居中、第 2 段起段前分页、
+            无额外段落/分页/样式），没有用 Word 排版引擎实测
+        layout_note: {type: string, example: "Word 按文档结构核验，实际排版以 Word 打开为准"}
+        render_check:
+          type: string
+          enum: [pypdfium2, unavailable]
+          description: >
+            仅 PDF：独立渲染器（只有 pypdfium2）逐页渲染核验可见性；没装为 unavailable。
+            R2j 裁决起是 PDF 通过的必要条件：unavailable 时 status=unverified、ok=false
+        status:
+          type: string
+          enum: [ok, fail, unverified]
+          description: >
+            ok = 全部核验通过（PDF 含独立渲染）；fail = 有核验不通过，或文件与导出时记录的 sha256 不符；
+            unverified = 没有不通过项，但缺独立渲染器（或缺 pypdf）无法确认可见性——不是通过
+        sha256: {type: string, nullable: true, description: 被核验文件的 sha256（写出时即记录；读不了为 null）}
+        sha256_verified:
+          type: boolean
+          nullable: true
+          description: true = 与导出记录的 sha256 一致；false = 不一致（文件已被修改，未做其余核验）；null = 未给出预期值
+    ExportItem:
+      description: 导出屏的逐「版本 × 格式」汇总行。
+      type: object
+      properties:
+        variant: {type: string, enum: [递交版, 交底版, 原始]}
+        format: {type: string, enum: [pdf, docx, dxf, dwg, png, svg]}
+        status:
+          type: string
+          enum: [ok, skip, fail, unverified]
+          description: 组内有 fail → fail；否则有 unverified → unverified；全 ok → ok；否则 skip
+        reason: {type: string}
+        figures: {type: integer}
+        file: {type: string, nullable: true}
+        role: {type: string, enum: [主交付, 源文件，供再编辑, 预览]}
+    ExportResult:
+      description: 导出作业（kind=export）成功后的 Job.result（GET /v1/exports/{id} 返回 Job，清单在 result 内）。
+      type: object
+      properties:
+        export_id: {type: string}
+        render_job_id: {type: string}
+        render_plan_etag: {type: string}
+        ok: {type: boolean, description: 没有任何请求项 fail 或 unverified}
+        manifest:
+          type: object
+          additionalProperties: {type: string, enum: [ok, skip, fail, unverified]}
+          description: 键 "图号/版本/格式"（版本为 交底版/递交版）；unverified = PDF 缺独立渲染器无法核验可见性
+        reasons:
+          type: object
+          additionalProperties: {type: string}
+          description: 每个 skip/fail 项的原因
+        items: {type: array, items: {$ref: '#/components/schemas/ExportItem'}}
+        documents:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/DocumentCheck'}
+        missing_files: {type: array, items: {type: string}}
+        files: {type: array, items: {type: string}}
+        seal:
+          type: object
+          description: >
+            R2k：导出目录封口。导出报告与本结果写进导出作业自己的目录（result.json），连同 bundle/ 全部文件与
+            bundle.zip 一起记入 seal.json（逐文件 size + sha256），文件随即只读；这里记 seal.json 的 sha256——
+            以此服务端封口记录为准。下载前先校验封口，不符返回 409
+          properties:
+            file: {type: string, example: seal.json}
+            sha256: {type: string}
+        sha256:
+          type: object
+          additionalProperties: {type: string}
+          description: >
+            哈希封印（R2j 裁决）：包内相对路径 → 写出时的 sha256（《核验报告.json》自身除外）。这是权威记录；
+            复核导出包里的文件时先比对，不一致即判「文件已被修改，请使用导出包原文件」且不做其余核验。
+            核验只对导出包原文件有效
+        spec: {type: object, description: 本次版式（页幅、页边、图区预设、dpi、字高阈值）}
+        note: {type: string, example: 精确图片参数以当期《电子申请文件格式要求说明》为准}
+        notes: {type: array, items: {type: string}}
+        dwg_log: {type: array, items: {type: string}}
+        download_url: {type: string}
+    Capabilities:
+      type: object
+      properties:
+        display_name: {type: string, example: 墨线}
+        export:
+          type: object
+          properties:
+            formats: {type: array, items: {type: string}}
+            primary_formats: {type: array, items: {type: string}, example: [pdf, docx]}
+            source_formats: {type: array, items: {type: string}, example: [dxf, dwg]}
+            variants: {type: object}
+            pdf_available: {type: boolean}
+            pdf_check_available:
+              type: boolean
+              description: >
+                true = 有 pypdf 且有独立渲染器 pypdfium2，PDF 可判通过；false = 缺其一，导出的
+                PDF 一律为 unverified（不是通过），原因见 unavailable_reasons.pdf
+            pdf_render_check_available: {type: boolean, description: 是否有独立渲染器（R2j 裁决起是 PDF 通过的必要条件）}
+            pdf_renderer: {type: string, nullable: true, enum: [pypdfium2, null]}
+            pdf_render_required: {type: boolean, description: 恒为 true：PDF 通过须经独立渲染}
+            statuses: {type: array, items: {type: string}, example: [ok, skip, fail, unverified]}
+            integrity:
+              type: object
+              description: 哈希封印说明（algorithm=sha256；核验只对导出包原文件有效）
+            docx_available: {type: boolean}
+            dwg_available: {type: boolean, description: false 时前端事前禁选 DWG；后端对 DWG 一律 skip 并给原因}
+            dwg_route: {type: string, nullable: true, enum: [autocad, libredwg, null]}
+            unavailable_reasons: {type: object, additionalProperties: {type: string}}
+            sheet_presets: {type: object}
+            default_preset: {type: string}
+            dpi: {type: object, properties: {default: {type: integer}, min: {type: integer}, max: {type: integer}}}
+            page: {type: object}
+            min_text_mm: {type: number}
+            min_text_px: {type: number}
+            note: {type: string, description: 界面/README 旁注原文}
+            layout_verification:
+              type: object
+              description: 各格式的版面核验方式（pdf=file-geometry、docx=structural）与 Word 旁注
+              properties:
+                pdf: {type: string}
+                docx: {type: string}
+                docx_note: {type: string}
+            files: {type: array, items: {type: string}}
+        ai:
+          type: object
+          properties:
+            configured: {type: boolean}
+            provider: {type: string}
+            provider_label: {type: string}
+            outbound_fields: {type: array, items: {type: string}, example: [part_names, part_codes]}
+            outbound_note: {type: string}
+        suggest: {type: object}
+        examples: {type: array, items: {type: string}}
+        auth: {type: object}
+    DraftTermsRequest:
+      type: object
+      properties:
+        selectors: {type: array, items: {type: string}, description: 选中的零件名；缺省 = 全部空白术语的零件}
+        apply: {type: boolean, default: false, description: true 时服务端经 project_io.update_plan 只填空白并返回新 ETag}
+        plan_etag: {type: string, description: 与 If-Match 等价（apply 时校验）}
+    DraftTermsResult:
+      type: object
+      properties:
+        status: {type: string, enum: [ok, ai_not_configured]}
+        project_id: {type: string}
+        ai_configured: {type: boolean}
+        provider: {type: string}
+        provider_label: {type: string}
+        outbound_fields: {type: array, items: {type: string}, example: [part_names, part_codes]}
+        outbound_note: {type: string}
+        suggestions:
+          type: array
+          items:
+            type: object
+            properties:
+              selector: {type: string}
+              term: {type: string}
+              label: {type: string, enum: [once, none]}
+              confidence: {type: string, enum: [high, medium, low]}
+              reason: {type: string}
+        skipped:
+          type: array
+          items: {type: object, properties: {selector: {type: string}, reason: {type: string}}}
+        applied:
+          type: object
+          nullable: true
+          properties:
+            filled: {type: array, items: {type: string}}
+            kept_human: {type: array, items: {type: string}}
+            added: {type: array, items: {type: string}}
+        plan_etag: {type: string, description: 当前（apply 后为新）plan ETag；响应头 ETag 同值}
+        hint: {type: string}
 security:
   - bearer: []
   - sessionCookie: []
@@ -167,6 +571,10 @@ paths:
     post:
       tags: [工程]
       summary: 从内置示例新建/引用工程
+      description: >
+        gearbox / vise / valve 是三个公开演示模型（WP2）：首次使用时作业里现场生成 STEP（OCP 只在
+        生成器子进程里）、建工程 example-<名> 并装入示例计划；作业等到工程 ready 才 succeeded。
+        synthetic 为仓库自带合成装配体。已存在则直接引用。
       requestBody:
         required: true
         content:
@@ -175,16 +583,31 @@ paths:
               type: object
               required: [example]
               properties:
-                example: {type: string, example: synthetic}
+                example: {type: string, enum: [gearbox, vise, valve, synthetic], example: vise}
       responses:
         "202":
           content:
             application/json:
               schema: {$ref: '#/components/schemas/JobRef'}
         "404": {description: 没有该示例}
+  /v1/capabilities:
+    get:
+      tags: [工程]
+      summary: 能力：导出格式与 DWG 可用性、版式预设、AI 通道与外发字段（事前告知，前端据此禁选）
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Capabilities'}
   /v1/projects/{pid}:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
-    get: {tags: [工程], summary: 工程摘要（映射到结构/图形接口）, responses: {"200": {description: ok}}}
+    get:
+      tags: [工程]
+      summary: 工程摘要（含 plan_etag 与最近一次候选分图状态）
+      responses:
+        "200":
+          description: >
+            工程摘要 + plan_etag + candidates（{job_id, state, summary, empty_reason, url}，没生成过为 null）
   /v1/projects/{pid}/plan:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
     get:
@@ -227,7 +650,33 @@ paths:
       responses: {"200": {description: ok}}
   /v1/projects/{pid}/ai/draft-terms:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
-    post: {tags: [AI], summary: 让 DeepSeek 起草零件名, responses: {"200": {description: ok}}}
+    post:
+      tags: [AI]
+      summary: AI 起名接力（语义冻结，契约 §14.4）
+      description: >
+        输入选中的 selectors；**只对空白术语**返回建议（confidence + reason），人填过的进 skipped；
+        外发载荷在序列化边界限定为「选中且空白」的零件——其他零件的名称、计划里的术语、术语库与 BOM
+        条目一律不外发（修复轮 1）；apply=true 写回时只改选中且仍空白的零件——共享的通配术语行
+        （如空白的 SYN-*）原样保留，为该零件在其前插入精确行（修复轮 2）；
+        **默认不写 plan**——前端经 PUT /plan（If-Match）落盘；apply=true 时服务端经
+        project_io.update_plan 只填空白并返回新 ETag（If-Match / plan_etag 不符 409）。
+        没有大模型通道 → 200 + status=ai_not_configured（不发任何外部请求）。每次都返回
+        outbound_fields 供外发前明示。（MCP 工具 ai_draft_terms 为兼容旧客户端 apply 缺省 true。）
+      parameters:
+        - {in: header, name: If-Match, schema: {type: string}, description: apply=true 时的期望 ETag}
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DraftTermsRequest'}
+      responses:
+        "200":
+          headers: {ETag: {schema: {type: string}}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DraftTermsResult'}
+        "409": {description: apply=true 且 ETag 不匹配}
+        "422": {description: selectors 不是字符串数组}
+        "502": {description: "大模型通道调用失败（error.code = ai_call_failed）"}
   /v1/projects/{pid}/render:
     parameters:
       - {in: path, name: pid, required: true, schema: {type: string}}
@@ -262,18 +711,77 @@ paths:
     parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
     post:
       tags: [工程]
-      summary: 候选分图（WP2 实现；本文件先冻结形态）
-      description: WP1 未实现；形态在此冻结，WP2 填充（返回 202 + job_id 的候选+试渲染作业）。
+      summary: 候选分图（202 → kind=suggest 作业：生成候选 + 一个作业内串行试渲染全部候选）
+      description: >
+        候选来源：整机装配图（兜底，允许被闸门拦下）、沿主轴整机分解图、split_suggestions、每个
+        子装配 / 同轴组一张分解图。每个候选实际渲染 + 过 QA 后才有 pass/fail；产物进候选专属版本库
+        （<工程>/candidates/），**不改当前版本**。作业 result 为 SuggestResult；SSE stage 事件逐个报告
+        「试渲染候选 k/N」。可 DELETE /v1/jobs/{id} 取消（中止进行中的试渲染）。
       requestBody:
         content:
           application/json:
-            schema:
-              type: object
-              properties: {label_standard_parts: {type: boolean}}
+            schema: {$ref: '#/components/schemas/SuggestRequest'}
       responses:
         "202":
-          content: {application/json: {schema: {type: object, properties: {job_id: {type: string}}}}}
-        "501": {description: WP1 未实现}
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {project_id: {type: string}, job_id: {type: string}}
+        "400": {description: standard_part_rule 不是合法正则 / max_candidates 越界}
+        "409": {description: 工程还没准备好}
+  /v1/projects/{pid}/plan/candidates:
+    parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
+    get:
+      tags: [工程]
+      summary: 最近一次候选分图作业（Job，result 为 SuggestResult）
+      responses:
+        "200": {content: {application/json: {schema: {$ref: '#/components/schemas/Job'}}}}
+        "404": {description: 还没生成过候选}
+  /v1/projects/{pid}/plan/candidates/accept:
+    parameters: [{in: path, name: pid, required: true, schema: {type: string}}]
+    post:
+      tags: [工程]
+      summary: 接受候选分图写入计划（先在当前装配体上解析每个成员，解析不了 422）
+      description: >
+        每个被接受的候选写成一张分图（id 取 figN 空号，members 为转义后的精确零件名选择器），给没有
+        术语行的成员补空白术语行，标准件按 apply_standard_labels 写 label:none。成员的断言在 plan 锁内
+        完成，任一成员（零件不存在 / 退化 / 被 source 排除 / 组解析不到）解析不了 → 422，计划不变。
+        装配体与候选生成时不同（sha256 变了）→ 409。经 project_io.update_plan 写入，If-Match 不符 409。
+      parameters:
+        - {in: header, name: If-Match, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AcceptCandidatesRequest'}
+      responses:
+        "200":
+          headers: {ETag: {schema: {type: string}}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AcceptCandidatesResult'}
+        "400": {description: candidate_ids 缺失 / mode 非法}
+        "409": {description: 候选作业不属于本工程、未成功、装配体已变化，或 ETag 不匹配}
+        "422":
+          description: 候选不存在，或成员在当前装配体里解析不到
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: object
+                    properties:
+                      message: {type: string}
+                      unresolved:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            candidate: {type: string}
+                            member: {}
+                            reason: {type: string}
   /v1/projects/{pid}/figures:
     parameters:
       - {in: path, name: pid, required: true, schema: {type: string}}
@@ -322,9 +830,13 @@ paths:
         产物快照打包，不读共享工作目录（R1 #7）。与浏览器导出、MCP get_export 共用单一导出服务
         （R1e #3）：提交时在版本库状态锁内一次完成「完整性校验（按声明的产物清单，缺失/截断/
         零字节即拒）+ 可发布（封口 ok）+ 登记引用」，失败 409；导出结束或任何失败路径释放引用。
-        清单按「图号×版本×格式」逐项核对，区分 skip（不支持，如本轮的 pdf）与 fail（源缺失/为空
-        或生成失败）（R1 #8）。variant/formats/dpi 真实生效；未知 variant 400；sheet_preset 尚未
-        实现，传入即 400（R1 #12）。F1 的 PDF 主交付在 WP2。
+        WP2 F1：PDF / Word 是主交付——每个带图号的版本（递交版 / 交底版）各一份，A4、页边
+        25/25/15/15 mm、图区预设 standard 170×257 / conservative 165×245、dpi 72–600（默认 300），
+        页序 = 图号序；写出后对**文件本身**逐页核验（页幅、页边、缩放后最小字高 mm 与 px、图号存在、
+        页数 = 图数、文件齐全），不通过的文档移到包内 _未通过核验/，对应项 fail 并给原因。DXF / DWG
+        为源文件；DWG 转换器不可用 → skip + 原因（能力接口 dwg_available=false 事前告知）。包内另附
+        附图说明.txt、核对清单.txt（人工核对说明书件号，M1 无自动对表）、核验报告.json。
+        清单按「图号×版本×格式」逐项 ok/skip/fail（R1 #8），每个 skip/fail 在 reasons 里有原因。
       requestBody:
         content:
           application/json:
@@ -335,9 +847,10 @@ paths:
                 variant: {type: string, enum: [filing, disclosure, both], default: both}
                 formats:
                   type: array
-                  items: {type: string, enum: [docx, dxf, dwg, png, pdf]}
-                dpi: {type: integer, default: 300, description: PNG/Word 栅格分辨率}
-                sheet_preset: {type: string, description: 尚未实现，传入返回 400}
+                  items: {type: string, enum: [pdf, docx, dxf, dwg, png]}
+                  default: [pdf, docx, dxf]
+                dpi: {type: integer, default: 300, minimum: 72, maximum: 600, description: PDF/Word/PNG 栅格分辨率}
+                sheet_preset: {type: string, enum: [standard, conservative], default: standard}
                 plan_etag:
                   type: string
                   description: 与被导出渲染的输入版本比对，不一致 409（而非与当前 plan 比）
@@ -351,16 +864,17 @@ paths:
                   export_id: {type: string}
                   job_id: {type: string}
                   render_job_id: {type: string}
-        "400": {description: 传了尚未实现的参数（如 sheet_preset）或未知 variant}
+        "400": {description: 未知 variant / sheet_preset / format，或 dpi 越界}
         "409": {description: 没有可导出的成功渲染、其版本未通过完整性校验/未全部过闸，或 plan_etag 与被导出渲染不一致}
       x-manifest-note: >
-        作业 result.manifest 的键是 "图号/版本/格式"（版本为 交底版/递交版），值为 ok|skip|fail；
-        result.notes 与 result.dwg_log 保留错误明细。
+        作业 result 为 ExportResult：manifest 的键是 "图号/版本/格式"（版本为 交底版/递交版），值为
+        ok|skip|fail；reasons 给每个 skip/fail 的原因；items 是逐「版本×格式」汇总行；documents 是
+        每份 PDF/Word 的逐页核验报告。
   /v1/exports/{export_id}:
     parameters: [{in: path, name: export_id, required: true, schema: {type: string}}]
     get:
       tags: [导出]
-      summary: 导出作业状态（result 内含清单与下载地址）
+      summary: 导出作业状态（Job；result 为 ExportResult：清单、逐页核验与下载地址）
       responses:
         "200": {content: {application/json: {schema: {$ref: '#/components/schemas/Job'}}}}
         "404": {description: 未找到}
@@ -372,6 +886,7 @@ paths:
       responses:
         "200": {description: zip, content: {application/zip: {schema: {type: string, format: binary}}}}
         "404": {description: 还没就绪}
+        "409": {description: 导出目录封口校验不通过（zip 或任一封口文件被改动 / 缺失 / 多出）——不提供下载，请重新导出}
   /v1/flowcharts/guide:
     get: {tags: [流程图], summary: 流程图 JSON 格式说明, responses: {"200": {description: ok}}}
   /v1/flowcharts/render:
@@ -394,9 +909,10 @@ paths:
       tags: [MCP]
       summary: MCP（Streamable HTTP, JSON-RPC 2.0）
       description: >
-        千问办公等客户端按 URL 挂载，带 Bearer token。工具：list_projects、get_project_parts、
+        MCP 客户端按 URL 挂载，带 Bearer token。工具：list_projects、get_project_parts、
         update_terms、render_project、get_project_figures、ai_draft_terms、流程图相关，
-        以及 WP1 新增的作业工具 submit_render / get_job / cancel_job / get_export。
+        WP1 新增的作业工具 submit_render / get_job / cancel_job / get_export（WP2：可传 dpi、
+        sheet_preset），以及 WP2 新增的 suggest_figures（候选分图作业）/ accept_figure_candidates。
       requestBody:
         content: {application/json: {schema: {type: object}}}
       responses:

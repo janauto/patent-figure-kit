@@ -2255,3 +2255,368 @@ produced the bogus "jsonschema missing" reading on the first pass.
 - 效果：大小写别名（`CASE-OUT.VERSIONS/CURRENT.JSON`、`Case-Out/fig1.dxf`、首次发布
   `FIRST/OUT/...`、`--cache CASE-OUT`）与此前各类别名同样前置退出码 2、不写任何文件。Windows
   （NTFS 默认不区分大小写）同走探测路径，**待 Windows 实机验证**。
+
+## 14. WP2 大众化功能（2026-10-12）
+
+本节是 WP2 的实现契约；与 `docs/openapi.yaml`（字段级冻结）一致。出图链路（DXF、§5.4 摘要、
+N10/N10b 金样）**没有任何改动**：版式、dpi、候选、白话层都在出图之后。
+
+### 14.1 附图导出包（F1）：`deliverable.py` + `deliverable_check.py` + `export.build_bundle`
+
+| 常数（`patent_figure/deliverable.py`） | 值 | 说明 |
+| --- | --- | --- |
+| `PAGE_MM` | 210 × 297 | A4 竖放 |
+| `MARGINS_MM` | 上 25 / 左 25 / 下 15 / 右 15 | 审查指南五部一章 4.3（A15） |
+| `SHEET_PRESETS` | `standard` 170×257、`conservative` 165×245 | 图区居中放在可用区（170×257）内 |
+| `DEFAULT_DPI` / 范围 | 300 / 72–600 | 越界 → HTTP 400 / CLI 退出码 2 |
+| `WINDOW_PAD_MM` | 2.0 | 取景窗外扩；在图区放得下时按轴收缩，保证放得下的图 1:1 |
+| `MIN_TEXT_MM` | 3.5（= `layout.TEXT_FLOOR_MM`） | A16 |
+| `MIN_TEXT_PX` | 24 | 汉字可辨约 16 px，A11 缩印 2/3 仍清晰 → 16 ÷ 2/3 |
+| `CNIPA_NOTE` | 「精确图片参数以当期《电子申请文件格式要求说明》为准」 | 能力接口原样返回，界面/README 旁注 |
+
+**页面合成**：取景窗 = 规范版本 DXF 全部图元外廓 + 外扩（`sheet_window(msp, area)`，写出端与检查端
+共用，只依赖源图与所选预设）；缩放比 = min(1, 图区宽/窗宽, 图区高/窗高)——**从不放大**；栅格用
+ezdxf matplotlib 后端（面向对象 API，不碰 pyplot 全局状态），灰度 8 位，像素尺寸 = 版面尺寸 × dpi，
+轴精确钉在 wpx × hpx 像素上。PDF 用 `PdfPages`，`imshow(interpolation='none')` 使图片按原生分辨率
+嵌入；Word 由**内置固定模板**写出（修复轮 4 起，不再用 python-docx，见 §14.11）：同页边、每页一个居中嵌入式图片、第 2 页起 `pageBreakBefore`、图片按版面
+尺寸精确放置。页序 = 图号序（「图N」由标注步骤写进规范版本，N = plan.figures 顺序）。
+
+**逐页检查**（对**写出的文件本身**，`deliverable_check.check_document`）：
+
+1. 页数 = 图数（本版本的结构附图数；流程图属于工作区、不受版本约束，**不进 PDF/Word**，只拷到 `流程图/`）；
+2. 每页恰好一张图片；页幅 A4（±0.5 mm）；图片矩形完全在页边之内、不超出所选图区；Word 另核 `sectPr` 页边 ≥ 要求、
+   无浮动图片、无图片以外的文字段落、每张图前有分页；
+3. 宽高两向缩放一致（未拉伸）；缩放后最小字高 = 源 DXF 最小字高 × 实际缩放比 ≥ 3.5 mm；有效 dpi 按文件里图片的
+   **实际像素**算，栅格字高 ≥ 24 px（dpi 72 时 3.5 mm ≈ 9.9 px → 不通过）；
+4. 第 k 页源图图号文字是「图k」，且在**文件里该图片的像素上**图号位置确有墨迹（PDF 按 CTM 方向翻正后取像素）；
+5. 文件齐全：清单里每个 ok 项对应的文件都在包里且非空。
+
+任一不满足 → 该文件 `ok=false`，移到包内 `_未通过核验/`，对应「图号/版本/格式」项 `fail` 并在 `reasons` 写原因
+（同一文件里本页通过、别页不通过的，原因写「同一文件未通过核验」）。PDF 解析用可选包 **pypdf**，可见性用独立渲染器
+**pypdfium2**（修复轮 10 起两者缺一 → 该 PDF `unverified`，不得报 ok，见 §14.17；导出包文件另有 sha256 封印）；
+Word 用标准库 zipfile + ElementTree **只读**打开；像素解码用 Pillow（matplotlib 的
+必需依赖）。`conservative` 预设下需要缩小的图（取景窗高 > 245 mm）若含 3.5 mm 字，会被如实判不通过——这是设计行为
+（提示：换 `standard` 或拆图）。
+
+**导出包内容**：`说明书附图_{递交版,交底版}.{pdf,docx}`（主交付）、`递交版_仅图号/`、`交底版_带件号表/` 下的 DXF/DWG
+（源文件，供再编辑；DWG 转换器不可用 → `skip` + 原因，能力接口 `dwg_available=false` 事前告知）、`附图说明.txt`、
+`核对清单.txt`（机器核验结果 + 人工核对事项：M1 无说明书自动对表）、`核验报告.json`（版式规格 + 每份文件逐页结果 +
+缺失文件）、`reference-numerals.json`。`build_bundle` 返回 `{manifest, reasons, items, documents, missing_files,
+files, spec, ok, …}`；`items` 是逐「版本 × 格式」汇总行（`role` = 主交付 / 源文件，供再编辑 / 预览）。浏览器旧导出
+（`/p/{pid}/api/export`）走同一服务：Word 现在两版各一份，流程图不再拼进 Word。
+
+**入口**：REST `POST /v1/projects/{id}/export`（`sheet_preset`、`dpi` 真实生效，非法 → 400）、MCP `get_export`、
+CLI `scripts/export_figure_package.py`（经 `publish.prepare/run_and_publish` 渲染 + 标注，再经
+`export.acquire/build_bundle`）、复核 CLI `scripts/deliverable_check.py`。
+
+### 14.2 候选分图（F2-lite）：`suggest_plan.py` + `scripts/suggest_figure_plan.py` + `/plan/suggest`
+
+- **来源与顺序**：`whole` 整机装配图（兜底，允许被拦）→ `axis` 沿主轴整机分解图 → `split`（`split_suggestions`
+  每张图）→ `subassembly`（每个含 ≥2 种零件的中间装配节点）→ `coaxial`（每个含 ≥2 种零件的同轴组）。按
+  （kind, 成员集）去重；默认最多 8 个（请求可调 1–16），超出的写 `warnings`。
+- **成员契约**（Codex R3c #6）：`members = [{"part": <assembly 零件名原样>}]`，显示名在 `members_display`；
+  出处在 `source.id`（`sub:<装配路径>` / `coax:g2` / `split:<策略>/<序号>`）。接受时成员也可写 `{"group": source.id}`。
+- **标准件规则**（可配置，`standard_part_rule`）：`pattern` = 任务书正则原样
+  `SCREW|BOLT|NUT|WASHER|PIN|BEARING|螺钉|螺栓|螺母|垫圈|销|轴承`，IGNORECASE，匹配零件名与中文名；**英文片段按整词**
+  （两侧不能紧挨字母——否则 SPINDLE、PINION 会命中 PIN）；默认例外 `except` =
+  `(?:LEAD|BALL)[-_ ]?(?:SCREW|NUT)|丝杠|丝母`（传动丝杠/丝杠螺母是机构主件，不是紧固件）；`except` 可置空。
+  命中者试渲染时 `label:"none"`；`label_standard_parts=true` 关闭此规则。
+- **试渲染计划**（不写回用户计划）：用户术语（顺序与优先级不变）；丢掉一个零件都不命中的陈旧术语行；像件号的术语
+  文字换成占位；每个成员保证有术语行；空白术语填唯一占位「待命名零件一…」（字面不影响几何与编号）；标准件 none；
+  只有这一张图。先过 `plan.validate`，有 error 直接 `fail`（不渲染）。
+- **渲染**：一个作业内串行；每个候选经 `publish.render_candidate` → `studio_ext.render_version`（同一内部渲染步骤：
+  渲染器 `--json` 报告 → QA 闸门 → 标注 → 声明产物清单）进**候选专属版本库** `<ws>/candidates/results/<job>-c<k>/`，
+  `publish.seal_candidate` 封口（manifest `candidate: true`），**从不提交**——候选库没有 current，项目的
+  `current.json`、启动对账、回收、导出都看不到它；保留最近 3 次作业（`prune_candidates`）。预览只对 pass 候选给出：
+  `/files/{pid}/cand/fig1.svg?v=<版本>`（只服务已封口的候选版本，白名单 id）。
+- **状态**：只有渲染后才有 `pass`/`fail`（未渲染 `pending`）。读渲染器自己的报告：`gate_pass` → pass；QA 未过 →
+  `reason`「未过闸：<title_zh…>」+ `suggestion`（首项 `hint_plain`）；布局错误 → 白话 `reason` + 原文 `detail` +
+  建议。**全部未通过**（或无可出图零件）→ `empty_reason` + `guide`（「请框选分组」三步）。
+- **同名跨子装配**：需要 `analyze_assembly.py --instances` 的旁路文件 `assembly.instances.json`
+  （`patent-assembly-instances/1`，按 STEP sha256 绑定；`assembly.json` 不变，schema 不变）。子装配候选里，某名称的
+  实例多于组内实例 → `ambiguous_members[{part, selected, in_group, outside_paths, message:「按名称选中 N 处…」}]`；
+  同轴组只能给总数。缺旁路文件时作业现场生成一次；仍缺则退回 `path_sample` 并在 `warnings` 说明。
+- **接受**（`POST /plan/candidates/accept`）：作业须属本工程且成功；装配体 sha256 变了 → 409；在 plan 锁内
+  （`project_io.update_plan(if_match=…)`）对**当前**装配体与计划逐个解析成员（不存在 / 退化 / 被 source 排除 /
+  组解析不到）→ 任一失败 422 + `unresolved`，计划不变；成功则每个候选一张分图（`figN` 空号，成员为转义后的精确
+  选择器 `glob_escape`），补空白术语行，标准件 none（仅当管辖行只覆盖标准件），返回新 ETag。`mode=replace` 替换全部分图。
+- **MCP**：`suggest_figures`、`accept_figure_candidates`。CLI 不改任何计划。
+
+### 14.3 QA 白话层（F4）
+
+`qa.py` 每项检查（13 项 + `file_readable`/`qa_internal_error`）在 `qa.json` 里增补 `title_zh`、`hint_plain`
+（白话，不含 JSON/字段名）、`fix_action = {kind ∈ open_terms | split_figure | change_view | change_density,
+target: {figure, …}}`。`non_continuous`（写出端缺陷）与两个异常项的 `fix_action = null`，`hint_plain` 说明这不是
+用户能改的问题、请反馈。`hint` 原样保留给 Agent。工作台 `failed_checks` 行同样带这三个字段。
+
+### 14.4 AI 起名接力（F9）语义冻结
+
+`POST /v1/projects/{id}/ai/draft-terms`，body `{selectors?, apply=false, plan_etag?}`（或 If-Match）：只对**空白
+术语**的选中零件外发并返回建议（`confidence`、`reason`）；已命名的进 `skipped`；**默认不写 plan**（前端经 `PUT /plan`
+落盘）；`apply=true` 经 `project_io.update_plan` 只填空白（期间被人填了也不覆盖），返回新 ETag，ETag 不符 409。
+无大模型通道 → 200 `status: ai_not_configured`，**不发任何外部请求**。每次都返回 `outbound_fields: ["part_names",
+"part_codes"]` 与 `outbound_note`。通道调用失败 → 502 `ai_call_failed`。MCP 工具 `ai_draft_terms` 共用实现，为兼容
+旧客户端 `apply` 缺省 true。
+
+### 14.5 鉴权六路径与弃用头
+
+首页（`/api/wb/*`）、子应用（`/p/{pid}/api/*`）、SSE、下载（`/v1/exports/*/download`、`/files/*`）、REST、MCP：
+Bearer 与会话 Cookie `wb_token` 都可用；`?token=` 仅兼容期——只凭它通过的受保护请求，响应带 `Deprecation: true`、
+`Warning: 299 - "…deprecated…"`、`X-Auth-Deprecated: query-token`。所有候选凭据都做常数时间比较，第一个**有效**的
+胜出（陈旧的 query token 不会遮住有效的 Cookie）。首页 `/?token=` 是下发 Cookie 的引导，不算弃用。
+`tests/test_wp2_api.py::test_auth_six_paths` 对六条路径 × {Bearer, Cookie, query, 无} 逐一断言。
+
+### 14.6 能力接口与示例工程
+
+`GET /v1/capabilities`：显示名、导出格式 / 主交付 / 源文件、`pdf_check_available`、`docx_available`、
+`dwg_available` + `dwg_route`、`unavailable_reasons`、版式预设、dpi 范围、页边、字高阈值、`note`（CNIPA 旁注）、
+AI 通道与外发字段、候选规则、示例列表。`POST /v1/projects/from-example` 支持 `gearbox | vise | valve`
+（`patent_figure/examples.py`：首次使用在作业里调 `make_demo_assemblies.py` 生成 STEP——OCP 只在生成器子进程里——
+建 `example-<名>` 并装入已验证能过闸的示例计划；作业等到工程 ready 才 succeeded）与 `synthetic`。
+
+### 14.7 旁路清单增补
+
+- `zipfile.ZipFile` 允许用户新增 `patent_figure/deliverable_check.py`：**只读**打开写出的 Word 文件核验，不建归档
+  （`test_bypass_guard` 另有一条断言它从不以写模式打开）。
+- 候选渲染不是提交路径：`publish.render_candidate` / `seal_candidate` 只封口、不调 `commit_pointer`；
+  `current.json` 字面量仍只在 `versions.py`；`--in-place` 仍只由 `studio_ext.render_version` 传。
+- `dxf_to_svg` 移到 `patent_figure/svg_preview.py`（纯 ezdxf），`plan_studio.dxf_to_svg` 是同一函数对象。
+- 导出包 CLI 与工作台走同一对服务（`publish` 渲染提交、`export` 钉住 + 打包），不另起打包或发布代码。
+
+### 14.8 修复轮 1（Codex R2）收敛
+
+- **AI 外发范围在序列化边界限定**（R2 #1）：`workbench_llm.draft_terms` 组装请求时，零件清单、
+  「已定名」参考、术语库、BOM 一律只保留**本次要起名的零件**（选中且空白）的条目；REST、MCP、浏览器子应用
+  共用这一处。测试在 `chat_json` 处截获真实载荷，断言未选零件名、其他零件的术语、术语库与 BOM 条目都不出现。
+- **新 CLI 的写入守卫**（R2 #2）：`patent_figure/pathguard.py` 复用 WP1 的 `fsid` 与
+  `versions.protected_path_reason`：每个输出（报告、归档、工作目录、缓存、`--instances`）在写入前、且长任务在
+  真正写之前再查一次——不得落进任何版本库保留区（符号链接 / 大小写别名一并识别）、不得是或包含输入文件、声明互斥的
+  输出不得重叠；工作目录必须是新的 / 空的或带本工具标记（`.suggest-workdir` / `.export-workdir`）。
+  `suggest_figure_plan.py`、`export_figure_package.py`、`analyze_assembly.py`（`-o`/`--instances`）、
+  `deliverable_check.py` 全部接入；`test_bypass_guard` 静态钉住「新的带输出路径的 CLI 必须走 pathguard」，
+  `tests/test_cli_paths.py` 对渲染 CLI 的版本库与工作台工程做跨入口碰撞。
+- **Word 严格结构等价核验**（R2 #3）：页数不再由图片数推断后直接采信——只有当结构完全受控时（单节；sectPr 页幅
+  A4 竖放、页边与规范相等、无装订线 / 页眉页脚 / 分栏 / 文档网格；正文只有页段落；每段显式「段前 0、段后 0、单倍
+  行距」、零缩进、居中、第 2 段起段前分页、第 1 段没有；每段恰一张行内图片、无效果外扩 / 环绕距离 / 字符格式；
+  无文字、换行、分页符、样式、编号、框架、边框）才按「一段一页」计页，图片位置由页边 + 居中 + 零缩进计算；任一偏离
+  → 不通过。`documents{}` 与核对清单标注 `layout_verified: "structural"` 与「Word 按文档结构核验，实际排版以 Word
+  打开为准」；PDF 标 `file-geometry`。写出端同步把这些属性全部显式写出（模板默认 1.15 倍行距不再生效）。
+- **核验异常即不通过并隔离**（R2 #4）：生成失败、检查器抛异常、核验不通过三种情形统一走隔离——文件移到
+  `_未通过核验/`，`path` 记录真实位置，包根目录与归档根都不残留。
+- **候选回收受租约保护**（R2 #5）：候选作业开跑即对自己全部候选 id 登记 WP1 跨进程租约，结束（含取消 / 异常）
+  释放；取消时半成品版本标 cancelled；预览读取在租约内读出字节再返回。`prune_candidates` 在候选库锁内排除全部活动
+  租约与未封口未取消的目录，只回收已封口或已取消、且不在最近 N 次作业里的版本（顺带修了 `keep_jobs=0` 时
+  `[-0:]` 切片保留全部的问题）。`tests/test_candidate_gc.py`：四作业交错、作业运行中被并发回收、中途取消、
+  预览读取期间回收、另一进程持租约直到其退出。
+
+### 14.9 修复轮 2（Codex R2b）收敛
+
+- **AI 起名写回只动选中且空白的零件**（R2b #1）：`suggest_plan.fill_blank_terms` 按编号优先级找到管辖该零件的
+  术语行——已有名 → `kept_human`；没有行 → 追加精确（转义）行；行只覆盖这一个零件 → 原地填写；行是**共享的**
+  （如空白的 `SYN-*` 同时管着别的零件）→ 原行的 term 与 label 一律不动，在它**前面**插入该零件的精确行使其优先。
+  REST 与 MCP（`apply` 缺省 true）共用。
+- **Word 图片与继承格式白名单**（R2b #2）：每张行内图片必须与写出端完全同构——`graphicData` 里恰一张
+  `pic:pic`；`blip` 无效果子元素；`blipFill` 只有 `blip` + `stretch/fillRect`（无偏移），`srcRect` 若存在必须全零；
+  `spPr` 只有 `xfrm` + `prstGeom rect`；`xfrm` 无旋转、无翻转、`off`=(0,0)、`ext` 与 `wp:extent` 相同。段落缩进 /
+  间距不得用字符 / 行单位（`leftChars`、`firstLineChars`、`beforeLines`……，它们优先于显式置零的值）；文档默认段落
+  格式与默认段落样式不得带框架、编号、边框、分节或字符 / 行单位缩进间距，默认样式不得 `basedOn` 别的样式；节属性
+  只允许 `pgSz/pgMar/cols/docGrid`（`vAlign` 等一律拒绝）。另外两种格式都核对图片像素宽高比与显示尺寸一致（未被拉伸）。
+
+### 14.10 修复轮 3（Codex R2c）收敛
+
+- **Word 图片白名单改为封闭集**：`wp:inline` 整棵子树按写出端逐元素、逐属性比对（`_INLINE_SPEC`：
+  `extent`/`effectExtent`(全零)/`docPr`(id,name,descr)/`cNvGraphicFramePr`/`graphic`→`graphicData`(picture uri)→
+  `pic:pic`→`nvPicPr`(`cNvPr` id,name,descr + 空 `cNvPicPr`)、`blipFill`(`blip` 仅 `r:embed`、可选全零 `srcRect`、
+  `stretch/fillRect`)、`spPr`(`xfrm` 无旋转翻转、`off`=0、`ext`；`prstGeom rect`)）。**任何未列出的属性或子元素即拒绝**；
+  `wp:docPr` 或 `pic:cNvPr` 的 `hidden`（1/true）另按名报「图片被设为隐藏」。页段落、段落属性（spacing/ind/jc/
+  pageBreakBefore）、文字段、节属性（pgSz/pgMar/cols/docGrid）也只接受写出端产生的属性。
+
+### 14.11 修复轮 4（Codex R2d）收敛：Word 包整体封闭
+
+- **写出端固定模板**：`deliverable.write_docx` 不再用 python-docx，整个包由 `deliverable.docx_parts` 的固定模板
+  写出——`[Content_Types].xml`、`_rels/.rels`、`docProps/core.xml`（标题只取 `DOCX_TITLES` 三种）、`word/document.xml`、
+  `word/_rels/document.xml.rels`、`word/styles.xml`（只有 docDefaults + Normal；rPrDefault 显式 `vanish=0`、`webHidden=0`、
+  黑色、五号字；pPrDefault 单倍行距零间距零缩进）、`word/settings.xml`（最小集）与 `word/media/image{k}.png`。每页段落的
+  段落标记与图片所在文字段都显式写出受控 rPr（`vanish=0`、`webHidden=0`）。
+- **核验端封闭集**：`deliverable_check._package_conforms` 用读回的图片尺寸与标题重建全部非媒体部件，要求**部件集合相同、
+  逐字节相同**——样式（docDefaults 的 rPr 与 pPr、Normal 及任何新增样式）、设置、内容类型、关系、正文结构都不可能
+  带写出端没写的东西（继承的隐藏格式一并封住）。另对 styles/document/settings 扫描隐藏类格式（vanish/webHidden/
+  specVanish 非 0、白色文字、字号 0/1）给出白话原因。原有逐段结构检查与图片白名单保留（报具体原因）。
+- 导出包的 Word 因此不再依赖可选包 python-docx（`docx_available` 恒为真）。
+
+### 14.12 修复轮 5（Codex R2e）收敛：媒体与可见性
+
+- **Word 媒体封闭**：`deliverable_check.png_whitelist` 要求每张页面 PNG 与写出端同类——单帧、8 位灰度、无隔行，块只能是
+  `IHDR`、至多一个 `pHYs`（在图像数据前）、连续的 `IDAT`、空的末尾 `IEND`，CRC 全部正确、`IEND` 后无数据；`tRNS`、
+  alpha、调色板、`gAMA`/`iCCP`/`sRGB`、动画、文本等任何其他块一律拒绝。解码后再核单帧与 `L` 模式。
+- **墨迹按看得见的像素统计**：`visible_gray` 把任何透明度（alpha 通道、`tRNS`、调色板透明）合成到白底后再转灰度，图号墨迹
+  与字高检查都用它。
+- **PDF 图片与页面**：图片 XObject 字典只允许写出端的键（Type/Subtype/Width/Height/ColorSpace/BitsPerComponent/Filter/
+  DecodeParms/Length），`/SMask`、`/Mask`、`/ImageMask`、`/Decode`、`/OC`、`/SMaskInData` 按名拒绝；8 位；色彩空间只允许
+  DeviceGray / DeviceRGB 或它们的 Indexed；页面不得有注释，图形状态只能有 `/CA`、`/ca` 且为 1，图片之后不得再有任何绘制
+  操作，裁切区域必须完整包住图片。
+
+### 14.13 修复轮 6（Codex R2f）收敛：PDF 整体封闭 + 独立渲染
+
+- **内容流按写出端操作封闭集**：每页内容流必须与 matplotlib `PdfPages`（版本锁定 3.9.4）写出的固定序列逐个操作相同——
+  白底整页路径填充、与图片矩形相同的 `re W n` 裁切、唯一不透明图形状态 `/A1`、`cm`×2、`Do /I<k>`、`Q Q`；数值操作数
+  在 0.01 pt 内与固定值或彼此一致（裁切矩形 = 图片矩形）。任何别的操作（路径裁切、`INLINE IMAGE`、`sh`、文字、多余的
+  `Do`、`BDC/EMC` 可选内容标记……）都使序列不同 → 不通过。
+- **对象结构封闭**：文件尾只有 Size/Root/Info/ID，无加密；目录只有 Type/Pages（无可选内容组、动作、表单）；单层页树；
+  页面对象键恰为 Type/Parent/Resources/MediaBox/Contents/Annots（无 CropBox/Group/Rotate）、注释为空、MediaBox 为 A4、
+  内容流为单个 Flate 流；资源键固定，Font/Pattern/Shading 为空，XObject 恰为 `/I1…/In`，ExtGState 恰为 `/A1`
+  {Type, CA=1, ca=1}。
+- **独立渲染**：有独立渲染器 pypdfium2 时（见 §14.14、§14.21）逐页渲染，在图号位置与图片区域统计看得见的墨迹，
+  `render_check: "pypdfium2"`、`render_caption_ink`；没装则 `render_check: "unavailable"`（修复轮 10 起 PDF 为 unverified）。
+
+### 14.14 修复轮 7（Codex R2g）收敛：页树按引用、操作数按原生类型、渲染器许可
+
+- **页树按间接引用核对**：目录 `/Pages` 必须是间接引用；根节点只有 Type/Kids/Count（CropBox / Rotate / MediaBox 等可被继承的
+  键一律拒绝）；`/Kids` 是互不相同的页面间接引用、`/Count` 相符；每个页面**原始** `/Parent` 引用必须严格等于目录的 `/Pages`
+  引用（离树父对象无法再下传未检查的裁切 / 旋转）；pypdf 实际迭代的页面序列必须与 `/Kids` 逐一相同。
+- **操作数按 PDF 原生类型**：数值操作数只接受有限的 `NumberObject` / `FloatObject`，名称操作数只接受 `NameObject`；
+  `(1)` 这类字符串不再被 `float()` 当成数——内容流比对与 `_pdf_images` 几何复核都按此。
+- **独立渲染器许可**：渲染核验用 **pypdfium2**（BSD-3-Clause / Apache-2.0，doctor `deliverable-pdf-render`、
+  requirements 可选段）；`PFK_PDF_RENDERER=auto|none|pypdfium2`（§14.21：唯一渲染器）。
+  核心核验不依赖任何渲染器；PDF 封闭集回归在「无渲染器」与「pypdfium2」两种配置下各跑一遍。
+
+### 14.15 修复轮 8（Codex R2h）收敛：PDF 对象取值按原生类型、图片与页面字典封闭
+
+- **问题**：pypdf 把 PDF 名称与字符串都表示为 Python `str` 子类、数值表示为 `int`/`float` 子类，`str(x) == "/Indexed"`、
+  `int(x) == 8` 分不清名称 `/Indexed` 与字符串 `(/Indexed)`、整数 8 与字符串 `(8)`。渲染器分得清：PDFium 不认字符串色彩
+  空间 / 滤镜 / 宽度，图片不画，页面空白；pypdf 却照常解码，无渲染器时核验误报通过。
+- **按类型再比值**：核验依赖的每个字典值（解引用后）先核 PDF 类型、再核取值——名称只认 `NameObject`（`/Type`、`/Subtype`、
+  `/ColorSpace` 及 Indexed 数组首项与基色空间、`/Filter` 及其数组元素、目录 / 页树 / 页面 `/Type`、内容流 `/Filter`、
+  `/ProcSet` 各项）；整数键只认 `NumberObject`（`/Width`、`/Height`、`/BitsPerComponent`、Indexed 的 hival、`/DecodeParms`
+  各项、页树 `/Count`、文件尾 `/Size`；写出端不写实数，实数也拒绝）；数值只认有限的 `NumberObject`/`FloatObject`
+  （`/MediaBox` 四项、图形状态 `/CA`/`/ca`）。
+- **图片 XObject 字典封闭**：键恰为 Type/Subtype/Width/Height/ColorSpace/BitsPerComponent/Filter/DecodeParms，缺键或多键都
+  不通过（`/SMask` 等遮罩键仍按名报出；`/Interpolate` 这类布尔键不在写出端集合里，按未知键拒绝——写出端的图片与页面字典
+  都没有布尔键）。取值：`/XObject`、`/Image`、8 位；色彩空间为 DeviceGray / DeviceRGB，或
+  `[/Indexed 基色 hival 查找表]`（hival 0–255，查找表是 PDF 字符串且字节数 = (hival+1)×基色分量数）；`/Filter` 为单个
+  名称 `/FlateDecode`（数组形式拒绝）；`/DecodeParms` 为字典，键恰为 Predictor/Colors/Columns（BitsPerComponent 可选），
+  Predictor=10、Colors 与色彩空间一致、Columns=Width、BitsPerComponent=8。
+- **页面字典封闭**：键恰为 Type/Parent/Resources/MediaBox/Contents/Annots；`/Annots` 为空数组；`/MediaBox` 为 4 个数且 = A4；
+  `/Contents` 为单个流、字典只有 `/Filter /FlateDecode`；`/Resources` 为字典，Font/Pattern/Shading 为空字典，XObject 为字典且
+  每项是流，ExtGState 恰为 `/A1 {Type /ExtGState, CA 1, ca 1}`（类型逐项核），ProcSet 为名称数组。
+- **`/Length`**：pypdf 解析流时消费并删掉 `/Length`，核验看到的字典里没有它；非整数的 `/Length`（字符串、实数）会让 pypdf
+  解析该流时抛错——现在逐页处理包在异常隔离里，报「无法按写出端的固定结构解释」并判不通过，核验本身不再抛出（此前
+  `/Width` 写成字符串会让 `check_pdf` 直接抛 `TypeError`）。图片像素解码失败同样转为该页不通过并给出原因。
+- **回归**：`test_pdf_object_values_are_checked_by_pdf_type`（R2h 三例 `/Indexed`、`/Filter`、`/Width` 字符串替换，另含基色
+  空间、hival、位深、Subtype、Type、DecodeParms Columns/Predictor、`/Filter` 字符串数组、布尔键、MediaBox、页面 Type、内容流
+  Filter、图形状态 ca、页树 Count 共 17 例）与 `test_pdf_stream_length_must_be_a_pdf_integer`（字符串 / 实数 `/Length`），
+  全部在 `PFK_PDF_RENDERER=none` 与 `pypdfium2` 两种配置下各跑一遍：`none` 时核心核验独立判不通过；使图片不可见的各例由
+  pypdfium2 确认图号位置无墨迹。其余 PDF 回归（页数、页序、图号墨迹、页边 / A4 / 拉伸、遮罩 / 透明 / 覆盖 / 裁切、
+  保守图区）也改为两种配置各跑一遍。
+
+### 14.16 修复轮 9（Codex R2i）收敛：PDF 严格解析、重复键拒绝
+
+- **问题**：`PdfReader` 默认 `strict=False`，字典里重复的键（如 `/ca 1 /ca 0`）只记一条警告并保留**前值**，而 PDFium 取
+  **后值**——类型检查与封闭键集看到的是前值（不透明），屏幕上是后值（全透明 / 解码失败 / 宽度 1），无渲染器时空白页判通过。
+- **严格解析**：核验端 `PdfReader(path, strict=True)`；先按交叉引用表把**每个在用对象**逐一解析（`_pdf_parse_all`），任何
+  重复键、错误的流长度、畸形对象都使文档不通过，不论后续检查是否会碰到该对象；页面级的延迟解析异常照旧转为该页不通过
+  （核验不抛出）。重复键在原因里明说「PDF 字典里有重复的键（pypdf 取前值、PDFium 取后值）」。
+- **写出端自身可严格解析**：matplotlib 3.9.4 `PdfPages` 的产物在 `strict=True` 下逐对象解析无误、无警告（单元测试）；
+  N17 对下载包里每份 PDF 另行逐对象严格解析，dpi 72 的 PDF 也只因栅格字高不通过、无文档级错误。
+- **回归**：`test_pdf_duplicate_dictionary_keys_fail_without_a_renderer`——在原始字节里注入重复 `/ca`、`/Filter`、`/Width`
+  并修正 xref / startxref（合法文件），`none` 与 `pypdfium2` 两种配置下均不通过；`test_pdf_byte_patch_keeps_the_file_legal`
+  用同一改写手法做无害改动（同值换写法）仍通过，证明失败来自重复键而非文件损坏。
+
+### 14.17 修复轮 10（Codex R2j → 架构裁决）：哈希封印 + PDF 渲染核验必需
+
+- **裁决依据**：R2f–R2j 连续五轮都是同一类问题——pypdf（核验端）与 PDFium（阅读端）对同一份 PDF 字节的解释不同
+  （字符串冒充名称、重复字典键、重复 xref 条目……），逐项补解析规则是在追一个开放集合，永远追不完。结构核验只能证明
+  「pypdf 看到的是写出端的结构」，不能证明「阅读器看到的是同一页面」。因此不再逐项补规则，改为两道结构性防线；前几轮
+  的结构核验保留为纵深防御。
+- **哈希封印**：`export.build_bundle` 写出每个交付文件即取 sha256；PDF / Word 用写出那一刻的摘要作为 `expected_sha256`
+  去核验（核验的就是写出的那份字节）；包内除《核验报告.json》外的每个文件（PDF / Word / DXF / DWG / txt / json …）
+  的摘要记进导出结果 `sha256: {包内路径: 摘要}`（服务端导出作业结果，权威记录）与《核验报告.json》（包内对照）。
+  `deliverable_check.check_document(..., expected_sha256=)`：给出预期摘要时**先比对**，不一致 → `fail`
+  「文件已被修改，请使用导出包原文件」，**不做任何其余核验**；一致只说明是原文件，完整核验照常进行；报告带 `sha256`
+  与 `sha256_verified`。CLI `deliverable_check.py --sha256`。核对清单与 README：「核验只对导出包原文件有效」。
+- **渲染核验必需**：独立渲染（pypdfium2）是 PDF「通过」的必要条件。核验报告新增
+  `status`：`ok`（全部通过，PDF 含渲染）/ `fail`（有不通过项，或哈希不符）/ `unverified`（无不通过项，但缺渲染器或缺
+  pypdf，无法确认可见性）。判定次序：任一结构 / 页面 / 渲染错误 → `fail`；否则无渲染器 → `unverified`；否则 `ok`。
+  `unverified` 的 PDF 不是通过：清单项状态 `unverified`、原因「缺少 pypdfium2，无法核验 PDF 可见性」，文件同不通过的
+  一样移进 `_未通过核验/`（包根目录只放通过的主交付），导出结果 `ok=false`；`items` 组状态次序 fail > unverified >
+  ok > skip。能力接口 `pdf_check_available` = 有 pypdf **且**有渲染器，新增 `pdf_render_required: true`、`statuses`、
+  `integrity`；doctor 把 pypdfium2 标为「导出 PDF 必需」（仍按可选项计：它只决定导出 PDF 的判定，不在出图链路上）；
+  requirements 导出段写明 `pip install pypdf pypdfium2`。Word 保持整包逐字节模板比对 + 哈希封印，不受渲染器影响。
+- **验收与回归**：N17 要求有渲染器（能力接口自检），服务端核验的每份文件 `status=ok`、摘要与 `result.sha256` 一致；
+  下载包里每个文件先按服务端 `result.sha256` 比对（包内报告须与之一致），再带 `expected_sha256` 复核。单元测试：重复
+  xref 条目（R2j 原样注入，`/ca 0`）——无渲染器 `unverified`、pypdfium2 `fail`，无害对照（`/ca 1`）——无渲染器
+  `unverified`、pypdfium2 `ok`；PDF / Word 改一个字节 → 哈希 `fail` 且不做其余核验（PDF 那一字节不破坏文件，不带封印
+  时仍按好文件判）；无渲染器时 N17 形态的导出包 PDF 全部 `unverified`、导出 `ok=false`、Word / DXF 不受影响；导出后
+  按封印复核：原文件通过、改一字节失败。原有 PDF 回归在两种配置下：好文件 `none` 为 `unverified`、`pypdfium2` 为 `ok`，
+  坏文件两种配置下都必须是 `fail`（不是 `unverified`）。
+
+### 14.18 修复轮 11（Codex R2k）：渲染核验改为与源图的空间比对；导出目录封口
+
+- **问题**：修复轮 10 的独立渲染只看墨迹比例（图号区 ≥ 1.5%、图片区 > 0）。整页均匀灰底（PDFium 全像素 115）在每个位置
+  都算「墨迹」，仍判 ok。比例不是可见性。
+- **空间比对**（每页，PDF 有渲染器时）：渲染 dpi = 导出 dpi，至多 300；用写出端同一函数 `deliverable.rasterize` 把该页
+  源 DXF 按同一 dpi 栅格（含图号），放到写出端的版面位置（`place()` 的 x / top，像素取整），得到预期整页。两者用**同一
+  固定阈值**二值化：墨迹 = 灰度 < 128（`INK_LEVEL`），非白 = 灰度 < 250（`WHITE_LEVEL`）。容差 = 2 px（方形膨胀，
+  `MATCH_TOL_PX`）。指标：
+  - 找回率 recall = 预期墨迹中 2 px 内有渲染墨迹的占比；对上率 precision = 渲染墨迹中 2 px 内有预期墨迹的占比；
+    **墨迹 IoU = 1 / (1/recall + 1/precision − 1)**（容差为 0 时即标准 IoU），须 **≥ 0.90**（`MATCH_IOU_MIN`）；
+  - **图号区 IoU**（图号框四周外扩半个字高，同法计算）须 **≥ 0.80**（`CAPTION_IOU_MIN`）；
+  - **背景非白占比** = 预期非白区域膨胀 2 px 之外，渲染灰度 < 250 的像素占比，须 **≤ 0.5%**（`BACKGROUND_NONWHITE_MAX`）。
+  任一不满足 → 该页不通过并给出数值；指标记在每页 `render_match`。原有墨迹比例检查保留。写出端自产 PDF 在 72 / 150 /
+  300 / 600 dpi 下实测 IoU ≥ 0.9996、图号 IoU 1.0、背景非白 ≤ 0.02%。
+- **回归**（pypdfium2 下均不通过，无渲染器时仍为 `unverified`）：重复 xref 让 PDFium 画整页灰底（R2k 原样）、整页纯黑、图片
+  右移 5 mm、图片放大 5%（三者 pypdf 读到的仍是原内容流，结构核验全过）；只保留图号区的真实写出端 PDF（结构、几何、字高、
+  图号墨迹全过）。正常自产 PDF 通过。
+- **导出目录封口**：服务端导出作业把导出报告与作业结果写进导出自己的目录（`<jobs>/<export_id>/result.json`），连同
+  `bundle/` 全部文件与 `bundle.zip` 记入 `seal.json`（逐文件 size + sha256，同时内含 ok / manifest / reasons / documents /
+  sha256），fsync 后文件一律只读；`seal.json` 的 sha256 记在作业结果 `result.seal`（持久化的作业记录）——以此服务端封口
+  记录为准。`GET /v1/exports/{id}/download` 先校验封口（封口记录摘要、逐文件摘要、无多余文件），不符 → 409，不提供下载。
+  包内《核验报告.json》新增 `authority`：「以服务端封口记录为准」。CLI `export_figure_package.py` 与旧 Plan Studio 导出
+  不经服务端作业，不写封口（前者的 `--json` 输出含 `sha256`）。
+
+### 14.19 修复轮 12（Codex R2l）：渲染器与 matplotlib 的进程级互斥；渲染器出错 = 未核验
+
+- **问题**：每个导出作业在自己的线程里跑，`_render_gray` 直接打开 / 渲染 / 关闭 PDFium 文档，没有互斥；pypdfium2 明令禁止
+  不同线程同时调用 PDFium（即使是不同文档）。本机复现：8 线程 × 60 次渲染无锁时约 43% 报 `PdfiumError: Failed to load page`，
+  合法交付被判失败。自查同类：matplotlib 也不是线程安全的，并发导出时写 PDF 随机报「生成失败：cmap」。
+- **互斥**：`deliverable_check._RENDER_LOCK`（模块级 `threading.Lock`）覆盖 PDFium 的整个使用过程——打开、渲染、
+  把像素**复制**出位图（`np.array(..., copy=True)`，不再持有指向位图缓冲区的视图）、关闭位图 / 页面 / 文档。
+  `deliverable.MPL_LOCK`（模块级 `threading.RLock`）覆盖导出链路上 matplotlib 的全部使用：`rasterize`（写出端与核验端
+  同一函数）、`write_pdf`、导出 PNG 预览。两把锁从不嵌套。跨进程并发不在本轮范围（服务在进程内渲染；若将来需要，改为独立
+  渲染子进程）。
+- **渲染器出错 ≠ 内容不通过**：渲染失败重试 1 次（`RENDER_ATTEMPTS = 2`）；仍失败（或渲染比对本身无法完成）→ 该页记
+  `render_unverified` 原因，不计为页面错误；整份文件没有其他不通过项时 `status=unverified`（原因「独立渲染器出错，无法核验
+  可见性」），导出清单项 `unverified`、导出 `ok=false`——不是 `fail`；有真实内容不通过项时仍为 `fail`，渲染器原因一并列出。
+- **回归**：8 线程 × 60 次渲染无错误、位图逐像素一致；8 个导出作业并发（各自线程，PDF + Word，独立渲染核验）全部通过；
+  渲染器每次都抛错 → `unverified`（每页恰好尝试 2 次），只错一次 → 重试后通过，72 dpi 的真实不通过文件仍为 `fail`；导出层
+  渲染器出错 → PDF 项 `unverified`、Word 不受影响。
+
+### 14.20 修复轮 13（Codex R2m）：matplotlib 锁下沉到所有入口
+
+- **问题**：修复轮 12 的 matplotlib 锁只包住导出的 PNG（`export._png`）、`rasterize`、`write_pdf`；懒加载 PNG
+  （`studio_ext.ensure_preview_png`）与工作台无工程 MCP 流程图仍直接调 `sheet.render_preview`（`qsave` 会切换 backend、走
+  pyplot），可与导出线程同时进入 matplotlib。
+- **一把锁、所有入口**：锁对象移到无依赖的公共模块 `patent_figure.mpl_lock.MPL_LOCK`（`threading.RLock`，避免 sheet ↔
+  deliverable 循环导入）；`sheet.render_preview` 在**函数内部**持锁（懒加载 PNG、流程图预览、导出 PNG、各 CLI 都经过它），
+  `deliverable.rasterize` / `write_pdf` 持同一把锁（`deliverable.MPL_LOCK` 即同一对象）；`export._png` 不再自己加锁。
+  进程内 matplotlib 的使用只剩这三个入口。与 PDF 渲染器锁从不嵌套。
+- **回归**：另一线程持有 `MPL_LOCK` 时，`sheet.render_preview`、`ensure_preview_png`、`export._png`、`rasterize`、`write_pdf`
+  与 MCP `render_flowchart`（无工程）都等待、释放后成功（先预热，未加锁的实现 0.6 s 内即完成，本测试能区分）；3 个导出线程
+  （PDF + Word + PNG，独立渲染）、3 个懒加载 PNG 线程 × 3、2 个 MCP 流程图线程 × 2 同时运行全部成功。
+
+### 14.21 修复轮 14（Codex R2n → 架构裁决）：只保留 pypdfium2 一个渲染器；引擎异常在锁内消化
+
+- **裁决**：R2n 复现另一个原生渲染库的异常回溯把原生对象带出锁、由垃圾回收在锁外析构。该库本就是 AGPL、不推荐的备选，
+  裁决移除：渲染器只剩 **pypdfium2**，`PFK_PDF_RENDERER` 只接受 `auto | none | pypdfium2`（其他取值 = 不选渲染器，
+  PDF 为 `unverified`）；能力接口 `pdf_renderer` 与 `render_check` 的取值相应收窄（`pypdfium2` / `null` / `unavailable`），
+  doctor 只检查 pypdfium2，requirements 可选段同步。
+- **pypdfium2 路径的生命周期规范**：`_render_gray` 在渲染器锁内依次打开文档、取页、渲染（位图由 PDFium 分配：
+  `PdfBitmap.new_foreign(..., force_packed=True)`——默认的 Python 缓冲区位图其原生句柄从不销毁，改用后由自身 `close()`
+  在锁内销毁）、把像素**复制**出位图；底层任何
+  异常都在**锁内**捕获，`traceback.clear_frames` 清掉回溯帧（它们引用原生对象），并清空 `__traceback__` / `__context__` /
+  `__cause__`；位图、页面、文档在锁内按子到父显式 `close()`、局部引用置空；只把错误**文本**（`_EngineError`）带出锁。
+  `_render_page` 重试一次，保存的也只是文本；两次都失败 → `RenderUnavailable` → 该页 `render_unverified`，文件 `unverified`。
+- **回归**：用真实 pypdfium2 对象注入像素读取失败（`PdfBitmap.to_numpy` 第一次抛 `MemoryError`）：重试成功；pypdfium2 的
+  每一次原生释放（显式 `close()` 或析构回调，都经同一个 `_close_template`）都记录到发生时 `_RENDER_LOCK.locked()` 为真，
+  `gc.collect()` 之后没有任何锁外的原生释放、没有存活的 pypdfium2 对象；两次都失败时结果为 `unverified`，同样无锁外释放。
+  `PFK_PDF_RENDERER` 取其他值（含被移除的备选名）时 `render_backend()` 为空；`_render_gray` 只接受 pypdfium2。

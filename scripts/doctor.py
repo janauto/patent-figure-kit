@@ -374,7 +374,8 @@ def check_plan_studio() -> dict:
     if missing == ["openpyxl"]:
         detail = "缺 openpyxl —— Plan Studio 的「导入 BOM」只能读 .csv，读不了 .xlsx"
     elif missing == ["docx"]:
-        detail = "缺 python-docx —— 导出时不会生成「说明书附图」Word 文件，其余文件照常生成"
+        detail = ("缺 python-docx —— 只影响旧的浏览器界面辅助功能；导出包的「说明书附图」Word "
+                  "已改为内置固定模板写出（WP2），不受影响")
     return _check("plan-studio-deps", STATUS_MISSING, detail, fix, required=False)
 
 
@@ -403,6 +404,41 @@ def check_dwgread() -> dict:
                   required=False)
 
 
+def check_deliverable() -> dict:
+    """F1 附图导出包（WP2）：PDF 由 matplotlib（必需项）生成，**逐页核验 PDF 需要可选包 pypdf**——
+    没有它，导出包里的 PDF 会被如实报「未核验」（不是通过）。Word 由 python-docx 生成（见
+    plan-studio-deps）。都不在出图链路上。"""
+    try:
+        import pypdf  # noqa: F401
+        version = _dist_version("pypdf") or "?"
+        return _check("deliverable-pdf-check", STATUS_OK,
+                      "pypdf %s —— 导出包 PDF 可逐页核验（页幅/页边/字高/图号/页数）" % version,
+                      required=False)
+    except Exception as exc:  # noqa: BLE001
+        return _check("deliverable-pdf-check", STATUS_MISSING,
+                      "缺 pypdf（%s）—— 导出包里的 PDF 能生成，但无法逐页核验，导出结果为「未核验」"
+                      % _import_error(exc),
+                      _pip_fix("pypdf"), required=False)
+
+
+def check_deliverable_render() -> dict:
+    """**导出 PDF 必需**（WP2 R2j 裁决）：导出包 PDF 每页用独立渲染器渲染，在图号位置与图片区域统计
+    看得见的墨迹——这是 PDF「通过」的必要条件。渲染器只用 pypdfium2（BSD-3-Clause / Apache-2.0；
+    R2n 裁决起不再有第二个原生渲染库）。没有它 PDF 一律判「未核验」（不是通过），导出结果 ok=false。
+    它只决定导出 PDF 的判定，不在出图链路上，所以仍按可选项计（不影响退出码）。"""
+    try:
+        import pypdfium2  # noqa: F401
+        return _check("deliverable-pdf-render", STATUS_OK,
+                      "pypdfium2 %s（BSD/Apache）—— 导出 PDF 必需：逐页独立渲染核验可见性"
+                      % (_dist_version("pypdfium2") or "?"), required=False)
+    except Exception as exc:  # noqa: BLE001
+        reason = _import_error(exc)
+    return _check("deliverable-pdf-render", STATUS_MISSING,
+                  "导出 PDF 必需：缺 pypdfium2（%s）—— 没有独立渲染，导出的 PDF 一律判「未核验」"
+                  "（不是通过），导出结果 ok=false" % reason,
+                  "python3 -m pip install pypdfium2（BSD/Apache 许可）", required=False)
+
+
 def run_checks() -> dict:
     """Every probe, in a fixed order. Deterministic: no time, no randomness."""
     checks = [
@@ -419,6 +455,8 @@ def run_checks() -> dict:
         check_autocad_core(),
         check_dwgread(),
         check_plan_studio(),
+        check_deliverable(),
+        check_deliverable_render(),
     ]
     ok = all(c["status"] == STATUS_OK for c in checks if c["required"])
     return {"checks": checks, "ok": ok}

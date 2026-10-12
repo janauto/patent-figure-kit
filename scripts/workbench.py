@@ -51,7 +51,11 @@ from fastapi.responses import (FileResponse, JSONResponse,  # noqa: E402
                                RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
+from patent_figure import capabilities as CAPS  # noqa: E402
+from patent_figure import examples as EXM  # noqa: E402
+from patent_figure import deliverable as DELIV  # noqa: E402
 from patent_figure import export as EXPORT  # noqa: E402
+from patent_figure import suggest_plan as SUG  # noqa: E402
 from patent_figure import jobs as JOBS  # noqa: E402
 from patent_figure import project_io as PIO  # noqa: E402
 from patent_figure import publish as PUB  # noqa: E402
@@ -71,6 +75,9 @@ MEDIA = {"png": "image/png", "svg": "image/svg+xml", "dxf": "application/octet-s
          "glb": "model/gltf-binary"}
 PROTECTED = ("/api/wb", "/v1/", "/mcp", "/files/")
 SYNTHETIC_STEP = REPO / "tests" / "fixtures" / "synthetic.stp"
+#: Public demo examples for POST /v1/projects/from-example (WP2): gearbox / vise / valve.
+EXAMPLES_META = EXM.EXAMPLES
+DISPLAY_NAME = CAPS.DISPLAY_NAME
 
 
 # ----------------------------------------------------------------------------- token
@@ -318,6 +325,20 @@ class Registry:
 # ----------------------------------------------------------------------------- tools
 
 
+class AICallFailed(Exception):
+    """The configured LLM channel failed (network / quota / bad reply) → HTTP 502."""
+
+
+class PlanConflictError(Exception):
+    def __init__(self, current: str) -> None:
+        super().__init__(current)
+        self.current = current
+
+
+class _Unresolved(Exception):
+    """Raised inside the plan mutation to abort an accept whose members do not resolve."""
+
+
 class Tools:
     """REST /v1 与 MCP 共用的工具实现。"""
 
@@ -403,7 +424,9 @@ class Tools:
         figs = []
         for f in res.get("figures", []):
             ann = f.get("annotation") or {}
-            failed = [{"check": c["id"], "value": c.get("value"), "hint": c.get("hint")}
+            failed = [{"check": c["id"], "value": c.get("value"), "hint": c.get("hint"),
+                       "title_zh": c.get("title_zh"), "hint_plain": c.get("hint_plain"),
+                       "fix_action": c.get("fix_action")}
                       for c in (f.get("qa") or {}).get("checks", []) if not c.get("pass")]
             row = {"id": f["id"], "number": f.get("number"), "pass": f.get("pass"),
                    "failed_checks": failed,
@@ -436,18 +459,79 @@ class Tools:
                 "provider": data.get("provider", ""), "groups": groups}
 
     def ai_draft_terms(self, args: dict) -> dict:
-        studio = self.reg.studio(args.get("project_id", ""))
+        """F9 AI 起名接力（WP2 语义冻结，契约 §14.4）：
+
+        * 输入 ``selectors``（选中的零件名列表；缺省 = 全部空白术语的零件）；
+        * **只对空白术语**给建议（每条含 ``confidence``、``reason``），人填过的跳过并说明；
+        * 默认**不写 plan**（``apply`` 缺省 false；MCP 工具为兼容旧客户端缺省 true）——前端经
+          ``PUT /plan``（ETag）落盘；``apply=true`` 时经 ``project_io.update_plan`` 只填空白并返回
+          新 ETag（可带 ``plan_etag`` / If-Match，不符 409）；
+        * 没有大模型通道 → 200 ``status: ai_not_configured``（不是 5xx），不发任何外部请求；
+        * 每次都返回 ``outbound_fields``，前端在外发前明示。"""
+        pid = args.get("project_id", "")
+        studio = self.reg.studio(pid)
         ws = studio.ws
+        caps = CAPS.ai_capabilities(LLM.public_settings())
+        base = {"project_id": pid, "ai_configured": caps["configured"],
+                "provider": caps["provider"], "provider_label": caps["provider_label"],
+                "outbound_fields": caps["outbound_fields"],
+                "outbound_note": caps["outbound_note"]}
+        with PIO.plan_lock(ws.plan):
+            plan = json.loads(ws.plan.read_text(encoding="utf-8"))
+            etag = PIO.plan_etag(ws.plan)
+        asm = json.loads(ws.assembly.read_text(encoding="utf-8"))
+        names = [p["name"] for p in asm.get("parts", []) if not p.get("degenerate")]
+        want = args.get("selectors")
+        skipped = []
+        if want is None:
+            pool = names
+        else:
+            if not isinstance(want, list) or not all(isinstance(x, str) for x in want):
+                raise MCP.ToolError("selectors 必须是零件名字符串数组")
+            known = set(names)
+            pool = [x for x in want if x in known]
+            skipped += [{"selector": x, "reason": "不是装配体里的零件名"}
+                        for x in want if x not in known]
+        todo = []
+        for n in pool:
+            if SUG.term_of(plan, n):
+                skipped.append({"selector": n, "reason": "已有名称，不覆盖人填的"})
+            elif n not in todo:
+                todo.append(n)
+        base.update(plan_etag=etag, skipped=skipped, applied=None)
+        if not caps["configured"]:
+            return dict(base, status="ai_not_configured", suggestions=[],
+                        hint="没有配置大模型通道：在「设置」里填 DeepSeek API 密钥后再试；"
+                             "也可以直接在术语页手填零件名。")
+        if not todo:
+            return dict(base, status="ok", suggestions=[])
+        sub = dict(asm, parts=[p for p in asm.get("parts", []) if p.get("name") in set(todo)])
         try:
-            rows = LLM.draft_terms(json.loads(ws.assembly.read_text(encoding="utf-8")),
-                                   json.loads(ws.plan.read_text(encoding="utf-8")),
-                                   glossary=EXT.glossary_of(ws), bom=EXT.bom_names_of(ws))
+            rows = LLM.draft_terms(sub, plan, glossary=EXT.glossary_of(ws),
+                                   bom=EXT.bom_names_of(ws), only_empty=True)
         except LLM.LLMError as exc:
-            raise MCP.ToolError("大模型调用失败：%s" % exc)
-        applied = EXT.apply_terms(ws, rows)
-        check = studio.validate_now()
-        return {"suggestions": rows, "filled": applied["filled"], "plan_valid": check["ok"],
-                "issues": check["issues"][:20]}
+            raise AICallFailed(str(exc))
+        rows = [r for r in rows if r.get("selector") in set(todo)]
+        out = dict(base, status="ok", suggestions=rows)
+        if args.get("apply"):
+            if_match = str(args.get("plan_etag") or "").strip('"') or None
+            outcome = {"filled": [], "kept_human": [], "added": []}
+            all_names = [p["name"] for p in asm.get("parts", [])]
+
+            def mutate(cur):
+                # Only the selected, still-blank parts change (R2b #1): a shared wildcard row is
+                # never edited — an exact row is inserted ahead of it instead (REST and MCP).
+                outcome.update(SUG.fill_blank_terms(cur, rows, all_names))
+                return cur
+
+            try:
+                PIO.update_plan(ws.plan, mutate, snapshot_cb=ws.snapshot_plan, if_match=if_match)
+            except PIO.PlanConflict as exc:
+                raise PlanConflictError(exc.current)
+            check = studio.validate_now()
+            out.update(applied=outcome, plan_etag=PIO.plan_etag(ws.plan),
+                       plan_valid=check["ok"], issues=check["issues"][:20])
+        return out
 
     def get_flowchart_guide(self, args: dict) -> dict:
         return MCP.FLOW_GUIDE
@@ -529,17 +613,60 @@ class Tools:
     def get_export(self, args: dict) -> dict:
         pid = args.get("project_id", "")
         self.reg.need(pid)
-        job = self.start_export(pid, args.get("formats"), args.get("variant"))
+        try:
+            job = self.start_export(pid, args.get("formats"), args.get("variant"),
+                                    dpi=int(args.get("dpi") or 300),
+                                    sheet_preset=args.get("sheet_preset"))
+        except HTTPException as exc:
+            raise MCP.ToolError(str(exc.detail))
         return {"export_id": job.id, "state": job.state,
-                "poll": "get_job(job_id=%s) 直到 succeeded，再取 result.download_url" % job.id}
+                "poll": "get_job(job_id=%s) 直到 succeeded，再看 result.items / result.documents"
+                        "（逐页核验结果），result.download_url 即 zip" % job.id}
+
+    def suggest_figures(self, args: dict) -> dict:
+        pid = args.get("project_id", "")
+        self.reg.need(pid)
+        try:
+            job = self.start_suggest(pid, {k: args[k] for k in (
+                "label_standard_parts", "max_candidates", "standard_part_rule") if k in args})
+        except HTTPException as exc:
+            raise MCP.ToolError(str(exc.detail))
+        return {"job_id": job.id, "state": job.state,
+                "poll": "get_job(job_id=%s) 直到 succeeded；result.candidates 每个都已试渲染过闸，"
+                        "挑 status=pass 的用 accept_figure_candidates 写进计划" % job.id}
+
+    def accept_figure_candidates(self, args: dict) -> dict:
+        pid = args.get("project_id", "")
+        studio = self.reg.studio(pid)
+        try:
+            return self.accept_candidates(pid, studio, args, "")
+        except HTTPException as exc:
+            raise MCP.ToolError(json.dumps(exc.detail, ensure_ascii=False)
+                                if not isinstance(exc.detail, str) else exc.detail)
+
+    def _mcp_ai_draft_terms(self, args: dict) -> dict:
+        """MCP keeps its pre-WP2 behaviour by default (``apply`` defaults to true: agents that
+        call ai_draft_terms → render_project still get named parts); errors become ToolErrors."""
+        try:
+            return self.ai_draft_terms(dict(args, apply=args.get("apply", True)))
+        except AICallFailed as exc:
+            raise MCP.ToolError("大模型调用失败：%s" % exc)
+        except PlanConflictError as exc:
+            raise MCP.ToolError("plan 已被他人修改（ETag 不匹配，当前 %s）" % exc.current)
 
     def table(self) -> dict:
+        t = self._table()
+        t["ai_draft_terms"] = self._mcp_ai_draft_terms
+        return t
+
+    def _table(self) -> dict:
         return {name: getattr(self, name) for name in (
             "list_projects", "get_project_structure", "get_project_parts", "update_terms",
             "render_project",
             "get_project_figures", "ai_draft_terms", "get_flowchart_guide",
             "render_flowchart", "generate_flowchart",
-            "submit_render", "get_job", "cancel_job", "get_export")}
+            "submit_render", "get_job", "cancel_job", "get_export",
+            "suggest_figures", "accept_figure_candidates")}
 
 
 # ----------------------------------------------------------------------------- app
@@ -550,6 +677,32 @@ def _supplied_token(request: Request) -> str:
     return (request.headers.get("x-studio-token") or request.query_params.get("token")
             or (auth[7:] if auth.lower().startswith("bearer ") else "")
             or request.cookies.get("wb_token") or "")
+
+
+#: Headers added to a response whose request authenticated ONLY via ``?token=`` (WP2 鉴权六路径):
+#: the query token is kept for one compatibility period and announced as deprecated. ASCII only
+#: (HTTP header values are latin-1).
+DEPRECATION_HEADERS = {
+    "Deprecation": "true",
+    "Warning": '299 - "Query-string token is deprecated; use Authorization: Bearer <token> '
+               'or the wb_token session cookie"',
+    "X-Auth-Deprecated": "query-token",
+}
+
+
+def auth_via(request: Request, token: str) -> Optional[str]:
+    """Which credential authenticates this request: ``header`` (X-Studio-Token), ``bearer``,
+    ``cookie`` (wb_token) or ``query`` (?token=, deprecated) — None when none matches. Every
+    candidate is compared in constant time; the first VALID one wins (so a stale query token
+    does not shadow a valid session cookie)."""
+    auth = request.headers.get("authorization", "")
+    for via, value in (("header", request.headers.get("x-studio-token")),
+                       ("bearer", auth[7:] if auth.lower().startswith("bearer ") else None),
+                       ("cookie", request.cookies.get("wb_token")),
+                       ("query", request.query_params.get("token"))):
+        if value and secrets.compare_digest(str(value), token):
+            return via
+    return None
 
 
 def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
@@ -566,10 +719,13 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if host not in ("127.0.0.1", "localhost"):
             return Response("仅限本机访问", status_code=403)
         path = request.url.path
-        if path.startswith(PROTECTED) and not secrets.compare_digest(
-                _supplied_token(request), token):
+        via = auth_via(request, token)
+        if path.startswith(PROTECTED) and via is None:
             return JSONResponse({"detail": "token 无效"}, status_code=401)
         response = await call_next(request)
+        if via == "query" and path.startswith(PROTECTED):
+            for k, v in DEPRECATION_HEADERS.items():
+                response.headers[k] = v
         if path in ("/", "/index.html") and secrets.compare_digest(
                 request.query_params.get("token", ""), token):
             # 浏览器里点外部链接（附图 PNG 等）时靠这个 cookie 带上身份
@@ -718,10 +874,27 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     # ---- files -------------------------------------------------------------
     @app.get("/files/{pid}/{area}/{name}", include_in_schema=False)
     def files(pid: str, area: str, name: str, v: str = ""):
-        if not FILE_RE.match(name) or area not in ("out", "flow", "model", "snap"):
+        if not FILE_RE.match(name) or area not in ("out", "flow", "model", "snap", "cand"):
             raise HTTPException(400, "非法路径")
         if pid == "_scratch":
             path = reg.data / "scratch" / name
+        elif area == "cand":
+            # WP2 candidate trial renders: only a SEALED candidate version named by ?v= (white-
+            # listed id) of the project's own candidate store — never the project's current.
+            # The read holds a lease on that version (R2 #5) and returns the bytes it read, so
+            # a concurrent reclaim can neither delete it mid-read nor between check and read.
+            store = PUB.candidate_store(reg.need(pid).root / "studio")
+            if not v or not VS.RID_RE.match(v):
+                raise HTTPException(404, "没有这个已封口的候选版本")
+            store.ref(v)
+            try:
+                vdir = store.sealed_dir(v)
+                if vdir is None or not (vdir / name).is_file():
+                    raise HTTPException(404, "没有这个已封口的候选版本")
+                data = (vdir / name).read_bytes()
+            finally:
+                store.unref(v)
+            return Response(data, media_type=MEDIA[name.rsplit(".", 1)[1]])
         elif area == "snap":
             path = reg.need(pid).root / "studio" / "snapshots" / name
         elif area == "model":
@@ -783,9 +956,32 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         return call("update_terms", {"project_id": pid, "terms": body.get("terms", []),
                                      "overwrite": bool(body.get("overwrite"))})
 
-    @app.post("/v1/projects/{pid}/ai/draft-terms", tags=["AI"], summary="DeepSeek 起草零件名")
-    def v1_ai_terms(pid: str):
-        return call("ai_draft_terms", {"project_id": pid})
+    @app.post("/v1/projects/{pid}/ai/draft-terms", tags=["AI"],
+              summary="AI 起名接力：只对空白术语给建议，默认不写 plan（apply=true 才写）")
+    async def v1_ai_terms(pid: str, request: Request):
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        args = {"project_id": pid, "apply": bool(body.get("apply", False)),
+                "plan_etag": request.headers.get("if-match", "").strip('"')
+                or body.get("plan_etag")}
+        if "selectors" in body:
+            args["selectors"] = body.get("selectors")
+        from starlette.concurrency import run_in_threadpool
+        try:
+            out = await run_in_threadpool(tools.ai_draft_terms, args)
+        except MCP.ToolError as exc:
+            raise HTTPException(422, str(exc))
+        except AICallFailed as exc:
+            return JSONResponse({"detail": "大模型调用失败：%s" % exc,
+                                 "error": {"code": "ai_call_failed", "message": str(exc),
+                                           "hint": "检查设置里的密钥与网络后重试"}},
+                                status_code=502)
+        except PlanConflictError as exc:
+            raise HTTPException(409, "plan 已被他人修改（ETag 不匹配，当前 %s）" % exc.current)
+        return JSONResponse(out, headers={"ETag": out.get("plan_etag") or ""})
 
     # 同步出图保留为 POST /v1/projects/{pid}/render?wait=1（见下方作业层），旧的无参同步路由
     # 已被带 ?wait 的异步/同步合一路由取代，避免同路径双注册时旧路由抢先匹配。
@@ -1001,16 +1197,39 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         return JSONResponse({"project_id": proj.id, "job_id": job.id}, status_code=202)
 
     @app.post("/v1/projects/from-example", status_code=202, tags=["工程"],
-              summary="从内置示例新建工程")
+              summary="从内置示例新建/引用工程（gearbox / vise / valve / synthetic）")
     async def v1_from_example(request: Request):
-        body = await request.json()
-        example = str(body.get("example", "")).strip()
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        example = str((body or {}).get("example", "")).strip()
         src = reg.get("example-" + example) or reg.get(example)
-        if src is None:
-            raise HTTPException(404, "没有内置示例 %r（可选：先在工作台里 seed 示例）" % example)
-        job, _ = jobs.create("from-example", src.id, inputs={"example": example})
-        jobs.run(job, lambda j: {"project_id": src.id, "status": src.meta.get("status")})
-        return JSONResponse({"project_id": src.id, "job_id": job.id}, status_code=202)
+        if src is None and example not in EXAMPLES_META:
+            raise HTTPException(404, "没有内置示例 %r（可选：%s）"
+                                % (example, " / ".join(sorted(EXAMPLES_META) + ["synthetic"])))
+        pid = src.id if src is not None else "example-" + example
+        job, _ = jobs.create("from-example", pid, inputs={"example": example})
+
+        def fn(j):
+            proj = reg.get(pid)
+            if proj is None:                             # first use: generate + seed (WP2)
+                j.emit(JOBS.EV_STAGE, "生成演示模型 STEP", stage="from-example", progress=0.1)
+                proj = ensure_example(reg, example)
+            j.emit(JOBS.EV_STAGE, "解析装配体与导出预览", stage="prepare", progress=0.4)
+            deadline = time.time() + 1800
+            while time.time() < deadline:
+                j.raise_if_cancelled()
+                m = proj.meta
+                if m.get("status") == "error":
+                    raise RuntimeError("示例工程准备失败：%s" % m.get("message", ""))
+                if m.get("status") == "ready" and not m.get("message"):
+                    return {"project_id": proj.id, "status": "ready", "example": example}
+                time.sleep(0.5)
+            raise RuntimeError("示例工程准备超时")
+
+        jobs.start(job, fn)
+        return JSONResponse({"project_id": pid, "job_id": job.id}, status_code=202)
 
     @app.get("/v1/projects/{pid}", tags=["工程"], summary="工程摘要（含 plan_etag）")
     def v1_project(pid: str):
@@ -1020,6 +1239,12 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             out["plan_etag"] = _plan_etag(proj.workspace())
         except Exception:
             out["plan_etag"] = ""
+        sj = _latest_suggest(pid)                       # 候选分图状态（架构 §6）
+        res = (sj.result or {}) if sj is not None else {}
+        out["candidates"] = None if sj is None else {
+            "job_id": sj.id, "state": sj.state, "summary": res.get("summary"),
+            "empty_reason": res.get("empty_reason"),
+            "url": "/v1/projects/%s/plan/candidates" % pid}
         return out
 
     @app.get("/v1/jobs/{job_id}", tags=["作业"], summary="查询作业状态")
@@ -1032,7 +1257,12 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if job.kind == "render":
             state = _cancel_render(job)
         else:
+            job.request_cancel()
             jobs.cancel(job.id)
+            if job.kind == "suggest":                   # abort the in-flight trial render
+                worker = WK.get_shared_worker()
+                if worker is not None:
+                    worker.abort_if_running(job.id)
             state = job.state
         # Distinguish "cancelled before commit" from "already committed" (R1b #6).
         committed = job.state == JOBS.SUCCEEDED
@@ -1150,7 +1380,8 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if render_job.state != JOBS.SUCCEEDED:
             raise HTTPException(409, "render_job 未成功（state=%s），不能导出" % render_job.state)
 
-    def _start_export(pid: str, formats, variant=None, dpi: int = 300, render_job=None):
+    def _start_export(pid: str, formats, variant=None, dpi: int = 300, render_job=None,
+                      sheet_preset: Optional[str] = None):
         """Create + start an export job bound to one verified, pinned render version — through
         the SINGLE export service the browser uses too (R1e #3).
 
@@ -1161,10 +1392,18 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         failing, or the job being cancelled BEFORE its body ever runs (R1f #3). ``Pin.release``
         is idempotent, so the overlapping guards are safe."""
         reg.need(pid)
-        formats = formats or ["docx", "dxf"]
+        formats = list(formats or ["pdf", "docx", "dxf"])
         variant = variant or "both"
         if variant not in EXPORT.REST_VARIANTS:
             raise HTTPException(400, "variant 只能是 filing / disclosure / both")
+        bad = [f for f in formats if f not in ("pdf", "docx", "dxf", "dwg", "png")]
+        if bad:
+            raise HTTPException(400, "formats 只能取 pdf / docx / dxf / dwg / png，收到 %s" % bad)
+        sheet_preset = sheet_preset or DELIV.DEFAULT_PRESET
+        try:
+            DELIV.spec(sheet_preset, dpi)                # validate preset + dpi up front → 400
+        except DELIV.DeliverableError as exc:
+            raise HTTPException(400, str(exc))
         if render_job is None:
             render_job = _latest_render_job(pid)
         _validate_render_job(render_job, pid)            # project/kind/state → HTTP 409s
@@ -1176,20 +1415,34 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         try:
             job, _ = jobs.create("export", pid, inputs={
                 "formats": formats, "variant": variant, "dpi": dpi,
-                "render_job_id": render_job.id})
+                "sheet_preset": sheet_preset, "render_job_id": render_job.id})
 
             def fn(j):
-                j.emit(JOBS.EV_STAGE, "打包中", stage="export", progress=0.2)
+                j.emit(JOBS.EV_STAGE, "生成附图包（PDF / Word / 源文件）", stage="export",
+                       progress=0.2)
                 dest = (jobs.root / j.id / "bundle")
                 bundle = EXPORT.build_bundle(pin, dest,
                                              variants=EXPORT.REST_VARIANTS[variant],
-                                             formats=formats, dpi=dpi, run_cli=PS.run_cli)
+                                             formats=formats, dpi=dpi, run_cli=PS.run_cli,
+                                             sheet_preset=sheet_preset, description_txt=True,
+                                             checklist_txt=True)
+                j.emit(JOBS.EV_STAGE, "逐页核验完成，打包", stage="export", progress=0.9)
                 EXPORT.zip_dir(dest, jobs.root / j.id / "bundle.zip")
-                return {"export_id": j.id, "render_job_id": render_job.id,
-                        "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
-                        "manifest": bundle["manifest"], "notes": bundle["notes"],
-                        "dwg_log": bundle["dwg_log"],
-                        "download_url": base + "/v1/exports/%s/download" % j.id}
+                result = {"export_id": j.id, "render_job_id": render_job.id,
+                          "render_plan_etag": (render_job.inputs or {}).get("plan_etag", ""),
+                          "ok": bundle["ok"], "manifest": bundle["manifest"],
+                          "reasons": bundle["reasons"], "items": bundle["items"],
+                          "documents": bundle["documents"],
+                          "missing_files": bundle["missing_files"], "files": bundle["files"],
+                          "sha256": bundle["sha256"],
+                          "spec": bundle["spec"], "note": DELIV.CNIPA_NOTE,
+                          "notes": bundle["notes"], "dwg_log": bundle["dwg_log"],
+                          "download_url": base + "/v1/exports/%s/download" % j.id}
+                # R2k: the report + this result are written into the export's own directory and
+                # sealed with every file of it (bundle/, bundle.zip); files become read-only.
+                # The seal's digest lives in the persisted job result — the authority.
+                result["seal"] = EXPORT.seal_export(jobs.root / j.id, result)
+                return result
 
             jobs.start(job, fn, finalizer=pin.release)   # released on every run() exit path
         except BaseException:
@@ -1231,6 +1484,228 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
     tools.cancel_service = _cancel_render
     tools.render_sync = _render_service
 
+    # ---- 候选分图（F2-lite，WP2）-------------------------------------------------
+    # One suggestion job = build candidates from the frozen assembly + plan, then trial-render
+    # EVERY candidate serially through the publish service's candidate path (its own version
+    # store <ws>/candidates/; the project's current.json is never touched). A candidate has a
+    # status only after its render + QA. Accepting writes figures through project_io (ETag).
+    def _worker_cli(token: str):
+        worker = WK.get_shared_worker()
+
+        def _cli(argv, timeout=1800):
+            if worker is not None:
+                return worker.run(argv, timeout=timeout, token=token)
+            return PS.run_cli(argv, timeout=timeout)
+        return _cli
+
+    def _suggest_job(pid: str, body: dict):
+        studio = reg.studio(pid)                        # 409 if the project isn't ready
+        ws = studio.ws
+        try:
+            rule = SUG.StandardPartRule.from_dict(body.get("standard_part_rule"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        try:
+            max_c = int(body.get("max_candidates") or SUG.MAX_CANDIDATES_DEFAULT)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "max_candidates 必须是整数")
+        if not 1 <= max_c <= SUG.MAX_CANDIDATES_HARD:
+            raise HTTPException(400, "max_candidates 必须在 1–%d 之间" % SUG.MAX_CANDIDATES_HARD)
+        label_std = bool(body.get("label_standard_parts", False))
+        with PIO.plan_lock(ws.plan):                     # one consistent snapshot of the plan
+            try:
+                plan = json.loads(ws.plan.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                plan = {}
+            etag = PIO.plan_etag(ws.plan)
+        try:
+            assembly = json.loads(ws.assembly.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise HTTPException(409, "工程还没有 assembly.json")
+        job, _ = jobs.create("suggest", pid, inputs={
+            "plan_etag": etag, "assembly_sha256": (assembly.get("source") or {}).get("sha256", ""),
+            "label_standard_parts": label_std, "standard_part_rule": rule.to_dict(),
+            "max_candidates": max_c})
+        cand_root = ws.root / PUB.CANDIDATE_STORE
+
+        def fn(j):
+            j.emit(JOBS.EV_STAGE, "生成候选分图", stage="suggest", progress=0.05)
+            cli = _worker_cli(job.id)
+            instances = SUG.load_instances(ws.instances, assembly)
+            if instances is None:                        # older workspace: derive it once
+                tmp = cand_root / "analyze" / job.id
+                tmp.mkdir(parents=True, exist_ok=True)
+                try:
+                    proc = cli([str(PS.SCRIPTS / "analyze_assembly.py"), str(ws.step), "-o",
+                                str(tmp / "assembly.json"), "--instances",
+                                str(tmp / "assembly.instances.json")])
+                    if proc.returncode == 0:
+                        instances = SUG.load_instances(tmp / "assembly.instances.json", assembly)
+                        if instances is not None:
+                            PIO.atomic_write_json(ws.instances, instances)
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+            doc = SUG.build_candidates(assembly, plan, instances, label_standard_parts=label_std,
+                                       rule=rule, max_candidates=max_c)
+            frozen = cand_root / "frozen" / ("%s.assembly.json" % job.id)
+            PIO.atomic_write_json(frozen, assembly)
+            try:
+                SUG.run_candidates(
+                    doc, ws_root=ws.root, cache=ws.cache, job_id=job.id, assembly_path=frozen,
+                    run_cli=cli, svg_of=PS.dxf_to_svg,
+                    emit=lambda msg, prog: j.emit(JOBS.EV_STAGE, msg, stage="suggest",
+                                                  progress=prog),
+                    cancel_check=j.raise_if_cancelled)
+            finally:
+                try:
+                    frozen.unlink()
+                except OSError:
+                    pass
+            try:
+                PUB.prune_candidates(ws.root, protect={job.id})
+            except OSError:
+                pass
+            out = SUG.public(doc)
+            for c in out["candidates"]:
+                if c.get("preview") and c.get("version"):
+                    c["preview"] = {"svg": _cand_url(pid, c["preview"]["svg"], c["version"])}
+            out.update(project_id=pid, job_id=job.id, plan_etag=etag)
+            return out
+
+        jobs.start(job, fn)
+        return job
+
+    def _cand_url(pid: str, name: str, rid: str) -> str:
+        return "/files/%s/cand/%s?v=%s" % (pid, name, rid)
+
+    def _latest_suggest(pid: str):
+        rows = [j for j in jobs.list(pid) if j.kind == "suggest"]
+        return rows[-1] if rows else None
+
+    @app.post("/v1/projects/{pid}/plan/suggest", status_code=202, tags=["工程"],
+              summary="候选分图（202 → 作业：生成候选 + 逐个试渲染过闸）")
+    async def v1_plan_suggest(pid: str, request: Request):
+        reg.need(pid)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        job = _suggest_job(pid, body if isinstance(body, dict) else {})
+        return JSONResponse({"project_id": pid, "job_id": job.id}, status_code=202)
+
+    @app.get("/v1/projects/{pid}/plan/candidates", tags=["工程"],
+             summary="最近一次候选分图作业（状态 + 候选）")
+    def v1_plan_candidates(pid: str):
+        reg.need(pid)
+        job = _latest_suggest(pid)
+        if job is None:
+            raise HTTPException(404, "这个工程还没有生成过候选分图")
+        return job.to_dict()
+
+    @app.post("/v1/projects/{pid}/plan/candidates/accept", tags=["工程"],
+              summary="接受候选分图写入计划（成员先在当前装配体上解析，解析不了 422）")
+    async def v1_plan_accept(pid: str, request: Request):
+        studio = reg.studio(pid)
+        ws = studio.ws
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        out = _accept_candidates(pid, studio, body if isinstance(body, dict) else {},
+                                 request.headers.get("if-match", "").strip('"'))
+        return JSONResponse(out, headers={"ETag": out["plan_etag"]})
+
+    def _accept_candidates(pid: str, studio, body: dict, if_match: str = "") -> dict:
+        ws = studio.ws
+        job_id = body.get("job_id")
+        job = jobs.get(job_id) if job_id else _latest_suggest(pid)
+        if job is None or job.kind != "suggest" or job.project_id != pid:
+            raise HTTPException(409, "没有这个工程的候选分图作业：%s" % (job_id or "（无）"))
+        if job.state != JOBS.SUCCEEDED:
+            raise HTTPException(409, "候选分图作业未成功（state=%s）" % job.state)
+        res = job.result or {}
+        ids = body.get("candidate_ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(x, str) for x in ids):
+            raise HTTPException(400, "candidate_ids 必须是非空字符串数组")
+        mode = body.get("mode", "append")
+        if mode not in ("append", "replace"):
+            raise HTTPException(400, "mode 只能是 append / replace")
+        try:
+            assembly = json.loads(ws.assembly.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise HTTPException(409, "工程还没有 assembly.json")
+        if (assembly.get("source") or {}).get("sha256", "") != res.get("assembly_sha256"):
+            raise HTTPException(409, "装配体已变化，候选作废——请重新生成候选分图")
+        instances = SUG.load_instances(ws.instances, assembly)
+        by_id = {c.get("id"): c for c in res.get("candidates", [])}
+        picked = []
+        unknown = [cid for cid in ids if cid not in by_id]
+        if unknown:
+            raise HTTPException(422, "候选不存在：%s" % "、".join(unknown))
+        for cid in ids:
+            c = by_id[cid]
+            members = body.get("members", {}).get(cid) if isinstance(body.get("members"), dict) \
+                else None
+            picked.append((cid, c, members if members is not None else c.get("members")))
+        apply_std = bool(body.get("apply_standard_labels", True))
+        info: dict = {}
+        unresolved_all: list = []
+
+        def mutate(plan):
+            accepted = []
+            std: list = []
+            for cid, c, members in picked:
+                names, bad = SUG.resolve_members(members or [], assembly, plan, instances)
+                for b in bad:
+                    unresolved_all.append(dict(b, candidate=cid))
+                if not names and not bad:
+                    unresolved_all.append({"candidate": cid, "member": None,
+                                           "reason": "候选没有任何成员"})
+                accepted.append({"caption": c.get("caption") or "示意图",
+                                 "kind": c.get("kind") or "exploded", "names": names})
+                if apply_std:
+                    std += [n for n in (c.get("standard_parts") or []) if n in names]
+            if unresolved_all:
+                raise _Unresolved()
+            new, extra = SUG.accept_into(plan, assembly, accepted, mode=mode,
+                                         standard_parts=sorted(set(std)))
+            info.update(extra)
+            return new
+
+        try:
+            PIO.update_plan(ws.plan, mutate, snapshot_cb=ws.snapshot_plan,
+                            if_match=(if_match or str(body.get("plan_etag") or "").strip('"'))
+                            or None)
+        except _Unresolved:
+            raise HTTPException(422, {"message": "候选成员在当前装配体里解析不到，未写入计划",
+                                      "unresolved": unresolved_all})
+        except PIO.PlanConflict as exc:
+            raise HTTPException(409, "plan 已被他人修改（ETag 不匹配，当前 %s）" % exc.current)
+        check = studio.validate_now()
+        return {"ok": True, "project_id": pid, "job_id": job.id,
+                "plan_etag": PIO.plan_etag(ws.plan), "mode": mode,
+                "added_figures": info.get("added_figures", []),
+                "standard_labels_set": info.get("standard_labels_set", []),
+                "standard_labels_skipped": info.get("standard_labels_skipped", []),
+                "accepted_failed": [cid for cid, c, _m in picked if c.get("status") != "pass"],
+                "plan_valid": check["ok"], "issues": check["issues"][:20]}
+
+    tools.start_suggest = _suggest_job
+    tools.accept_candidates = _accept_candidates
+
+    # ---- 能力（WP2）：导出格式 / DWG / AI 通道，事前告知 ------------------------------
+    @app.get("/v1/capabilities", tags=["工程"], summary="能力：导出格式、DWG 可用性、AI 通道、版式")
+    def v1_capabilities():
+        return {"display_name": DISPLAY_NAME,
+                "export": CAPS.export_capabilities(),
+                "ai": CAPS.ai_capabilities(LLM.public_settings()),
+                "suggest": {"max_candidates": SUG.MAX_CANDIDATES_DEFAULT,
+                            "max_candidates_hard": SUG.MAX_CANDIDATES_HARD,
+                            "standard_part_rule": SUG.StandardPartRule().to_dict()},
+                "examples": sorted(EXAMPLES_META),
+                "auth": {"bearer": True, "session_cookie": "wb_token",
+                         "query_token": "deprecated"}}
+
     @app.post("/v1/projects/{pid}/export", status_code=202, tags=["导出"],
               summary="导出附图包（异步 202 → export_id，绑定一次成功渲染）")
     async def v1_export(pid: str, request: Request):
@@ -1239,10 +1714,14 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
             body = await request.json()
         except ValueError:
             body = {}
-        # sheet_preset is accepted by the schema but not implemented → reject rather than
-        # silently ignore (R1 #12).
-        if body.get("sheet_preset"):
-            raise HTTPException(400, "sheet_preset 尚未实现（WP2）；请不要传该参数")
+        # sheet_preset (WP2 F1): standard 170×257 / conservative 165×245; anything else → 400.
+        sheet_preset = body.get("sheet_preset") or DELIV.DEFAULT_PRESET
+        if sheet_preset not in DELIV.SHEET_PRESETS:
+            raise HTTPException(400, "sheet_preset 只能是 %s" % " / ".join(DELIV.SHEET_PRESETS))
+        try:
+            dpi = int(body.get("dpi") or DELIV.DEFAULT_DPI)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "dpi 必须是整数")
         render_job_id = body.get("render_job_id")
         render_job = jobs.get(render_job_id) if render_job_id else _latest_render_job(pid)
         _validate_render_job(render_job, pid)           # kind/project/succeeded/complete (R1b #4)
@@ -1253,9 +1732,8 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         if want_etag and want_etag != render_etag:
             return JSONResponse({"detail": "请求的 plan_etag 与被导出渲染的输入版本不一致",
                                  "render_plan_etag": render_etag}, status_code=409)
-        dpi = int(body.get("dpi") or 300)
         job = _start_export(pid, body.get("formats"), body.get("variant"), dpi=dpi,
-                            render_job=render_job)
+                            render_job=render_job, sheet_preset=sheet_preset)
         return JSONResponse({"export_id": job.id, "job_id": job.id,
                              "render_job_id": render_job.id}, status_code=202)
 
@@ -1273,6 +1751,12 @@ def build_workbench(reg: Registry, token: str, port: int) -> FastAPI:
         zip_path = jobs.root / export_id / "bundle.zip"
         if not zip_path.is_file():
             raise HTTPException(404, "导出包文件已不在")
+        seal = (job.result or {}).get("seal")
+        if seal:                     # R2k: serve only an export whose sealed directory is intact
+            problems = EXPORT.verify_export_seal(jobs.root / export_id, seal.get("sha256"))
+            if problems:
+                raise HTTPException(409, "导出包封口校验不通过（%s）——请重新导出"
+                                         % "；".join(problems[:3]))
         return FileResponse(str(zip_path), media_type="application/zip",
                             filename=zip_path.name)
 
@@ -1472,6 +1956,25 @@ SYNTHETIC_FLOW = {
               {"from": "c", "to": "e", "label": "是"}, {"from": "c", "to": "d", "label": "否"},
               {"from": "d", "to": "b"}, {"from": "e", "to": "z"}],
 }
+
+
+_EXAMPLE_LOCK = threading.Lock()
+
+
+def ensure_example(reg: Registry, name: str) -> "Project":
+    """The public demo project ``example-<name>`` (gearbox / vise / valve): STEP generated once
+    into ``<data>/examples/`` by make_demo_assemblies.py (OCP only in that subprocess), seeded
+    with the example plan. Idempotent and race-safe."""
+    pid = "example-" + name
+    with _EXAMPLE_LOCK:
+        proj = reg.get(pid)
+        if proj is not None:
+            return proj
+        meta = EXAMPLES_META[name]
+        steps = EXM.ensure_steps(reg.data / "examples", run=PS.run_cli)
+        return reg.create(meta["title"], step_path=steps[name], filename=meta["step"], pid=pid,
+                          example=True, description=meta["description"],
+                          plan=EXM.plan_for(name), order=meta["order"])
 
 
 def ensure_synthetic(reg: Registry) -> None:

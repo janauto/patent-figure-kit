@@ -45,7 +45,28 @@ def _users(dotted: str):
 def test_zip_archives_only_via_the_export_service():
     # bench.py keeps a LABELLED legacy zip only for timing an R1e-era baseline repo that has no
     # version store (export_path = "legacy-zip(baseline repo)"); it never reads a real project.
-    assert _users("zipfile.ZipFile") <= {"patent_figure/export.py", "bench.py"}
+    # WP2: deliverable_check.py opens the WRITTEN Word file (a zip container) READ-ONLY to verify
+    # it page by page — it never creates an archive (pinned by the test below).
+    # R2d: deliverable.py writes the .docx CONTAINER of one document (fixed templates) — not an
+    # export archive; pinned by test_docx_writer_only_writes_its_own_temp_container below.
+    assert _users("zipfile.ZipFile") <= {"patent_figure/export.py", "bench.py",
+                                         "patent_figure/deliverable_check.py",
+                                         "patent_figure/deliverable.py"}
+
+
+def test_docx_writer_only_writes_its_own_temp_container():
+    src = (_SCRIPTS / "patent_figure" / "deliverable.py").read_text(encoding="utf-8")
+    calls = [line.strip() for line in src.splitlines() if "zipfile.ZipFile(" in line]
+    assert calls == ['with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as zf:'], calls
+    body = src[src.index("def write_docx("):]
+    assert "zipfile.ZipFile(str(tmp)" in body and 'tmp = path.with_name(path.name + ".tmp")' in body
+
+
+def test_deliverable_check_only_reads_zip_containers():
+    src = (_SCRIPTS / "patent_figure" / "deliverable_check.py").read_text(encoding="utf-8")
+    calls = [line.strip() for line in src.splitlines() if "zipfile.ZipFile(" in line]
+    assert calls and all(", \"w\"" not in c and ", 'w'" not in c and "mode=" not in c
+                         for c in calls), calls
 
 
 def test_pointer_writes_only_in_the_store_and_the_publish_service():
@@ -83,3 +104,32 @@ def test_no_result_cache_and_no_shared_out_reader():
         for t in _tokens(p):
             if t.type == tokenize.STRING:
                 assert t.string.strip("\"'") != "last_render.json", _rel(p)
+
+
+#: CLIs that predate WP2 and write a user-named report path. render_patent_figure has its own
+#: side-path guard (R1g–R1j); the rest are read-only checkers / generators whose outputs are not
+#: delivery paths. Any NEW CLI with an output-path flag must go through patent_figure.pathguard.
+_LEGACY_OUTPUT_CLIS = {"annotate_figure_sheet.py", "bench.py", "render_flowchart.py",
+                       "doctor.py", "validate_clean_dxf.py", "qa_patent_figure.py",
+                       "render_patent_figure.py", "validate_figure_plan.py"}
+
+
+def test_new_clis_with_output_paths_go_through_the_path_guard():
+    """WP2 R2 #2: every CLI that takes an output path (--json / --zip / --instances / -o work
+    dir) and is not on the legacy list checks it with ``pathguard.check_outputs`` before writing;
+    the long-running ones check again right before writing (defence in depth)."""
+    flags = ('add_argument("--json"', 'add_argument("--zip"', '"--json", dest',
+             'add_argument("--instances"')
+    users = {}
+    for p in _files():
+        src = p.read_text(encoding="utf-8")
+        if any(f in src for f in flags):
+            users[_rel(p)] = src
+    unguarded = [rel for rel, src in users.items()
+                 if Path(rel).name not in _LEGACY_OUTPUT_CLIS
+                 and not _code_uses(_SCRIPTS / rel, "pathguard.check_outputs")]
+    assert not unguarded, unguarded
+    for rel in ("suggest_figure_plan.py", "export_figure_package.py"):
+        src = (_SCRIPTS / rel).read_text(encoding="utf-8")
+        assert src.count("_guard(") >= 3, rel          # definition + pre-check + late re-check
+        assert _code_uses(_SCRIPTS / rel, "pathguard.claim_workdir"), rel

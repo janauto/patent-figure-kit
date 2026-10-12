@@ -263,7 +263,7 @@ def n8(ctx):
     return "引线锚点被搬离 40mm 后闸门判 FAIL（退出码 1）"
 
 
-@node("N9", "确定性 · 同一计划两次渲染必须逐位相同")
+@node("N9", "确定性 · 同一计划两次渲染规范化摘要一致")
 def n9(ctx):
     sys.path.insert(0, str(SCRIPTS))
     from patent_figure.sheet import normalized_digest
@@ -575,7 +575,201 @@ def n16(ctx):
             "输出目录保持上一完整版本（%d 张图 + 同版本标记说明）" % (len(quarantined), len(good)))
 
 
-NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n10b, n11, n12, n13, n14, n15, n16]
+# ------------------------------------------------------------------ WP2：导出包与候选分图
+
+
+_WP2_TOKEN = "acc-wp2"
+_WP2_EXAMPLES = ("gearbox", "vise", "valve")
+
+
+def _wp2_env(ctx):
+    """In-process workbench over a private data dir + the three public demo projects, created
+    through the SAME REST entry the UI uses (POST /v1/projects/from-example → render job).
+    Shared by N17/N18; built once."""
+    if "wp2" in ctx:
+        return ctx["wp2"]
+    try:
+        sys.path.insert(0, str(SCRIPTS))
+        import workbench as W
+        from starlette.testclient import TestClient
+    except ImportError as exc:
+        raise Skip("缺工作台依赖（fastapi/starlette/httpx）：%s" % exc)
+    reg = W.Registry(ctx["tmp"] / "wp2-data", _WP2_TOKEN)
+    c = TestClient(W.Dispatcher(W.build_workbench(reg, _WP2_TOKEN, 8802), reg),
+                   base_url="http://127.0.0.1:8802")
+    H = {"Authorization": "Bearer %s" % _WP2_TOKEN}
+
+    def poll(job_id, timeout=1200):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            j = c.get("/v1/jobs/%s" % job_id, headers=H).json()
+            if j["state"] in ("succeeded", "failed", "cancelled", "interrupted"):
+                return j
+            time.sleep(0.5)
+        raise AssertionError("作业 %s 超时" % job_id)
+
+    projects = {}
+    for ex in _WP2_EXAMPLES:
+        r = c.post("/v1/projects/from-example", headers=H, json={"example": ex})
+        assert r.status_code == 202, "from-example %s：%s" % (ex, r.text[:200])
+        j = poll(r.json()["job_id"])
+        assert j["state"] == "succeeded", "示例 %s 准备失败：%s" % (ex, j.get("error"))
+        pid = r.json()["project_id"]
+        rj = poll(c.post("/v1/projects/%s/render" % pid, headers=H).json()["job_id"])
+        assert rj["state"] == "succeeded", "示例 %s 出图未全部过闸：%s" % (ex, rj.get("error"))
+        projects[ex] = {"pid": pid, "render": rj}
+    ctx["wp2"] = {"W": W, "reg": reg, "c": c, "H": H, "poll": poll, "projects": projects}
+    return ctx["wp2"]
+
+
+def _recheck_zip(env, export_job, dest):
+    """Independent re-check from the DOWNLOADED zip: every PDF/Word in it is checked again by
+    deliverable_check against the variant DXFs shipped in the same zip (not the server's report).
+    R2j ruling — hash seal: every file of the zip must match the sha256 the SERVER recorded for it
+    (result.sha256; the in-zip 核验报告.json must agree), and each document is re-checked with
+    that digest as ``expected_sha256``; a PDF must pass the independent render (status ok)."""
+    import io as _io
+    import zipfile as _zip
+    from patent_figure import deliverable as _D
+    from patent_figure import deliverable_check as _C
+    from patent_figure import export as _EXPORT
+    r = env["c"].get("/v1/exports/%s/download" % export_job["id"], headers=env["H"])
+    assert r.status_code == 200, "下载失败 %d" % r.status_code
+    _zip.ZipFile(_io.BytesIO(r.content)).extractall(str(dest))
+    sealed = export_job["result"]["sha256"]
+    in_zip = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    assert sorted(sealed) == [n for n in in_zip if n != _EXPORT.REPORT_NAME], \
+        "导出记录的 sha256 与包内文件不一致：%s" % sorted(set(sealed) ^ set(in_zip))
+    for name, digest in sealed.items():
+        assert _C.sha256_of(dest / name) == digest, "%s 与导出时记录的 sha256 不符" % name
+    zrep = json.loads((dest / _EXPORT.REPORT_NAME).read_text(encoding="utf-8"))
+    assert zrep["sha256"] == sealed, "包内《核验报告.json》的 sha256 与服务端记录不一致"
+    sp = env["c"].get("/v1/capabilities", headers=env["H"]).json()["export"]
+    spec = _D.spec(export_job["result"]["spec"]["preset"], export_job["result"]["spec"]["dpi"])
+    assert spec["min_text_mm"] == sp["min_text_mm"]
+    pages = 0
+    for label, sub, suf in (("递交版", "递交版_仅图号", "_filing"),
+                            ("交底版", "交底版_带件号表", "_annotated")):
+        figs = sorted((dest / sub).glob("*%s.dxf" % suf))
+        assert figs, "包内缺 %s 的 DXF" % sub
+        rows = []
+        for f in figs:
+            src = _C.Source(f.stem, 0, f, spec["area_mm"])
+            k = int(str(src.caption["text"]).replace("图", "")) if src.caption else 0
+            rows.append({"figure": f.stem, "number": k, "dxf": f})
+        for fmt in ("pdf", "docx"):
+            doc = dest / ("说明书附图_%s.%s" % (label, fmt))
+            assert doc.is_file(), "包内缺 %s" % doc.name
+            rep = _C.check_document(doc, _C.sources_from(rows, spec["area_mm"]), spec,
+                                    expected_sha256=sealed[doc.name])
+            assert rep["ok"] and rep["status"] == "ok" and rep["sha256_verified"] is True, \
+                "%s 复核不通过：%s %s" % (doc.name, rep["errors"],
+                                     [p["errors"] for p in rep["page_checks"]])
+            pages += rep["pages"]
+            if fmt == "pdf":            # R2i: the writer's own PDF parses STRICTLY, every object
+                from pypdf import PdfReader
+                bad = _C._pdf_parse_all(PdfReader(str(doc), strict=True))
+                assert not bad, "%s 严格解析不通过：%s" % (doc.name, bad)
+                env.setdefault("strict_pdfs", []).append(doc.name)
+    for name in ("附图说明.txt", "核对清单.txt", "核验报告.json", "reference-numerals.json"):
+        assert (dest / name).is_file(), "包内缺 %s" % name
+    return pages
+
+
+@node("N17", "附图导出包 · 三个公开模型 PDF/Word 逐页核验；dpi 72 必须判不通过")
+def n17(ctx):
+    """F1：PDF/Word 是主交付。对三个公开演示模型各导出「两版 × PDF/Word/DXF」，服务端逐页核验
+    全部通过，并从**下载的 zip** 独立复核每一页（页幅、页边、缩放后字高 mm/px、图号存在、页数 =
+    图数、文件齐全）。再故意把 dpi 调到 72：栅格字高不达标，PDF/Word 必须判 fail、移到
+    _未通过核验/，DXF 照常 ok——不得报成功。"""
+    env = _wp2_env(ctx)
+    c, H, poll = env["c"], env["H"], env["poll"]
+    caps = c.get("/v1/capabilities", headers=H).json()["export"]
+    # R2j ruling: a PDF passes only after an independent render — N17 runs WITH a renderer
+    assert caps["pdf_check_available"] and caps["pdf_renderer"], \
+        "N17 需要 pypdf + 独立渲染器（pypdfium2）：%s" % caps.get("unavailable_reasons")
+    total_pages = 0
+    for ex, info in env["projects"].items():
+        pid = info["pid"]
+        r = c.post("/v1/projects/%s/export" % pid, headers=H,
+                   json={"variant": "both", "formats": ["pdf", "docx", "dxf"], "dpi": 300,
+                         "sheet_preset": "standard"})
+        assert r.status_code == 202, "%s 导出提交失败：%s" % (ex, r.text[:200])
+        j = poll(r.json()["export_id"])
+        res = j.get("result") or {}
+        assert j["state"] == "succeeded" and res.get("ok"), \
+            "%s 导出包未全部通过：%s" % (ex, res.get("reasons") or j.get("error"))
+        nfig = len(info["render"]["result"]["figures"])
+        for name, doc in res["documents"].items():
+            assert doc["ok"] and doc["pages"] == doc["expected_pages"] == nfig, \
+                "%s %s：%d/%d 页 %s" % (ex, name, doc["pages"], nfig, doc["errors"])
+            assert doc["status"] == "ok" and doc["sha256"] == res["sha256"][doc["path"]]
+            assert name.endswith(".docx") or doc["render_check"] == caps["pdf_renderer"]
+            # R2k: the render matches the source page spatially (IoU / caption / background)
+            assert name.endswith(".docx") or all(
+                p["render_match"]["iou"] >= 0.9 for p in doc["page_checks"]), doc["page_checks"]
+        # R2k: the export's own directory (bundle, zip, report, result) is sealed and intact
+        from patent_figure import export as _EXPORT
+        assert res.get("seal", {}).get("sha256"), "导出结果缺封口记录"
+        problems = _EXPORT.verify_export_seal(env["reg"].data / "jobs" / j["id"],
+                                              res["seal"]["sha256"])
+        assert not problems, "%s 导出目录封口校验不通过：%s" % (ex, problems)
+        total_pages += _recheck_zip(env, j, ctx["tmp"] / ("wp2-zip-" + ex))
+        r72 = poll(c.post("/v1/projects/%s/export" % pid, headers=H,
+                          json={"variant": "both", "formats": ["pdf", "docx", "dxf"],
+                                "dpi": 72}).json()["export_id"])
+        res72 = r72["result"]
+        bad = {k: v for k, v in res72["manifest"].items() if k.endswith(("/pdf", "/docx"))}
+        assert res72["ok"] is False and bad and all(v == "fail" for v in bad.values()), \
+            "%s dpi 72 未判不通过：%s" % (ex, bad)
+        assert all("px" in res72["reasons"][k] for k in bad), res72["reasons"]
+        # R2i: the dpi-72 PDFs fail on raster text height ONLY — they too parse strictly, with
+        # no document-level (structure / strict-parse) error
+        for name, doc in res72["documents"].items():
+            assert not (name.endswith(".pdf") and doc["errors"]), \
+                "%s %s：%s" % (ex, name, doc["errors"])
+        assert all(v == "ok" for k, v in res72["manifest"].items() if k.endswith("/dxf"))
+        assert not any(f.startswith("说明书附图_") for f in res72["files"]), res72["files"]
+    return ("3 个模型 × 两版 × PDF/Word 服务端核验 + 下载包按服务端 sha256 封印比对后独立复核共 %d 页"
+            "全部通过（PDF 经 %s 渲染并与源图空间比对）；导出目录封口完好；"
+            "%d 份 PDF 逐对象严格解析（pypdf strict）无误；"
+            "dpi 72 时 PDF/Word 全部判 fail（栅格字高 < 24 px）并隔离"
+            % (total_pages, caps["pdf_renderer"], len(env.get("strict_pdfs", []))))
+
+
+@node("N18", "候选分图 · 三个公开模型至少各一张过闸；台虎钳整机被拦并给建议")
+def n18(ctx):
+    """F2-lite：每个候选都实际渲染 + 过 QA 后才有状态；产物进候选专属版本库，不改当前版本。
+    三个公开模型各至少一张候选通过；台虎钳整机装配候选必须被闸门拦下并给白话原因与建议。"""
+    env = _wp2_env(ctx)
+    c, H, poll = env["c"], env["H"], env["poll"]
+    out = []
+    for ex, info in env["projects"].items():
+        pid = info["pid"]
+        cur = env["reg"].get(pid).root / "studio" / "current.json"
+        before = cur.read_bytes()
+        r = c.post("/v1/projects/%s/plan/suggest" % pid, headers=H, json={})
+        assert r.status_code == 202, "%s suggest 提交失败：%s" % (ex, r.text[:200])
+        j = poll(r.json()["job_id"])
+        assert j["state"] == "succeeded", "%s 候选分图作业失败：%s" % (ex, j.get("error"))
+        res = j["result"]
+        assert cur.read_bytes() == before, "%s：候选试渲染改动了当前版本指针" % ex
+        cands = res["candidates"]
+        assert cands and all(x["status"] in ("pass", "fail") and x["reason"] for x in cands), \
+            "%s：有候选没有渲染后的状态" % ex
+        passed = [x for x in cands if x["status"] == "pass"]
+        assert passed, "%s：没有候选过闸（%s）" % (ex, res.get("empty_reason"))
+        assert all(m.get("part") for x in cands for m in x["members"])
+        if ex == "vise":
+            whole = next(x for x in cands if x["source"]["kind"] == "whole")
+            assert whole["status"] == "fail" and whole["suggestion"], \
+                "台虎钳整机候选未被拦下：%s" % whole
+            out.append("台虎钳整机被拦：%s" % whole["reason"][:30])
+        out.append("%s %d/%d 过闸" % (ex, len(passed), len(cands)))
+    return "；".join(out)
+
+
+NODES = [n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n10b, n11, n12, n13, n14, n15, n16, n17, n18]
 
 
 # ------------------------------------------------------------------ 主流程
@@ -629,7 +823,8 @@ def main() -> int:
             print("  [%s] %s\n      %s" % (r["id"], r["title"], r["detail"]))
         print("\n请把上面这段原样反馈，不要只说「跑失败了」——每条 detail 都指明了原因。")
     else:
-        print("\n全部通过。这台机器上的工具链功能完备，且与仓库金样逐位一致。")
+        print("\n全部通过。这台机器上的工具链功能完备，且规范化图元摘要与仓库金样一致"
+              "（本机环境；口径见 acceptance/README.md）。")
 
     print("\n注意：脚本测不了模型行为（是否自己写脚本、是否手填标记号）。")
     print("那部分请按 acceptance/行为验收.md 走一遍，需要人看对话记录。")

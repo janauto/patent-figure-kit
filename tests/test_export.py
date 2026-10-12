@@ -97,7 +97,12 @@ def test_bundle_never_writes_into_the_version_and_fails_a_vanished_source(tmp_pa
         out = EX.build_bundle(pin, tmp_path / "b", variants=("annotated", "filing"),
                               formats=("dxf", "svg", "pdf"), description_txt=True)
     assert out["manifest"]["fig1/递交版/svg"] == "fail"
-    assert out["manifest"]["fig1/交底版/pdf"] == "skip"
+    # WP2 F1: PDF is implemented; these fake "DXF" sources cannot be rasterised, so the PDF is
+    # fail WITH a reason — never ok, never a silent skip — and no unverified PDF is packaged.
+    assert out["manifest"]["fig1/交底版/pdf"] == "fail"
+    assert out["reasons"]["fig1/交底版/pdf"]
+    assert "说明书附图_交底版.pdf" not in out["files"]
+    assert out["ok"] is False
     assert "递交版_仅图号/fig1_filing.svg" not in out["files"]
     assert "附图说明.txt" in out["files"] and "reference-numerals.json" in out["files"]
     assert sorted(p.name for p in vd.iterdir()) == sorted(set(before) - {"fig1_filing.svg"})

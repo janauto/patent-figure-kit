@@ -49,8 +49,10 @@ script can judge, is in [acceptance/行为验收.md](acceptance/行为验收.md)
 A plan can be written by a model (below) or clicked together by a person in **Plan Studio**
 (`python3 scripts/plan_studio.py ASM.stp` — local browser UI: pick parts in 3D, group them
 into figures, name them, render behind the same QA gate). Both authors produce the same
-`figure-plan.json` and go through identical CLIs, so a hand-made plan reproduces
-bit-identically like any other. When a human wants to adjust figure grouping, point them at
+`figure-plan.json` and go through identical CLIs, so a hand-made plan reproduces like any
+other: in a verified environment the same plan yields the same normalised entity digest
+(coordinates to 6 decimals, geometry and text entities, file header and handles excluded —
+acceptance N10/N10b). When a human wants to adjust figure grouping, point them at
 Plan Studio instead of editing JSON by hand — and never have a model drive the Studio.
 
 ### The loop
@@ -82,7 +84,30 @@ python3 scripts/analyze_assembly.py ASM.stp -o assembly.json --include 'SYN-*' -
 `--include` / `--exclude` are repeatable and **case-sensitive** (`fnmatchcase`), as is every glob in
 the system. Read `assembly.json` before writing the plan: `parts[]`, `stack_order`,
 `coaxial_groups`, `size_tiers`, `split_suggestions`, `warnings`. `split_suggestions` may legitimately
-be `[]` — then the grouping is yours to choose.
+be `[]` — then the grouping is yours to choose. Add `--instances assembly.instances.json` to also
+write the per-instance sidecar (every instance's assembly path); A1b needs it to see sub-assemblies
+and a part name that occurs in several of them.
+
+**A1b — candidate figures (optional, F2-lite).** When you do not know how to group the parts,
+ask for candidates — every one is **actually rendered and run through the QA gate** before it gets
+a status:
+
+```bash
+python3 scripts/suggest_figure_plan.py --assembly assembly.json --instances assembly.instances.json \
+        --step ASM.stp [--plan plan.json] -o .suggest/ --json candidates.json
+```
+
+Candidates: the whole assembly (a fallback that is *allowed* to fail — its reason teaches the
+split), the whole assembly exploded along the principal axis, every `split_suggestions` figure, one
+exploded figure per sub-assembly and per coaxial group. Each candidate lists `members` as **real
+part names** (`{"part": …}`), `status` `pass`/`fail` with a plain-language `reason` and
+`suggestion`, and `ambiguous_members` when a name occurs in several sub-assemblies (a plan selects by
+name, so it picks every instance: 「按名称选中 N 处」). Standard parts (contract §14.2 regex:
+SCREW/BOLT/NUT/WASHER/PIN/BEARING/螺钉/螺栓/螺母/垫圈/销/轴承, whole-word for Latin, lead/ball screws
+excepted) are trial-rendered with `label: "none"`. The tool never edits a plan: copy the members
+of a `pass` candidate into a figure of YOUR plan (A2). Exit `1` + `empty_reason` means no candidate
+passed — choose the grouping yourself. The trial versions live in `.suggest/candidates/` and are
+never anything's current version.
 
 **A2 — write `figure-plan.json`.** See the next section. This is the only file you author.
 
@@ -156,6 +181,39 @@ the CLI issues no numeral and invents no name. The descriptive caption moves int
 the 附图说明 sentence (「图1为……；」). The figure number is the figure's position in
 `plan.figures` (1-based); do not pass anything else.
 
+**A8 — 附图导出包 (filing package, F1).** The deliverable a person files is a **PDF or Word**
+document, not loose DXFs. One command renders the plan through the publish service (raw → QA gate →
+交底版 / 递交版 → sealed version) and builds the package through the export service:
+
+```bash
+python3 scripts/export_figure_package.py plan.json --assembly assembly.json -o 附图包/ \
+        [--variant filing|disclosure|both] [--formats pdf,docx,dxf,dwg] [--dpi 300] \
+        [--preset standard|conservative] [--zip 附图包.zip] [--json export.json]
+```
+
+Per numbered variant you get `说明书附图_递交版.pdf/.docx` (figure numbers only — this is what is
+filed) and `说明书附图_交底版.pdf/.docx` (with the 序号｜名称 table — internal disclosure): A4, margins
+top 25 / left 25 / bottom 15 / right 15 mm, drawing area `standard` 170×257 or `conservative`
+165×245 mm, one figure per page in 图1…图n order, raster at `--dpi` (default 300), **never
+enlarged**. Every written document is then checked **page by page from the file itself**
+(`scripts/patent_figure/deliverable_check.py`): page size, margins, scaled minimum text height
+≥ 3.5 mm and ≥ 24 px at the effective dpi, the 「图N」 caption actually inked on page N, page count =
+figure count, files complete (Word is verified **structurally** — one section, the exact page and
+margins, one centred inline picture per paragraph, explicit single spacing, page breaks only where
+expected — and the report says so: actual Word pagination is not measured). A document that fails
+— or whose check could not run — is moved to `_未通过核验/` and its items are
+`fail` with the reason — never reported ok (e.g. `--dpi 72` fails every page: 3.5 mm ≈ 9.9 px).
+DXF/DWG are source files for re-editing; DWG is `skip` with a reason when no converter is installed.
+The package also holds `附图说明.txt`, `核对清单.txt` (what a person must still check by hand —
+there is no automatic comparison against the specification in M1) and `核验报告.json`. Exit `0`
+only if every requested item passed. Re-check a document yourself with
+`python3 scripts/deliverable_check.py 说明书附图_递交版.pdf --sources 递交版_仅图号/fig1_filing.dxf …`.
+Exact image parameters follow the current 《电子申请文件格式要求说明》; the PDF check needs the optional
+package `pypdf` (`doctor.py` reports it). Every output path of these CLIs (`-o`, `--workdir`,
+`--json`, `--zip`, `--cache`, analyze's `--instances`) is checked before writing: it may not be an
+input file, may not land in any version store's reserved area (symlink and letter-case aliases
+included), and a work directory must be new, empty or one the same tool created — otherwise exit `2`.
+
 ### Method flowcharts (方法流程图)
 
 Same split of authorship: you write **only** `flowchart.json` (schema `patent-flowchart/1`:
@@ -177,9 +235,13 @@ the description.
 `python3 scripts/workbench.py` starts a local web workbench (default `http://127.0.0.1:8790/?token=…`):
 home page with an example carousel and project list; one Plan Studio per project with click and
 **box selection** (left→right window, right→left crossing, Shift add, Alt subtract), AI drafting
-of part names, render with the QA gate, automatic 交底版/递交版, method flowcharts, and an export
-bundle (DXF/DWG/PNG, 说明书附图 Word, 附图说明). External callers use REST `/v1/*` (docs at `/docs`)
-or MCP `POST /mcp` with `Authorization: Bearer <token>`. The large-model channel (DeepSeek API,
+of part names, render with the QA gate, automatic 交底版/递交版, method flowcharts, candidate
+figures (`POST /v1/projects/{id}/plan/suggest`, accept via `/plan/candidates/accept`), and the
+filing package of A8 (`POST /v1/projects/{id}/export`; `GET /v1/capabilities` says up front
+whether DWG/Word are available). External callers use REST `/v1/*` (docs at `/docs`, contract in
+`docs/openapi.yaml`) or MCP `POST /mcp` with `Authorization: Bearer <token>` (tools include
+`suggest_figures`, `accept_figure_candidates`, `get_export`). `?token=` still works for one
+compatibility period and answers with a `Deprecation` header. The large-model channel (DeepSeek API,
 or a local CodeBuddy CLI as fallback) only drafts **semantics** — part names and flowchart steps —
 and everything it returns goes through the same validators; human-entered names are never
 overwritten. As with Plan Studio, **a model must never drive the workbench UI**; it talks to the
@@ -304,6 +366,9 @@ drawing anything by hand.
 7. Preview PNGs were rendered from the DXF and inspected.
 8. When the deliverable is a filing or disclosure set, `annotate_figure_sheet.py` produced the
    「图N」copies (with or without the 件号名称表, as asked) and the 附图说明 sentences are quoted.
+9. When a filing package was asked for, `export_figure_package.py` exited 0 (every PDF/Word page
+   passed the file-level check) — or the failing items and their reasons are quoted from
+   `核对清单.txt`; the hand-check list in `核对清单.txt` is passed on to the person.
 
 ---
 

@@ -582,11 +582,15 @@ def _default_loader(step: Path) -> list:
 def build_assembly(step: Path, *, include: Sequence[str] = (),
                    exclude: Sequence[str] = (),
                    max_labels_per_figure: int = DEFAULT_MAX_LABELS,
-                   loader: Callable[[Path], list] = None) -> dict:
+                   loader: Callable[[Path], list] = None,
+                   instances_out: list = None) -> dict:
     """Build the §4.1 `assembly.json` document for `step`.
 
     `loader` defaults to `occ_backend.load_assembly`; injecting one keeps the analysis
-    testable without OCC.
+    testable without OCC. `instances_out` (WP2): when a list is passed, it receives one
+    plain record per kept part INSTANCE (`instance_rows`) — the per-instance assembly paths
+    that `assembly.json` (one `path_sample` per part name) cannot carry. The document itself
+    is unchanged.
     """
     step = Path(step)
     if not step.is_file():
@@ -609,6 +613,8 @@ def build_assembly(step: Path, *, include: Sequence[str] = (),
                         % (dropped, len(records_all)))
 
     entries = part_entries(records)
+    if instances_out is not None:
+        instances_out.extend(instance_rows(records))
     degen = [e["name"] for e in entries if e["degenerate"]]
     if degen:
         warnings.append("%d 个零件的包围盒退化（max_dim < %.0e）：%s。"
@@ -643,6 +649,34 @@ def build_assembly(step: Path, *, include: Sequence[str] = (),
         "split_suggestions": splits,
         "warnings": warnings,
     }
+
+
+# --------------------------------------------------------------------------- instances (WP2)
+
+#: Schema id of the per-instance sidecar written by ``analyze_assembly.py --instances``.
+INSTANCES_SCHEMA_ID = "patent-assembly-instances/1"
+
+
+def instance_rows(records: Sequence[dict]) -> list:
+    """One plain dict per instance, in the global `key` order: name, assembly path, and the
+    rounded box/centre. Candidate figure suggestion (``suggest_plan``) needs the path of EVERY
+    instance — `path_sample` alone cannot tell that a part name appears under two different
+    sub-assemblies (selecting it by name then picks both)."""
+    out = []
+    for r in records:
+        out.append({"key": r["key"], "name": r["name"], "path": r["path"],
+                    "degenerate": bool(r["degenerate"]),
+                    "center": _round_list(r["center"], CENTER_DEC),
+                    "lo": _round_list(r["lo"], SIZE_DEC),
+                    "hi": _round_list(r["hi"], SIZE_DEC)})
+    return out
+
+
+def instances_doc(rows: Sequence[dict], step_sha256: str) -> dict:
+    """The sidecar document: bound to the STEP it came from by sha256, so a reader can tell a
+    stale sidecar from a current one."""
+    return {"schema": INSTANCES_SCHEMA_ID, "source": {"sha256": step_sha256},
+            "instances": list(rows)}
 
 
 # --------------------------------------------------------------------------- schema

@@ -62,8 +62,13 @@ TOOLS = [
                              "include_images": {"type": "boolean", "default": False}},
                             ["project_id"])},
     {"name": "ai_draft_terms", "title": "AI 起草零件名",
-     "description": "让工作台调用 DeepSeek 给还没命名的零件起中文名并写入计划（不覆盖人填的）。",
-     "inputSchema": _schema({"project_id": PID}, ["project_id"])},
+     "description": "让工作台调用已配置的大模型给还没命名的零件起中文名（每条带 confidence/reason），"
+                    "只填空白、不覆盖人填的。selectors 限定零件（缺省=全部空白）；apply 缺省 true 时写入"
+                    "计划，false 只返回建议。没配大模型通道时返回 status=ai_not_configured。外发前请留意"
+                    "返回的 outbound_fields（零件名 / 件号会发给大模型）。",
+     "inputSchema": _schema({"project_id": PID,
+                             "selectors": {"type": "array", "items": {"type": "string"}},
+                             "apply": {"type": "boolean", "default": True}}, ["project_id"])},
     {"name": "get_flowchart_guide", "title": "流程图格式说明",
      "description": "返回流程图语义 JSON（patent-flowchart/1）的格式与规则，写 render_flowchart 的 spec 前先读。",
      "inputSchema": _schema({})},
@@ -90,13 +95,35 @@ TOOLS = [
      "inputSchema": _schema({"job_id": {"type": "string"}}, ["job_id"])},
     {"name": "get_export", "title": "导出附图包（异步）",
      "description": "对工程发起一次导出，返回 export_id（= job_id）。用 get_job 轮询到 succeeded，"
-                    "结果里的 download_url 即 zip 下载地址。formats 可含 pdf/docx/dxf/dwg。",
+                    "结果里的 download_url 即 zip 下载地址。PDF/Word 是主交付（A4、逐页核验页幅/页边/"
+                    "缩放后字高/图号/页数，不过的移到 _未通过核验/ 并在 items 里给原因），DXF/DWG 是源文件；"
+                    "DWG 无转换器时为 skip。包内附 附图说明.txt 与 核对清单.txt。",
      "inputSchema": _schema({"project_id": PID,
                              "formats": {"type": "array", "items": {"type": "string",
                                          "enum": ["pdf", "docx", "dxf", "dwg"]}},
                              "variant": {"type": "string",
-                                         "enum": ["filing", "disclosure", "both"]}},
+                                         "enum": ["filing", "disclosure", "both"]},
+                             "dpi": {"type": "integer", "minimum": 72, "maximum": 600,
+                                     "default": 300},
+                             "sheet_preset": {"type": "string",
+                                              "enum": ["standard", "conservative"]}},
                             ["project_id"])},
+    {"name": "suggest_figures", "title": "候选分图（异步）",
+     "description": "给工程提若干分图候选（整机装配图、沿主轴分解图、每个子装配/同轴组一张分解图），"
+                    "每个候选都实际渲染并过质量闸门后才有 pass/fail 与原因。返回 job_id，用 get_job "
+                    "轮询；result.candidates[].members 是真实零件名。标准件默认不发标记。",
+     "inputSchema": _schema({"project_id": PID,
+                             "label_standard_parts": {"type": "boolean", "default": False},
+                             "max_candidates": {"type": "integer", "minimum": 1,
+                                                "maximum": 16}}, ["project_id"])},
+    {"name": "accept_figure_candidates", "title": "接受候选分图",
+     "description": "把选中的候选（candidate_ids）写进工程计划：成员先在当前装配体上解析，解析不了"
+                    "就整体拒绝、不写入。mode=append 追加（默认）/ replace 替换全部分图。",
+     "inputSchema": _schema({"project_id": PID, "job_id": {"type": "string"},
+                             "candidate_ids": {"type": "array", "items": {"type": "string"}},
+                             "mode": {"type": "string", "enum": ["append", "replace"]},
+                             "apply_standard_labels": {"type": "boolean", "default": True}},
+                            ["project_id", "candidate_ids"])},
 ]
 
 FLOW_GUIDE = {

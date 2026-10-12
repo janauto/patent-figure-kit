@@ -402,6 +402,67 @@ def scaled_assembly(out: Path, n_instances: int, seed: int = 12345) -> Tuple[Pat
     return A.write(out), A.count
 
 
+# --------------------------------------------------------------------------- #
+# 5. 候选分图（F2-lite，WP2）的边界样例：同名跨子装配 / 方柱 / 全遮挡 / 低件数拥挤           #
+# --------------------------------------------------------------------------- #
+
+def edge_same_name(out: Path) -> Tuple[Path, int]:
+    """同名跨子装配：左右两个子装配各有一个同名的 SN-BRACKET（按名称选中会选到 2 处）。"""
+    A = Assy("EDGE-SAME-NAME")
+    A.add(A.root, "SN-RAIL", cbox(220, 30, 10, (0, 0, 0)), loc())
+    bracket = cut(cbox(30, 30, 40, (0, 0, 0)), cyl(6, 50, (0, 0, -5)))
+    left = A.sub("SN-LEFT-ASM")
+    A.add(left, "SN-LEFT-BLOCK", cbox(40, 40, 25, (0, 0, 0)), loc((-70, 0, 10)))
+    A.add(left, "SN-BRACKET", bracket, loc((-70, 0, 35)))
+    A.add(left, "SN-LEFT-KNOB", sphere(9), loc((-70, 0, 84)))
+    A.add(A.root, "SN-LEFT-ASM", left, loc())
+    right = A.sub("SN-RIGHT-ASM")
+    A.add(right, "SN-RIGHT-BLOCK", cbox(50, 36, 20, (0, 0, 0)), loc((70, 0, 10)))
+    A.add(right, "SN-BRACKET", bracket, loc((70, 0, 30)))
+    A.add(right, "SN-RIGHT-CAP", cyl(16, 8), loc((70, 0, 70)))
+    A.add(A.root, "SN-RIGHT-ASM", right, loc())
+    return A.write(out), A.count
+
+
+def edge_square_column(out: Path) -> Tuple[Path, int]:
+    """方柱：横截面正方形的立柱，包围盒与回转体一样「两向相等」，会被同轴聚类收进去。"""
+    A = Assy("EDGE-SQUARE-COLUMN")
+    A.add(A.root, "SQ-BASE", cbox(120, 120, 12, (0, 0, 0)), loc())
+    A.add(A.root, "SQ-COLUMN", cbox(24, 24, 140, (0, 0, 12)), loc())
+    A.add(A.root, "SQ-COLLAR", cut(cyl(26, 16, (0, 0, 70)), cbox(25, 25, 20, (0, 0, 68))), loc())
+    A.add(A.root, "SQ-TOP-DISC", cyl(30, 8, (0, 0, 152)), loc())
+    return A.write(out), A.count
+
+
+def edge_occluded(out: Path) -> Tuple[Path, int]:
+    """全遮挡：OCC-CORE 整个被封闭壳体包在里面，整机装配图上根本看不见它。"""
+    A = Assy("EDGE-OCCLUDED")
+    shell = cut(cbox(100, 80, 70, (0, 0, 0)), cbox(90, 70, 60, (0, 0, 5)))
+    A.add(A.root, "OCC-HOUSING", shell, loc())
+    A.add(A.root, "OCC-LID", cbox(100, 80, 6, (0, 0, 70)), loc())
+    A.add(A.root, "OCC-CORE", cyl(18, 40, (0, 0, 15)), loc())
+    A.add(A.root, "OCC-FOOT", cbox(120, 20, 8, (0, 0, -8)), loc())
+    return A.write(out), A.count
+
+
+def edge_crowded(out: Path) -> Tuple[Path, int]:
+    """低件数拥挤：只有 4 种零件，但一块大板上有个极小的零件——标号字高放不下。"""
+    A = Assy("EDGE-CROWDED")
+    A.add(A.root, "CR-PLATE", cbox(180, 180, 6, (0, 0, 0)), loc())
+    A.add(A.root, "CR-BLOCK", cbox(60, 60, 40, (0, 0, 6)), loc((40, 40, 0)))
+    A.add(A.root, "CR-TINY-TAB", cbox(1.2, 1.2, 1.0, (0, 0, 6)), loc((-60, -60, 0)))
+    A.add(A.root, "CR-POST", cyl(5, 50, (0, 0, 6)), loc((-40, 50, 0)))
+    return A.write(out), A.count
+
+
+EDGE_BUILDERS: List[Tuple[str, str, Callable[[Path], Tuple[Path, int]]]] = [
+    ("edge-same-name.stp", "同名跨子装配", edge_same_name),
+    ("edge-square-column.stp", "方柱", edge_square_column),
+    ("edge-occluded.stp", "全遮挡", edge_occluded),
+    ("edge-crowded.stp", "低件数拥挤", edge_crowded),
+]
+
+
 BUILDERS: List[Tuple[str, str, Callable[[Path], Tuple[Path, int]]]] = [
     ("demo-planetary-gearbox.stp", "行星齿轮减速器", planetary_gearbox),
     ("demo-bench-vise.stp", "台虎钳", bench_vise),
@@ -417,7 +478,14 @@ def main(argv=None) -> int:
                     help="改为生成指定实例数的参数化装配体（可重复，如 --scaled 50 --scaled 200）；"
                          "固定种子，可复现。缺省则生成三个固定示例。")
     ap.add_argument("--seed", type=int, default=12345)
+    ap.add_argument("--edge-cases", action="store_true",
+                    help="改为生成候选分图的边界样例（同名跨子装配 / 方柱 / 全遮挡 / 低件数拥挤）")
     args = ap.parse_args(argv)
+    if args.edge_cases:
+        for fname, title, build in EDGE_BUILDERS:
+            path, n = build(args.outdir / fname)
+            print("%-28s %-8s 零件实例 %2d" % (fname, title, n))
+        return 0
     if args.scaled:
         for n in args.scaled:
             path, count = scaled_assembly(args.outdir / ("scaled-%d.stp" % n), n, seed=args.seed)

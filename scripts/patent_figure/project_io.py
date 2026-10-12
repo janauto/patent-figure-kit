@@ -93,14 +93,21 @@ def write_plan(plan_path, new_plan: dict, if_match: Optional[str] = None,
 
 
 def update_plan(plan_path, mutate: Callable[[dict], dict],
-                snapshot_cb: Optional[Callable[[], None]] = None) -> dict:
+                snapshot_cb: Optional[Callable[[], None]] = None,
+                if_match: Optional[str] = None) -> dict:
     """Read-modify-write the plan under the lock (for terms / structure edits).
 
     ``mutate(plan_dict) -> plan_dict`` runs with the current plan; the result is written
     atomically. Returns the written plan. Serialising this stops two term edits from racing on
-    a read-modify-write and dropping one another's changes.
+    a read-modify-write and dropping one another's changes. ``if_match`` (WP2: AI 起名
+    ``apply=true``、接受候选分图): a non-empty ETag that must equal the current one, checked
+    inside the same lock → ``PlanConflict``. ``mutate`` may raise to abort without writing.
     """
     with plan_lock(plan_path):
+        if if_match not in (None, ""):
+            current = plan_etag(plan_path)
+            if if_match != current:
+                raise PlanConflict(current)
         try:
             plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
