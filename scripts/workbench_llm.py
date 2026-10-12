@@ -32,6 +32,17 @@ CODEBUDDY_CANDIDATES = (
 CODEBUDDY_MODEL = "deepseek-v3-2-volc"
 TIMEOUT_S = 300
 MAX_OUTPUT_TOKENS = 64000
+#: Environment override of the channel (WP2b 修复轮 1): ``none`` switches every AI path off —
+#: no DeepSeek call, no auto-detected local CodeBuddy CLI — whatever the machine's config says.
+#: Acceptance and the test suite set it; also usable on servers / CI. Other values
+#: (``deepseek`` / ``codebuddy`` / ``auto``) behave as the config key ``provider``.
+ENV_PROVIDER = "PFK_AI_PROVIDER"
+PROVIDERS = ("auto", "deepseek", "codebuddy", "none")
+#: Outbound sentinel (WP2b 修复轮 1): every callable here runs at the top of ``chat_json`` — the
+#: single client every AI feature goes through — with ``(provider, purpose)``, BEFORE any network
+#: or subprocess I/O. Acceptance and tests install a recorder that raises, so "no LLM call
+#: happened" is asserted, not assumed.
+OUTBOUND_HOOKS: List[Any] = []
 
 
 class LLMError(RuntimeError):
@@ -76,7 +87,8 @@ def settings(cfg: Optional[dict] = None) -> dict:
     cfg = cfg if cfg is not None else load_config()
     ds = cfg.get("deepseek", {})
     key = os.environ.get("DEEPSEEK_API_KEY") or ds.get("api_key") or ""
-    provider = cfg.get("provider") or "auto"
+    forced = (os.environ.get(ENV_PROVIDER) or "").strip().lower()
+    provider = forced if forced in PROVIDERS else (cfg.get("provider") or "auto")
     if provider == "auto":
         provider = "deepseek" if key else ("codebuddy" if _codebuddy_path() else "none")
     return {
@@ -150,6 +162,8 @@ def chat_json(system: str, user: str, *, max_tokens: int = 12000,
     dead channel fails within it instead of 4 × 300 s; ``None`` keeps the per-attempt
     ``TIMEOUT_S`` behaviour."""
     s = settings(cfg)
+    for hook in list(OUTBOUND_HOOKS):                # sentinel: before ANY outbound I/O
+        hook(s["provider"], system[:40])
     deadline = (time.monotonic() + float(timeout_s)) if timeout_s else None
     if s["provider"] == "deepseek":
         if not s["api_key"]:

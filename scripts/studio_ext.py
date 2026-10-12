@@ -115,10 +115,21 @@ def render_version(vd: Path, plan_path: Path, assembly_path: Path, cache: Path,
         result["figures"].append({"id": fid, "pass": bool(qa and qa.get("pass")),
                                   "qa": qa, "svg": preview_url(fid + ".svg", rid)})
     present = {f["id"] for f in result["figures"]}
+    # A figure that was rendered but did not clear the gate (QA or HLR) is quarantined into
+    # diag/ by the renderer; its QA report and HLR counts live in the renderer's own --json
+    # report. Keep them on the failed row (WP2b R2b1 #2) so the failure is explained (which
+    # check, how to fix it) instead of reading as "the program produced no figure".
+    reported = {str(f.get("id")): f for f in (report.get("figures") or [])
+                if isinstance(f, dict) and f.get("id") is not None}
     for fid in expected:                            # make expected-but-missing visible as failed
         if fid not in present:
-            result["figures"].append({"id": fid, "pass": False, "qa": None, "svg": None,
-                                      "missing": True})
+            row = {"id": fid, "pass": False, "qa": None, "svg": None, "missing": True}
+            rf = reported.get(fid)
+            if rf is not None and not rf.get("gate_pass"):
+                row.update(qa=rf.get("qa"), quarantined=True, gate_pass=False,
+                           hlr_dropped=rf.get("hlr_dropped"),
+                           text_height_mm=rf.get("text_height_mm"), labels=rf.get("labels"))
+            result["figures"].append(row)
     if any(f["pass"] for f in result["figures"]):
         annotate_all(vd, plan_path, run_cli, svg_of, result)
 

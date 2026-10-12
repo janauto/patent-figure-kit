@@ -156,7 +156,8 @@ def _figure_rows(plan: Any, result: Dict[str, Any]) -> List[Dict[str, Any]]:
                        "hint_plain": "这张图在消隐时丢了线条，不能交付。换一个视角，"
                                      "或把被遮挡的零件放进分解图。",
                        "fix_action": {"kind": "change_view", "target": {"figure": fid}},
-                       "detail": "QA 通过但消隐丢边，未过闸"}
+                       "detail": "QA 通过但消隐丢边（边 %s / 外廓组 %s），未过闸"
+                                 % tuple((list(fig.get("hlr_dropped") or []) + ["?", "?"])[:2])}
         else:
             title, plain = _qa.ERROR_WRITER_SIDE
             row = {"figure": fid, "code": "E_FIGURE_MISSING", "check": None,

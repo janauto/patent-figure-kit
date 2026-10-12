@@ -71,8 +71,6 @@ DEFAULT_PORT = 8790
 #: Refuse a new render job when free disk space is below this (R1c #11).
 MIN_FREE_BYTES = 100 * 1024 * 1024
 PID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
-#: A Host header that may be echoed into an absolute URL (WP2b F2): loopback name + optional port.
-_LOOPBACK_HOST_RE = re.compile(r"(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?")
 FILE_RE = re.compile(r"^[A-Za-z0-9_\-]+\.(png|svg|dxf|dwg|json|glb)$")
 MEDIA = {"png": "image/png", "svg": "image/svg+xml", "dxf": "application/octet-stream",
          "dwg": "application/octet-stream", "json": "application/json",
@@ -1550,40 +1548,30 @@ def build_workbench(reg: Registry, token: str, port: int,
         if render_job.state != JOBS.SUCCEEDED:
             raise HTTPException(409, "render_job 未成功（state=%s），不能导出" % render_job.state)
 
-    # ---- 对外地址（WP2b F2）---------------------------------------------------------
+    # ---- 对外地址（WP2b F2，修复轮 1 定稿）-------------------------------------------
     # The export's download URL used to be hard-wired to http://127.0.0.1:<port>; opened from
     # http://localhost:<port> the session cookie (bound to localhost) is not sent there → 401.
-    # Order: the configured public URL → the request's own Host (the guard only admits
-    # 127.0.0.1 / localhost) → a relative path. ``base`` is this function's public base: the
-    # loopback default unless a public URL was configured (WP4's --public-url feeds it), so the
-    # default value is NOT treated as a configured public URL.
-    _loopback_base = "http://127.0.0.1:%d" % port
-    app.state.public_url = None        # optional override (embedding / tests); see _public_base
-
-    def _public_base() -> Optional[str]:
-        b = str(getattr(app.state, "public_url", None) or base or "").rstrip("/")
-        return b if b and b != _loopback_base else None
+    # Now: a configured public URL (--public-url / PFK_PUBLIC_URL, via deploy_opts) gives an
+    # absolute URL on it; otherwise the URL is SAME-ORIGIN RELATIVE — never derived from the
+    # request Host (behind a reverse proxy that is the upstream's 127.0.0.1:<port>, which would
+    # point the browser at its own loopback and expose the upstream port; R2b1 #3).
+    _public = DEPLOY.normalize_public_url(public_url) if public_url else None
 
     def _download_path(export_id: str) -> str:
         return "/v1/exports/%s/download" % export_id
 
     def _abs_url(path: str, request: Optional[Request] = None,
                  fallback: Optional[str] = None) -> str:
-        pub = _public_base()
-        if pub:
-            return pub + path
-        host = request.headers.get("host") if request is not None else None
-        # Only a well-formed loopback Host is echoed (the guard admits these two names; a Host
-        # with anything else in it — userinfo, a path — falls through to the relative path).
-        if host and _LOOPBACK_HOST_RE.fullmatch(host) and request.url.scheme in ("http", "https"):
-            return "%s://%s%s" % (request.url.scheme, host, path)
+        """``request`` is accepted for symmetry but deliberately NOT used (no Host echo)."""
+        if _public:
+            return _public + path
         return (fallback.rstrip("/") + path) if fallback else path
 
     def _present_result(job_id: str, result, request: Optional[Request] = None,
                         fallback: Optional[str] = None):
-        """An export result as served: ``download_path`` relative (always right for a
-        same-origin browser), ``download_url`` absolute per ``_abs_url``. Works for records
-        written before WP2b (absolute 127.0.0.1) too — both are rebuilt from the export id."""
+        """An export result as served: ``download_path`` same-origin relative, ``download_url``
+        per ``_abs_url`` (public URL, else the same relative path). Records written before WP2b
+        (absolute 127.0.0.1) are rebuilt the same way from the export id."""
         if not isinstance(result, dict) or "download_url" not in result:
             return result
         path = _download_path(job_id)
@@ -1595,7 +1583,9 @@ def build_workbench(reg: Registry, token: str, port: int,
             d = dict(d, result=_present_result(d["id"], d["result"], request, fallback))
         return d
 
-    tools.present_job = lambda d: _present_job(d, None, fallback=base)   # MCP: no request
+    # MCP has no browser origin: like every other MCP URL (Tools.url) it gets the service base
+    # (the public URL when configured, else the local loopback address agents connect to).
+    tools.present_job = lambda d: _present_job(d, None, fallback=base)
 
     def _start_export(pid: str, formats, variant=None, dpi: int = 300, render_job=None,
                       sheet_preset: Optional[str] = None):
@@ -1745,7 +1735,10 @@ def build_workbench(reg: Registry, token: str, port: int,
         job, _ = jobs.create("suggest", pid, inputs={
             "plan_etag": etag, "assembly_sha256": (assembly.get("source") or {}).get("sha256", ""),
             "label_standard_parts": label_std, "standard_part_rule": rule.to_dict(),
-            "max_candidates": max_c})
+            "max_candidates": max_c,
+            # WP2b R2b1 #1: the fallback figure's effective inputs at suggestion time — accept
+            # removes it only while they are unchanged (the whole-machine verdict is about them).
+            "default_figure_inputs": SUG.default_figure_inputs(plan, assembly)})
         cand_root = ws.root / PUB.CANDIDATE_STORE
 
         def fn(j):
@@ -1872,12 +1865,17 @@ def build_workbench(reg: Registry, token: str, port: int,
         # uploaded model is usually what this job's whole-machine candidate is — when THAT
         # candidate failed the gate, keeping the figure makes the whole next render fail. In
         # append mode it is removed by default; ``keep_default_figure: true`` keeps it.
+        # R2b1 #1: only while the figure's EFFECTIVE inputs (global layout, source, numbering /
+        # label modes — see SUG.default_figure_inputs) are what the failed candidate was judged
+        # on; if the user changed any of them since (e.g. the global view), the verdict no
+        # longer applies and the figure is kept.
         keep_default = bool(body.get("keep_default_figure", False))
         wholes = [c for c in res.get("candidates", []) if (c.get("source") or {}).get("kind")
                   == "whole"]
         drop_default = (mode == "append" and not keep_default and bool(wholes)
                         and all(c.get("status") == "fail" for c in wholes))
-        info: dict = {"removed_default_figure": False}
+        judged_inputs = (job.inputs or {}).get("default_figure_inputs")
+        info: dict = {"removed_default_figure": False, "default_figure_reason": None}
         unresolved_all: list = []
 
         def mutate(plan):
@@ -1900,8 +1898,16 @@ def build_workbench(reg: Registry, token: str, port: int,
                                          standard_parts=sorted(set(std)))
             info.update(extra)
             had_default = any(SUG.is_default_figure(f) for f in (plan.get("figures") or []))
-            if drop_default:
-                SUG.drop_default_figure(new)           # after accept_into: new ids stay figN+1
+            if had_default and mode == "append":
+                if keep_default:
+                    info["default_figure_reason"] = "按请求保留初始整机图"
+                elif not drop_default:
+                    info["default_figure_reason"] = "整机候选未被闸门拦下（或本次没有整机候选），保留初始整机图"
+                elif not judged_inputs or SUG.default_figure_inputs(plan, assembly) != judged_inputs:
+                    info["default_figure_reason"] = ("生成候选之后，整机图的有效输入（全局视角 / 疏密 / 零件选择 / "
+                                                     "标注设置）已改动，旧的整机候选结论不再适用，保留初始整机图")
+                elif SUG.drop_default_figure(new):     # after accept_into: new ids stay figN+1
+                    info["default_figure_reason"] = "整机候选未过闸且输入未变，已移除初始整机图"
             info["removed_default_figure"] = had_default and not any(
                 SUG.is_default_figure(f) for f in (new.get("figures") or []))
             return new
@@ -1923,6 +1929,7 @@ def build_workbench(reg: Registry, token: str, port: int,
                 "standard_labels_skipped": info.get("standard_labels_skipped", []),
                 "accepted_failed": [cid for cid, c, _m in picked if c.get("status") != "pass"],
                 "removed_default_figure": bool(info.get("removed_default_figure")),
+                "default_figure_reason": info.get("default_figure_reason"),
                 "plan_valid": check["ok"], "issues": check["issues"][:20]}
 
     tools.start_suggest = _suggest_job
@@ -2265,6 +2272,13 @@ def cmd_seed(args) -> int:
     return 0 if proj.meta.get("status") == "ready" else 1
 
 
+def serve_app(reg: Registry, token: str, port: int, deploy):
+    """The ASGI app ``serve`` runs: workbench (with ``--public-url``) + sub-app dispatcher +
+    the deployment gate. One function so tests exercise exactly the served stack."""
+    return DEPLOY.wrap(Dispatcher(build_workbench(reg, token, port, deploy.public_url), reg),
+                       deploy, token=token)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2298,8 +2312,7 @@ def main(argv=None) -> int:
     _work_in(reg.data)
     if not getattr(args, "no_example", False):
         ensure_synthetic(reg)
-    app = DEPLOY.wrap(Dispatcher(build_workbench(reg, token, port, deploy.public_url), reg), deploy,
-                      token=token)
+    app = serve_app(reg, token, port, deploy)
     banner, url = DEPLOY.startup_banner(deploy, port, token, str(reg.data))
     print(banner, flush=True)
     if url and not getattr(args, "no_browser", False):

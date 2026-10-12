@@ -184,6 +184,10 @@ def test_chat_json_never_retries_past_its_budget(monkeypatch):
     """F1: the LLM call itself honours the step's budget — every HTTP attempt's timeout and the
     back-off sleeps are cut to what is left, instead of 4 × 300 s."""
     import httpx
+    # this test drives the REAL chat_json against a fake network: lift the suite-wide channel
+    # switch and the outbound sentinel (tests/conftest.py) for it only
+    monkeypatch.delenv("PFK_AI_PROVIDER", raising=False)
+    monkeypatch.setattr(L, "OUTBOUND_HOOKS", [])
     L.save_config({"provider": "deepseek", "deepseek": {"api_key": "sk-test-0000000000"}})
     seen = []
 
@@ -253,26 +257,24 @@ def _fake_export(app, legacy_absolute=False):
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_download_url_follows_the_host_the_page_was_opened_on(tmp_path, legacy):
-    """F2: opened from localhost, the download URL is on localhost (the session cookie belongs to
-    that host); opened from 127.0.0.1 it is on 127.0.0.1. Both download with the cookie alone.
-    Records written before WP2b (absolute 127.0.0.1) are rebuilt the same way."""
+def test_download_url_is_same_origin_relative_without_a_public_url(tmp_path, legacy):
+    """F2 (修复轮 1): without a configured public URL the download URL is SAME-ORIGIN RELATIVE —
+    opened from localhost or from 127.0.0.1 the browser resolves it on the page's own host, so
+    the session cookie goes with it. Records written before WP2b (absolute 127.0.0.1) are
+    rebuilt the same way; the stored record is untouched."""
     import workbench as W
     from starlette.testclient import TestClient
     _W, reg, app, _c = _build(tmp_path / "data")
     job = _fake_export(app, legacy_absolute=legacy)
+    rel = "/v1/exports/%s/download" % job.id
     for host in ("localhost", "127.0.0.1"):
         c = TestClient(W.Dispatcher(app, reg), base_url="http://%s:%d" % (host, PORT))
         assert c.get("/?token=" + TOKEN).status_code == 200          # session cookie
         for path in ("/v1/exports/%s" % job.id, "/v1/jobs/%s" % job.id):
             res = c.get(path).json()["result"]                         # cookie only
-            assert res["download_url"] == "http://%s:%d/v1/exports/%s/download" % (
-                host, PORT, job.id), res
-            assert res["download_path"] == "/v1/exports/%s/download" % job.id
+            assert res["download_url"] == rel and res["download_path"] == rel, res
         d = c.get(res["download_url"])                                 # cookie only
         assert d.status_code == 200 and d.content.startswith(b"PK")
-        assert c.get(res["download_path"]).status_code == 200
-    # the stored record stays relative / untouched (host-independent)
     assert app.state.jobs.get(job.id).result["download_url"].endswith("/download")
 
 
@@ -288,47 +290,88 @@ def test_a_hard_wired_loopback_url_was_the_bug(tmp_path):
     assert c.get("http://127.0.0.1:%d/v1/exports/%s/download" % (PORT, job.id)).status_code == 401
 
 
-def test_public_url_wins_and_mcp_gets_an_absolute_url(tmp_path):
-    """F2 order: a configured public URL beats the request Host; MCP (no request) gets the
-    service's own base."""
-    _W, _reg, app, c = _build(tmp_path / "data", host="localhost")
-    job = _fake_export(app)
-    r = c.post("/mcp", headers=BEARER, json={
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "get_job", "arguments": {"job_id": job.id}}})
-    sc = r.json()["result"]["structuredContent"]
-    assert sc["result"]["download_url"] == "http://127.0.0.1:%d/v1/exports/%s/download" % (
-        PORT, job.id)
-    app.state.public_url = "https://figures.example.org"
-    res = c.get("/v1/exports/%s" % job.id, headers=BEARER).json()["result"]
-    assert res["download_url"] == "https://figures.example.org/v1/exports/%s/download" % job.id
+def _served(tmp_path, argv, base_url, client=("127.0.0.1", 50000)):
+    """The app exactly as ``workbench.py serve <argv>`` builds it: deploy options parsed by the
+    same argparse wiring (deploy_opts.add_arguments / from_args) → workbench.serve_app."""
+    import argparse
+    import workbench as W
+    from patent_figure import deploy_opts as D
+    from starlette.testclient import TestClient
+    ap = argparse.ArgumentParser()
+    D.add_arguments(ap)
+    opts = D.from_args(ap.parse_args(argv), environ={})
+    reg = W.Registry(tmp_path / "data", TOKEN)
+    served = W.serve_app(reg, TOKEN, PORT, opts)
+    inner = getattr(served, "app", served)                 # DeployGuard → Dispatcher
+    return reg, inner.main, TestClient(served, base_url=base_url, client=client)
 
 
-def test_a_malformed_host_is_never_echoed_into_the_url(tmp_path):
-    """F2 hardening: only a well-formed loopback Host is echoed; anything else (userinfo, …)
-    that slips past the guard's name check gets the relative path."""
-    _W, _reg, app, c = _build(tmp_path / "data")
-    job = _fake_export(app)
-    r = c.get("/v1/exports/%s" % job.id, headers={**BEARER, "Host": "localhost:%d@evil.example" % PORT})
-    assert r.status_code == 200
-    assert r.json()["result"]["download_url"] == "/v1/exports/%s/download" % job.id
-
-
-def test_sse_done_event_of_an_export_carries_the_request_host_url(tmp_path):
+def _sse_done(c, job, headers):
     from patent_figure import jobs as JOBS
-    _W, _reg, app, c = _build(tmp_path / "data", host="localhost")
-    job = _fake_export(app)
-    # the stream of a finished job closes after one keep-alive wait (15 s) — shorten it here
     job.wait_for_event_after = lambda last, timeout: JOBS.Job.wait_for_event_after(job, last, 0.05)
-    with c.stream("GET", "/v1/jobs/%s/events" % job.id, headers=BEARER) as r:
+    with c.stream("GET", "/v1/jobs/%s/events" % job.id, headers=headers) as r:
         buf = ""
         for chunk in r.iter_text():
             buf += chunk
             if "event: done" in buf and buf.rstrip().endswith("}"):
                 break
-    data = json.loads(buf.split("event: done", 1)[1].split("data: ", 1)[1].split("\n", 1)[0])
-    assert data["data"]["download_url"] == "http://localhost:%d/v1/exports/%s/download" % (
-        PORT, job.id)
+    return json.loads(buf.split("event: done", 1)[1].split("data: ", 1)[1].split("\n", 1)[0])
+
+
+def test_public_url_from_the_real_serve_options_drives_query_sse_and_download(tmp_path):
+    """F2 (修复轮 1): ``serve --public-url`` behind a trusted reverse proxy — the export query,
+    the SSE done frame and MCP all carry the public URL; the download through it works."""
+    reg, main, c = _served(tmp_path, ["--host", "0.0.0.0", "--allow-remote",
+                                      "--public-url", "https://figs.example.org",
+                                      "--trusted-proxy", "172.30.57.10"],
+                           "https://figs.example.org", client=("172.30.57.10", 4321))
+    job = _fake_export(main)
+    want = "https://figs.example.org/v1/exports/%s/download" % job.id
+    assert c.get("/v1/exports/%s" % job.id, headers=BEARER).json()["result"]["download_url"] == want
+    assert _sse_done(c, job, BEARER)["data"]["download_url"] == want
+    r = c.post("/mcp", headers=BEARER, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                             "params": {"name": "get_job",
+                                                        "arguments": {"job_id": job.id}}})
+    assert r.json()["result"]["structuredContent"]["result"]["download_url"] == want
+    assert c.get(want, headers=BEARER).status_code == 200
+
+
+@pytest.mark.parametrize("host", ["figs.internal", "127.0.0.1:%d" % PORT])
+def test_behind_a_proxy_without_public_url_the_url_never_names_a_host(tmp_path, host):
+    """F2 (修复轮 1): a reverse proxy without --public-url — whether it forwards its own Host or
+    rewrites it to the upstream 127.0.0.1:<port> — gets a same-origin relative URL in the query
+    and the SSE frame (no loopback address, no upstream port); the relative download works."""
+    reg, main, c = _served(tmp_path, ["--host", "0.0.0.0", "--allow-remote",
+                                      "--allowed-host", "figs.internal",
+                                      "--trusted-proxy", "172.30.57.10"],
+                           "https://figs.internal", client=("172.30.57.10", 4321))
+    job = _fake_export(main)
+    rel = "/v1/exports/%s/download" % job.id
+    hdr = dict(BEARER, Host=host, **{"X-Forwarded-Proto": "https"})
+    res = c.get("/v1/exports/%s" % job.id, headers=hdr).json()["result"]
+    assert res["download_url"] == rel and "127.0.0.1" not in json.dumps(res)
+    assert _sse_done(c, job, hdr)["data"]["download_url"] == rel
+    assert c.get(rel, headers=hdr).status_code == 200
+
+
+def test_local_default_serve_is_relative_for_browsers_and_absolute_for_mcp(tmp_path):
+    _reg, main, c = _served(tmp_path, [], "http://localhost:%d" % PORT)
+    job = _fake_export(main)
+    rel = "/v1/exports/%s/download" % job.id
+    assert c.get("/v1/exports/%s" % job.id, headers=BEARER).json()["result"]["download_url"] == rel
+    r = c.post("/mcp", headers=BEARER, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                             "params": {"name": "get_job",
+                                                        "arguments": {"job_id": job.id}}})
+    assert r.json()["result"]["structuredContent"]["result"]["download_url"] == \
+        "http://127.0.0.1:%d%s" % (PORT, rel)
+
+
+def test_a_malformed_host_is_never_echoed_into_the_url(tmp_path):
+    _W, _reg, app, c = _build(tmp_path / "data")
+    job = _fake_export(app)
+    r = c.get("/v1/exports/%s" % job.id, headers={**BEARER, "Host": "localhost:%d@evil.example" % PORT})
+    assert r.status_code == 200
+    assert r.json()["result"]["download_url"] == "/v1/exports/%s/download" % job.id
 
 
 # =========================================================================== F3 / F4 (pure)
@@ -478,6 +521,137 @@ def test_job_error_carries_the_structured_fields_into_the_error_event():
     assert last["type"] == "error" and last["data"]["hint_plain"].startswith("还有 3 个零件")
 
 
+# --------------------------------------------------------------- F3/F4 through render_version
+
+
+def _gate_fail_cli(fig2_fails="qa"):
+    """A run_cli standing in for render_patent_figure.py --in-place + annotate_figure_sheet.py:
+    fig1 clears the gate; fig2 is rendered but QUARANTINED into diag/ — its QA report (or HLR
+    drop) lives only in the renderer's --json report, exactly like the real renderer."""
+    import subprocess
+    from patent_figure import qa as QA
+
+    def checks(fid, failing):
+        rows = []
+        for cid in ("geometry_occupancy", "leader_crossing"):
+            row = {"id": cid, "pass": cid not in failing, "value": 0, "threshold": "0",
+                   "detail": "d", "hint": "h"}
+            row.update(QA.plain_fields(cid, fid))
+            rows.append(row)
+        return {"schema": "patent-figure-qa/1", "file": fid + ".dxf",
+                "pass": not failing, "checks": rows}
+
+    def run_cli(argv, timeout=0, **_kw):
+        argv = [str(a) for a in argv]
+        if argv[0].endswith("render_patent_figure.py"):
+            out = Path(argv[argv.index("-o") + 1])
+            qa1 = checks("fig1", ())
+            qa2 = checks("fig2", ("leader_crossing",) if fig2_fails == "qa" else ())
+            (out / "fig1.dxf").write_text("DXF fig1", encoding="utf-8")
+            (out / "fig1.qa.json").write_text(json.dumps(qa1), encoding="utf-8")
+            (out / "diag").mkdir(exist_ok=True)
+            (out / "diag" / "fig2.dxf").write_text("DXF fig2", encoding="utf-8")
+            (out / "diag" / "fig2.qa.json").write_text(json.dumps(qa2), encoding="utf-8")
+            (out / "reference-numerals.json").write_text(
+                json.dumps({"numerals": [], "description_zh": "附图标记说明：无"}), encoding="utf-8")
+            Path(argv[argv.index("--json") + 1]).write_text(json.dumps({
+                "pass": False, "errors": [], "figures": [
+                    {"id": "fig1", "gate_pass": True, "qa": qa1, "hlr_dropped": [0, 0],
+                     "text_height_mm": 5.0, "labels": 1},
+                    {"id": "fig2", "gate_pass": False, "qa": qa2,
+                     "hlr_dropped": [3, 0] if fig2_fails == "hlr" else [0, 0],
+                     "text_height_mm": 3.5, "labels": 1}]}), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 1, "figure fig2：QA 未通过", "")
+        if argv[0].endswith("annotate_figure_sheet.py"):
+            dst = Path(argv[argv.index("-o") + 1])
+            dst.write_text("ANN " + dst.name, encoding="utf-8")
+            Path(argv[argv.index("--json") + 1]).write_text(json.dumps(
+                {"caption": "图", "table": None, "warnings": [],
+                 "figure_description": "图为示意图；"}), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError("unexpected CLI %s" % argv[0])
+    return run_cli
+
+
+_VALID_ASM = {"source": {"sha256": "x"}, "parts": [
+    {"name": "SYN-A01", "instances": 1, "bbox_size": [1, 2, 3], "centers": [[0, 0, 0]]},
+    {"name": "SYN-B02", "instances": 1, "bbox_size": [2, 2, 2], "centers": [[5, 0, 0]]}]}
+
+
+def _valid_plan(step):
+    return {"schema": "patent-figure-plan/1", "source": {"step": str(step)},
+            "terms": [{"selector": "SYN-A01", "term": "底座", "label": "once"},
+                      {"selector": "SYN-B02", "term": "回转座", "label": "once"}],
+            "figures": [{"id": "fig1", "caption": "甲", "kind": "assembly", "members": ["SYN-A01"]},
+                        {"id": "fig2", "caption": "乙", "kind": "assembly", "members": ["SYN-B02"]}]}
+
+
+@pytest.mark.parametrize("kind", ["qa", "hlr"])
+def test_render_version_keeps_the_quarantined_figure_detail_for_the_classifier(tmp_path, kind):
+    """R2b1 #2: a figure the gate quarantined into diag/ keeps its QA report / HLR counts from the
+    renderer's report through the REAL adapter (studio_ext.render_version), so the failure is a
+    QA (or HLR) failure with its fix — not "the program produced no figure"."""
+    import studio_ext as EXT
+    from patent_figure import render_errors as RE
+    vd = tmp_path / "v1"
+    (vd / "inputs").mkdir(parents=True)
+    plan = _valid_plan(tmp_path / "m.stp")
+    (vd / "inputs" / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    (vd / "inputs" / "assembly.json").write_text(json.dumps(_VALID_ASM), encoding="utf-8")
+    ok, result, _m = EXT.render_version(vd, vd / "inputs" / "plan.json", vd / "inputs" / "assembly.json",
+                                        tmp_path / "cache", _gate_fail_cli(kind), lambda p: "<svg/>")
+    assert ok is False
+    row = next(f for f in result["figures"] if f["id"] == "fig2")
+    assert row["quarantined"] and row["qa"] and row["pass"] is False
+    e = RE.render_failure(plan, _VALID_ASM, result)
+    fig2 = e["figures"][0]
+    assert fig2["figure"] == "fig2" and fig2["code"] != "E_FIGURE_MISSING"
+    if kind == "qa":
+        assert fig2["code"] == "E_QA_FAILED" and fig2["check"] == "leader_crossing"
+        assert fig2["fix_action"] == {"kind": "split_figure", "target": {"figure": "fig2"}}
+    else:
+        assert fig2["code"] == "E_HLR_DROPPED" and "边 3" in fig2["detail"]
+        assert fig2["fix_action"]["kind"] == "change_view"
+
+
+def test_render_job_error_sse_and_figure_diagnostics_keep_the_qa_reason(tmp_path, monkeypatch):
+    """R2b1 #2 end to end through the workbench render job (real publish service + real
+    render_version, only the two CLIs faked): the job error, its SSE error frame, the REST
+    figures and the browser's render/status all carry the QA reason and fix action."""
+    import plan_studio as PS
+    import workbench as W
+    from patent_figure import jobs as JOBS
+    monkeypatch.setattr(W.WK, "get_shared_worker", lambda: None)
+    monkeypatch.setattr(PS, "run_cli", _gate_fail_cli("qa"))
+    monkeypatch.setattr(PS, "dxf_to_svg", lambda path: "<svg/>")   # the fake DXFs are not DXF
+    _W, reg, app, c = _build(tmp_path / "data")
+    root = _seed_project(reg, "p-20261013-qafail", {"status": "ready", "message": ""})
+    (root / "studio" / "assembly.json").write_text(json.dumps(_VALID_ASM), encoding="utf-8")
+    (root / "studio" / "plan.json").write_text(json.dumps(_valid_plan(root / "model.stp")),
+                                               encoding="utf-8")
+    r = c.post("/v1/projects/p-20261013-qafail/render", headers=BEARER)
+    assert r.status_code == 202, r.text
+    j = _poll(c, r.json()["job_id"])
+    assert j["state"] == "failed"
+    err = j["error"]
+    assert err["code"] == "E_RENDER_NOT_OK" and err["cause_code"] == "E_QA_FAILED"
+    assert err["figures"][0]["check"] == "leader_crossing"
+    assert err["fix_action"] == {"kind": "split_figure", "target": {"figure": "fig2"}}
+    assert "图2" in err["hint_plain"]
+    job = app.state.jobs.get(j["id"])
+    job.wait_for_event_after = lambda last, timeout: JOBS.Job.wait_for_event_after(job, last, 0.05)
+    with c.stream("GET", "/v1/jobs/%s/events" % j["id"], headers=BEARER) as s:
+        body = "".join(s.iter_text())
+    frame = json.loads(body.split("event: error", 1)[1].split("data: ", 1)[1].split("\n", 1)[0])
+    assert frame["data"]["cause_code"] == "E_QA_FAILED" and frame["data"]["fix_action"]["kind"] == "split_figure"
+    figs = {f["id"]: f for f in j["result"]["figures"]}
+    assert [x["check"] for x in figs["fig2"]["failed_checks"]] == ["leader_crossing"]
+    assert figs["fig2"]["failed_checks"][0]["fix_action"]["kind"] == "split_figure"
+    st = c.get("/p/p-20261013-qafail/api/render/status", headers=BEARER).json()
+    assert st["job"]["state"] == "failed" and st["job"]["error"]["cause_code"] == "E_QA_FAILED"
+    assert "fig2" in st["job"]["diag"]["failed_figures"]
+
+
 # =========================================================================== F5 (pure)
 
 
@@ -494,6 +668,30 @@ def test_default_figure_is_exactly_the_blank_plan_fallback(tmp_path):
     assert not SUG.drop_default_figure(alone) and len(alone["figures"]) == 1   # never empties
     edited = {"figures": [dict(SUG.DEFAULT_FIGURE, caption="整机"), {"id": "fig2"}]}
     assert not SUG.drop_default_figure(edited)                                # user's figure
+
+
+def test_default_figure_inputs_follow_what_decides_the_drawing():
+    """R2b1 #1: the fallback figure's effective inputs change with the global view / density,
+    the part selection and the label modes — not with term TEXT (naming parts after a suggestion
+    must not keep a fallback the suggestion already judged)."""
+    from patent_figure import suggest_plan as SUG
+    asm = _asm("P-1", "P-2")
+    base = _plan([{"selector": "P-*", "term": "", "label": "once"}],
+                 [dict(SUG.DEFAULT_FIGURE)])
+    fp = SUG.default_figure_inputs(base, asm)
+    assert fp
+    named = json.loads(json.dumps(base))
+    named["terms"][0]["term"] = "零件"
+    assert SUG.default_figure_inputs(named, asm) == fp
+    for mutate in (lambda p: p.setdefault("layout", {}).update(view="front"),
+                   lambda p: p.setdefault("layout", {}).update(density="loose"),
+                   lambda p: p["source"].update(exclude=["P-2"]),
+                   lambda p: p["terms"].insert(0, {"selector": "P-2", "term": "", "label": "none"})):
+        q = json.loads(json.dumps(base))
+        mutate(q)
+        assert SUG.default_figure_inputs(q, asm) != fp
+    assert SUG.default_figure_inputs(_plan([], [{"id": "fig1", "caption": "别的",
+                                                 "kind": "assembly", "members": ["*"]}]), asm) is None
 
 
 # =========================================================================== F6
@@ -673,3 +871,34 @@ def test_live_accept_drops_the_failing_fallback_figure_unless_asked_to_keep(live
     assert r.status_code == 200 and r.json()["removed_default_figure"] is False
     figs = c.get("/v1/projects/%s/plan" % pid, headers=BEARER).json()["figures"]
     assert SUG.DEFAULT_FIGURE in figs
+
+
+def test_live_changing_the_global_view_after_suggesting_keeps_the_fallback(live):
+    """R2b1 #1 regression: suggest → change the GLOBAL view (the fallback figure inherits it) →
+    accept an old candidate with the CURRENT ETag → the fallback figure is kept (the failed
+    whole-machine verdict was about the old view)."""
+    from patent_figure import suggest_plan as SUG
+    W, reg, _app, c = live
+    if reg.get("example-vise") is None:
+        r = c.post("/v1/projects/from-example", headers=BEARER, json={"example": "vise"})
+        assert _poll(c, r.json()["job_id"], timeout=600)["state"] == "succeeded"
+    pid = _upload_step(c, reg.data / "examples" / W.EXAMPLES_META["vise"]["step"], "改视角")
+    r = c.post("/v1/projects/%s/plan/suggest" % pid, headers=BEARER, json={})
+    j = _poll(c, r.json()["job_id"], timeout=600)
+    whole = [x for x in j["result"]["candidates"] if x["source"]["kind"] == "whole"]
+    assert whole and whole[0]["status"] == "fail"
+    passed = next(x for x in j["result"]["candidates"] if x["status"] == "pass")
+    p0 = c.get("/v1/projects/%s/plan" % pid, headers=BEARER)
+    plan = p0.json()
+    plan.setdefault("layout", {})["view"] = "front" if plan["layout"].get("view") != "front" else "top"
+    p1 = c.put("/v1/projects/%s/plan" % pid, headers={**BEARER, "If-Match": p0.headers["etag"]},
+               json=plan)
+    assert p1.status_code == 200
+    r = c.post("/v1/projects/%s/plan/candidates/accept" % pid,
+               headers={**BEARER, "If-Match": p1.headers["etag"]},
+               json={"job_id": j["id"], "candidate_ids": [passed["id"]]})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["removed_default_figure"] is False and "已改动" in out["default_figure_reason"]
+    figs = c.get("/v1/projects/%s/plan" % pid, headers=BEARER).json()["figures"]
+    assert SUG.DEFAULT_FIGURE in figs and len(figs) == 2

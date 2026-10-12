@@ -703,6 +703,50 @@ def is_default_figure(fig: Any) -> bool:
     return isinstance(fig, dict) and fig == DEFAULT_FIGURE
 
 
+def default_figure_inputs(plan: Any, assembly: Any) -> Optional[str]:
+    """Fingerprint (sha256) of everything that decides how the untouched fallback figure renders
+    (WP2b R2b1 #1): the figure, its EFFECTIVE layout (global layout + defaults — view, density,
+    explode axis, angle, label cap, engineering table), the source selection, the assembly, the
+    term rows that match a selected part (position, selector, label mode) and which row governs
+    each member part — i.e. which parts carry numerals, and in what order.
+    Term TEXT is deliberately left out — it is never drawn on the gated figure, so naming parts
+    after a suggestion must not keep a fallback whose failure the suggestion already showed.
+    ``None`` when the plan has no untouched fallback figure (or cannot be read)."""
+    import hashlib
+    if not isinstance(plan, dict) or not isinstance(assembly, dict):
+        return None
+    figs = [f for f in (plan.get("figures") or []) if is_default_figure(f)]
+    if not figs:
+        return None
+    fig = figs[0]
+    try:
+        selected = _plan.selected_part_names(plan, assembly)
+        members = _plan.figure_members(fig, selected)
+        layout = _plan.figure_layout(plan, fig)
+    except Exception:  # noqa: BLE001 — an unreadable plan has no comparable fingerprint
+        return None
+    # Numbering without term text (the numbering module refuses blank terms, and a freshly
+    # uploaded model is all blank): numerals follow the order of the term rows that match a
+    # selected part, so the rows' (position, selector, label) + which row governs each member
+    # pin which parts carry numerals and in what order.
+    rows = _term_rows(plan)
+    live_rows = [[i, str(r.get("selector")), str(r.get("label") or "once")]
+                 for i, r in enumerate(rows)
+                 if isinstance(r.get("selector"), str)
+                 and any(fnmatchcase(n, r["selector"]) for n in selected)]
+    governs = {}
+    for n in members:
+        row = winning_row(plan, n)
+        governs[n] = None if row is None else rows.index(row)
+    src = plan.get("source") if isinstance(plan.get("source"), dict) else {}
+    doc = {"figure": fig, "layout": layout,
+           "source": {"include": src.get("include") or [], "exclude": src.get("exclude") or []},
+           "assembly": (assembly.get("source") or {}).get("sha256", ""),
+           "term_rows": live_rows, "members": governs}
+    return hashlib.sha256(json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                                     default=str).encode("utf-8")).hexdigest()
+
+
 def drop_default_figure(plan: dict) -> bool:
     """Remove the untouched initial fallback figure from ``plan`` (in place) when at least one
     other figure remains. Returns True if it was removed (WP2b F5)."""

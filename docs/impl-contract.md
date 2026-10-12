@@ -2707,3 +2707,30 @@ WP3b 接线验收（报告 §7 F1–F5）在真实后端上发现的金路径问
   created_at, updated_at, url: /v1/jobs/<id>, status_url: /p/<pid>/api/render/status}`；完整记录与「已发布 vs 本次」
   仍在 `url` / `status_url`。响应整体登记为 openapi `ProjectDetail`，`tests/test_wp2b_goldenpath.py` 按 schema 双向
   核对（无契约外的键、必需键齐全）。
+
+### 15.7 修复轮 1（Codex R2b1：1 项 S1 + 2 项 S2；并入验收 / 测试的大模型隔离）
+
+- **合并基线**：先把 `pisen-ailab-v1`（`c15a430`，含 WP4 部署参数与 WP3b 接线）合并进本分支，再修。
+- **R2b1 #1（S1）F5 误删**：只比较图对象不够——兜底图继承全局 `layout`（视角、疏密…），用户改了全局视角后它已
+  不是候选当时被判失败的那张图。现在候选作业提交时记下兜底图**有效输入**的指纹
+  `suggest_plan.default_figure_inputs(plan, assembly)`（图本身、合并默认值后的有效版式、`source` 的 include/exclude、
+  装配体 sha、与选中零件相关的术语行的位置 / 选择器 / 标注方式及各成员由哪一行管辖；**不含名称文字**——起名不改变
+  过闸结论），存于作业 `inputs.default_figure_inputs`；接受时在计划锁内对**当前**计划重算，相等才移除，否则保留并在
+  `default_figure_reason` 说明。旧作业没有指纹 → 一律保留。回归：「生成候选 → 改全局视角 → 带当前 ETag 接受旧候选」
+  断言整机图保留。
+- **R2b1 #2（S2）F3/F4 明细丢失**：渲染器把 QA / HLR 未过闸的图隔离进 `diag/`，明细只在 `render-report.json`；
+  `studio_ext.render_version` 原先只扫根目录 DXF，失败图成了 `qa: null, missing: true`，分类器误报 `E_FIGURE_MISSING`。
+  现在对「渲染了但未过闸」的预期图，从冻结版本的报告取回 `qa / hlr_dropped / text_height_mm / labels` 并标
+  `quarantined: true`（`missing` 仍为 true：它确实不在交付集里）。于是作业 error（`E_QA_FAILED` / `E_HLR_DROPPED` +
+  fix_action）、SSE error 帧、REST `figures[].failed_checks`、子应用 `render/status.job` 都带原因。回归经真实
+  `render_version` 与真实渲染作业（只替换两个 CLI）。
+- **R2b1 #3（S2）F2 接通**：`download_url` = 配置了 `--public-url`（deploy_opts，含 `PFK_PUBLIC_URL`）→ 该地址上的绝对
+  URL；否则**同源相对路径**——不再由请求 Host 推导（反代把上游 Host 改写成 `127.0.0.1:<port>` 时会把浏览器指向它自己的
+  回环并暴露上游端口）。MCP `get_job` 用服务地址（与其他 MCP URL 一致）。`workbench.serve_app(reg, token, port, deploy)`
+  即 `serve` 实际运行的整栈（工作台 + 子应用分发 + 部署闸门），测试经它与 `deploy_opts.add_arguments / from_args`
+  覆盖真实启动配置、反代 Host 改写下的查询、SSE、下载。
+- **大模型通道隔离 + 哨兵**：`workbench_llm` 新增环境变量 `PFK_AI_PROVIDER`（`none` 一律关闭，含自动探测的本机
+  CodeBuddy）与 `OUTBOUND_HOOKS`（`chat_json` 入口、任何网络 / 子进程 I/O 之前调用）。`tests/conftest.py` 在整套测试
+  开始时设 `PFK_AI_PROVIDER=none`、临时配置目录、清 `DEEPSEEK_*`，并装哨兵（调用即记录并抛错；每个测试结束与会话结束
+  断言零调用）；`acceptance/run_acceptance.py` 在 `main()` 一开始同样隔离（子进程继承），N17/N18 起工作台前断言通道为
+  none、结束时断言零调用，整次验收结束打印哨兵计数，非零即退出码 1。

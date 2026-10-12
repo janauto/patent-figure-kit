@@ -19,6 +19,8 @@ info:
     接力语义冻结（`DraftTermsResult`）；`?token=` 仅兼容期，命中时响应带 `Deprecation: true` 与
     `Warning` 头。
 
+    大模型通道可由环境变量 PFK_AI_PROVIDER 强制（none = 一律关闭，验收与测试即如此运行，零外发）。
+
     WP2b 增补（契约 §15，全部为新增可选字段）：准备作业的 AI 结构识别有独立短超时、失败不阻塞
     （`PrepareResult.ai_status`）；导出下载地址按请求生成（`download_url` / `download_path`）；出图失败的
     结构化错误（`Error` 的 `title_zh / hint_plain / fix_action / figures[]`，`E_TERMS_MISSING`）；候选的
@@ -123,6 +125,10 @@ components:
         terms_hash: {type: string}
         step_sha: {type: string}
         plan_etag: {type: string}
+        default_figure_inputs:
+          type: string
+          nullable: true
+          description: 候选分图作业：生成候选时初始兜底图有效输入的指纹（WP2b 修复轮 1，接受时据此判断旧的整机结论是否仍适用）
     Job:
       type: object
       required: [id, kind, project_id, state]
@@ -369,8 +375,10 @@ components:
           type: boolean
           default: false
           description: >
-            WP2b F5：append 模式下，若计划仍含未改动过的初始兜底图（fig1「整体结构示意图」、members ["*"]）
-            且本次候选作业的整机候选未过闸，默认把它从计划移除（否则整次出图常因它失败）；true = 保留
+            WP2b F5：append 模式下，若计划仍含未改动过的初始兜底图（fig1「整体结构示意图」、members ["*"]）、
+            本次候选作业的整机候选未过闸、且该图的**有效输入**（全局视角 / 疏密等版式、零件选择、管辖各零件的术语行与
+            标注方式；不含名称文字）与生成候选时一致，默认把它从计划移除（否则整次出图常因它失败）；输入已改动则保留
+            （修复轮 1）。true = 保留
     AcceptCandidatesResult:
       type: object
       properties:
@@ -382,6 +390,7 @@ components:
         standard_labels_skipped: {type: array, items: {type: string}}
         accepted_failed: {type: array, items: {type: string}, description: 被接受但试渲染未过闸的候选 id（允许，仅提示）}
         removed_default_figure: {type: boolean, description: WP2b F5：初始兜底图在本次写入前存在、写入后不在（append 默认移除，或 replace 替换掉）}
+        default_figure_reason: {type: string, nullable: true, description: append 模式且计划含初始兜底图时，为什么移除 / 保留（白话）}
         plan_valid: {type: boolean}
         issues: {type: array, items: {type: object}}
     PageCheck:
@@ -517,9 +526,10 @@ components:
         download_url:
           type: string
           description: >
-            WP2b F2：按请求生成——配置了对外地址（--public-url）用它，否则用本次请求的 Host（从 localhost
-            打开就是 localhost，会话 Cookie 随之可用），无请求上下文时为相对路径（MCP 用服务地址）。作业记录里
-            存的是相对路径
+            WP2b F2（修复轮 1 定稿）：配置了对外地址（serve --public-url / PFK_PUBLIC_URL）→ 该地址上的绝对 URL；
+            否则为**同源相对路径**（浏览器按页面自身的主机解析，从 localhost 或 127.0.0.1 打开都带得上会话
+            Cookie；从不由请求 Host 推导，反代后也不会暴露回环地址与上游端口）。MCP get_job 没有浏览器来源，
+            用服务地址（对外地址或本机回环）。作业记录里存的是相对路径
         download_path: {type: string, example: /v1/exports/0123abcd/download, description: 同源相对路径（浏览器直接用）}
     ProjectRenderJob:
       description: >

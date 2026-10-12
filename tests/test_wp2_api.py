@@ -170,17 +170,16 @@ def test_export_package_is_checked_page_by_page(live, export_job):
 
 
 def test_download_works_from_localhost_and_127_with_the_session_cookie(live, export_job):
-    """WP2b F2: the download URL follows the host the page was opened on (it used to be
-    hard-wired to 127.0.0.1, so a page opened from localhost got 401 — its session cookie
-    belongs to localhost). Both entries download the real export with the cookie alone."""
+    """WP2b F2: the download URL used to be hard-wired to 127.0.0.1, so a page opened from
+    localhost got 401 (its session cookie belongs to localhost). Without a public URL it is now
+    same-origin relative (修复轮 1): both entries download the real export with the cookie alone."""
     from starlette.testclient import TestClient
     _W, _reg, c = live
     for host in ("localhost", "127.0.0.1"):
         b = TestClient(c.app, base_url="http://%s:8802" % host)
         assert b.get("/?token=" + TOKEN).status_code == 200            # session cookie only
         res = b.get("/v1/exports/%s" % export_job["id"]).json()["result"]
-        assert res["download_url"] == "http://%s:8802/v1/exports/%s/download" % (
-            host, export_job["id"])
+        assert res["download_url"] == "/v1/exports/%s/download" % export_job["id"]
         d = b.get(res["download_url"])
         assert d.status_code == 200 and d.content[:2] == b"PK", d.status_code
         assert b.get(res["download_path"]).status_code == 200
