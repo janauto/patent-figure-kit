@@ -49,9 +49,19 @@ def test_zip_archives_only_via_the_export_service():
     # it page by page — it never creates an archive (pinned by the test below).
     # R2d: deliverable.py writes the .docx CONTAINER of one document (fixed templates) — not an
     # export archive; pinned by test_docx_writer_only_writes_its_own_temp_container below.
+    # WP4: patent_figure/zipcheck.py opens DOWNLOADED export bundles READ-ONLY for the static
+    # site's asset audit and the deployment smoke test (pinned by the test below).
     assert _users("zipfile.ZipFile") <= {"patent_figure/export.py", "bench.py",
                                          "patent_figure/deliverable_check.py",
-                                         "patent_figure/deliverable.py"}
+                                         "patent_figure/deliverable.py",
+                                         "patent_figure/zipcheck.py"}
+
+
+def test_zipcheck_only_reads():
+    src = (_SCRIPTS / "patent_figure" / "zipcheck.py").read_text(encoding="utf-8")
+    calls = [line.strip() for line in src.splitlines() if "zipfile.ZipFile(" in line]
+    assert calls and all(c.endswith("as zf:") and ", " not in c.split("ZipFile(", 1)[1]
+                         for c in calls), calls
 
 
 def test_docx_writer_only_writes_its_own_temp_container():

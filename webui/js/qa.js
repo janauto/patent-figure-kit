@@ -4,7 +4,7 @@
 // 预览里点 text[data-numeral] → 联动高亮对应零件（数据契约不变）。
 import { bus, state, setSelection, renderStaleReason, flush, normEtag, resultEtag, resultVersion } from './state.js';
 import { api } from './api.js';
-import { toast } from './main.js';
+import { toast, applyFixAction, fixLabel, LAYOUT_ERRORS, layoutFailures } from './main.js';
 
 let host; let activeFig = null; let variant = 'annotated'; let onlyFail = false;
 let sub = null; const logs = [];
@@ -37,7 +37,13 @@ const QA_MAP = {
   forbidden_text: { name: '禁用文字', plain: '术语里出现了内部件号/图号形状的字符串，改成中文技术名词。', route: ['terms', '去术语页改中文名'] },
   file_readable: { name: '文件可读', plain: '这张图没写出来，确认渲染真的产出了文件。', route: null },
 };
-const qaName = (id) => QA_MAP[id]?.name || id;
+const qaName = (id, c) => c?.title_zh || QA_MAP[id]?.name || id;
+// 后端 fix_action（WP2 F4）→ 直达入口文案；kind 冻结为四种
+const FIX_LABEL = {
+  open_terms: (t) => (t?.focus === 'standard_parts' ? '去术语页把标准件设「不标」' : '去术语页改名称'),
+  split_figure: () => '去图纸页拆分本图', change_view: () => '去参数页换视角', change_density: () => '去参数页调疏密',
+};
+let fixSeq = 0; const fixRegistry = new Map();     // data-fix 按钮 → fix_action 对象（不把对象塞进属性）
 
 // ?state=fail 的客户端演示：把真实 QA 的三项翻成失败（沿用 qa.py 的真实 hint）。
 function applyFailOverride(fig) {
@@ -91,7 +97,8 @@ const jobFailed = (j) => !!j && ['failed', 'interrupted'].includes(j.state);
 // 本次作业里未过闸的图：完整 QA（mock / 子应用）或 WP1 精简行（failed_checks）统一成 qa.checks
 function failedFigures(job) {
   return (job.result?.figures || []).filter((f) => !f.pass).map((f) => (f.qa?.checks ? f : {
-    ...f, qa: { checks: (f.failed_checks || []).map((c) => ({ id: c.check, value: c.value, threshold: '', hint: c.hint, pass: false })) },
+    ...f, qa: { checks: (f.failed_checks || []).map((c) => ({ id: c.check, value: c.value, threshold: '', hint: c.hint, pass: false,
+      title_zh: c.title_zh, hint_plain: c.hint_plain, fix_action: c.fix_action })) },
   }));
 }
 
@@ -110,36 +117,65 @@ function jobFailPanel(job, r) {
     <p class="job-fail-note">${r ? `下面的预览与导出仍是<b>上一成功版本</b>${ver ? `（版本 <span class="mono">${esc(ver)}</span>${r.finished_at ? ` · ${esc(r.finished_at)}` : ''}）` : ''}；本次失败的结果没有发布。`
       : '还没有成功出过图；本次失败的结果没有发布。'}</p>
     ${issues.length ? `<ul class="qa-issues">${issues.map((it) => `<li class="${esc(it.severity || '')}">
-      <b class="mono">${esc(it.code || '')}</b> ${esc(it.message || '')}${it.hint ? `<span class="hint"> ↳ ${esc(it.hint)}</span>` : ''}</li>`).join('')}</ul>` : ''}
-    ${failedFigures(job).map((f) => `<div class="job-fail-fig"><h4>图${esc(f.number ?? '')}（${esc(f.id)}）未过闸</h4>${failItems(f)}</div>`).join('')}
+      <b class="mono">${esc(it.code || '')}</b> ${esc(it.message || '')}${it.hint ? `<span class="hint"> ↳ ${esc(it.hint)}</span>` : ''}</li>`).join('')}</ul>` : validateBlock(false)}
+    ${failedFigures(job).map((f) => `<div class="job-fail-fig"><h4>图${esc(f.number ?? '')}（${esc(f.id)}）未过闸</h4>${failItems(f) || layoutItem(f, job)}</div>`).join('')}
     ${missing.length ? `<p class="hint">缺失产物：${esc(missing.join('、'))}</p>` : ''}
     ${log ? `<details class="qa-tech"><summary>日志尾部</summary><pre class="qa-log">${esc(String(log).slice(-2000))}</pre></details>` : ''}
   </section>`;
+}
+
+// 排版阶段就失败的图（没有 13 项 QA 结果）：从出图日志取错误码，给白话 + 修复直达（target = 这张图）
+function layoutItem(f, job) {
+  const lf = layoutFailures([job.diag?.log_tail, job.result?.log_tail, job.result?.log].filter(Boolean).join('\n'))[f.id];
+  if (!lf) return '<p class="hint">这张图没有产出（见下方日志尾部）。</p>';
+  const known = LAYOUT_ERRORS[lf.code];
+  const btns = (known?.fixes || []).map((fa) => {
+    const full = { ...fa, target: { ...(fa.target || {}), figure: f.id } };
+    const key = `f${++fixSeq}`; fixRegistry.set(key, full);
+    return `<button class="btn ghost sm" data-fix="${key}">${esc(fixLabel(full))} →</button>`;
+  }).join('');
+  return `<div class="qa-fixes"><div class="qa-fix">
+    <div class="qa-fix-head"><b>${esc(known?.title || '排版失败')}</b><span class="qa-fix-val mono">${esc(lf.code)}</span></div>
+    <p class="qa-fix-hint">${esc(known?.plain || '这张图没能排版。')}</p>
+    <details class="qa-tech"><summary>技术细节</summary><p>${esc(lf.detail)}</p></details>
+    ${btns}</div></div>`;
 }
 
 function grid(fig) {
   const checks = fig.qa?.checks || [];
   return `<div class="qa-grid" role="list">${checks.map((c) => `
     <button class="qa-cell ${c.pass ? 'pass' : 'fail'}" data-chk="${esc(c.id)}"
-      title="${esc(qaName(c.id))}（${esc(c.id)}） · 实测 ${esc(c.value)} · 阈值 ${esc(c.threshold)} · ${c.pass ? '通过' : '超限'}">
+      title="${esc(qaName(c.id, c))}（${esc(c.id)}） · 实测 ${esc(c.value)} · 阈值 ${esc(c.threshold)} · ${c.pass ? '通过' : '超限'}">
       <span class="qa-cell-mark">${c.pass ? '✓' : '✕'}</span>
-      <span class="qa-cell-name">${esc(qaName(c.id))}</span></button>`).join('')}</div>`;
+      <span class="qa-cell-name">${esc(qaName(c.id, c))}</span></button>`).join('')}</div>`;
 }
 
 function failItems(fig) {
-  const fails = (fig.qa?.checks || []).filter((c) => !c.pass);
+  const fails = (fig?.qa?.checks || []).filter((c) => !c.pass);
   if (!fails.length) return '';
   return `<div class="qa-fixes"><h4>需要修的 ${fails.length} 项</h4>${fails.map((c) => {
     const map = QA_MAP[c.id] || {};
-    const route = map.route;
-    const plain = c.hint_plain || map.plain || '';     // 后端若给白话 hint，优先用后端的
+    // 后端字段优先（WP2 F4）：title_zh / hint_plain / fix_action；fix_action === null = 写出端问题，不是用户可改的
+    const backend = Object.prototype.hasOwnProperty.call(c, 'fix_action');
+    const plain = c.hint_plain || map.plain || '';
+    let action = '';
+    if (backend) {
+      if (c.fix_action && c.fix_action.kind) {
+        const key = `f${++fixSeq}`; fixRegistry.set(key, c.fix_action);
+        action = `<button class="btn ghost sm" data-fix="${key}">${esc((FIX_LABEL[c.fix_action.kind] || (() => '去修改'))(c.fix_action.target))} →</button>`;
+      } else {
+        action = '<p class="qa-fix-notyou"><span class="stamp-run">不是你的操作问题</span> 这是程序写出端的问题，改计划解决不了——请把结果反馈给维护者。</p>';
+      }
+    } else if (map.route) {
+      action = `<button class="btn ghost sm" data-goto="${map.route[0]}">${esc(map.route[1])} →</button>`;
+    }
     return `<div class="qa-fix">
-      <div class="qa-fix-head"><b>${esc(map.name || c.id)}</b>
-        <span class="qa-fix-val mono">实测 ${esc(c.value)} · 阈值 ${esc(c.threshold)}</span></div>
+      <div class="qa-fix-head"><b>${esc(qaName(c.id, c))}</b>
+        <span class="qa-fix-val mono">实测 ${esc(c.value)}${c.threshold ? ` · 阈值 ${esc(c.threshold)}` : ''}</span></div>
       <p class="qa-fix-hint">${esc(plain)}</p>
       ${c.hint ? `<details class="qa-tech"><summary>技术细节</summary>
         <p class="mono">${esc(c.id)}</p><p>${esc(c.hint)}</p></details>` : ''}
-      ${route ? `<button class="btn ghost sm" data-goto="${route[0]}">${esc(route[1])} →</button>` : ''}
+      ${action}
     </div>`;
   }).join('')}</div>`;
 }
@@ -153,6 +189,24 @@ function bindCommon() {
     document.querySelector('.stage-tab[data-stage="plan"]').click();
     setTimeout(() => document.querySelector(`.rtab[data-tab="${b.dataset.goto}"]`)?.click(), 60);
   }));
+  host.querySelectorAll('[data-fix]').forEach((b) => b.addEventListener('click', () => applyFixAction(fixRegistry.get(b.dataset.fix))));
+}
+
+// 当前计划的服务端校验（子应用 api/state.validate）没过：出图必然失败。把问题翻成白话，给「去术语页补名称」直达。
+// 典型场景：上传的 STEP 还没起名——每个空术语都是一条 E_SCHEMA（/terms/N/term 不能为空）。
+function validateBlock(compact) {
+  const v = state.validate;
+  const errs = (v && v.ok === false) ? (v.issues || []).filter((it) => (it.severity || 'error') === 'error') : [];
+  if (!errs.length) return '';
+  const blankTerms = errs.filter((it) => /^\/terms\/\d+\/term$/.test(it.pointer || '') && /minLength|空|non-empty/.test(`${it.message}${it.hint}`)).length;
+  const others = errs.filter((it) => !(/^\/terms\/\d+\/term$/.test(it.pointer || '') && /minLength|空|non-empty/.test(`${it.message}${it.hint}`)));
+  const key = `f${++fixSeq}`; fixRegistry.set(key, { kind: 'open_terms', target: { focus: blankTerms ? undefined : 'names' } });
+  return `<div class="validate-bar" role="alert">
+    <b>当前计划还没通过校验，出图会失败。</b>
+    ${blankTerms ? `<span>${blankTerms} 个零件还没有中文名称——在术语页补上（或用 AI 起名），不想标号的零件设「不标」。</span>` : ''}
+    ${!compact && others.length ? `<ul class="qa-issues">${others.slice(0, 5).map((it) => `<li><b class="mono">${esc(it.code || '')}</b> ${esc(it.message || '')}</li>`).join('')}</ul>` : ''}
+    <button class="btn sm" data-fix="${key}">${blankTerms ? '去术语页补名称' : '去术语页修改'} →</button>
+  </div>`;
 }
 
 function render() {
@@ -173,7 +227,7 @@ function render() {
         <pre class="qa-log">${esc((logs.length ? logs : ['▶ 解析消隐出图…']).join('\n'))}</pre>`
       : (failNow && force !== 'empty' ? `${jobFailPanel(job, null)}
         <button class="btn big" id="qa-retry">改完计划 · 重新出图</button>`
-      : `<p class="stamp-run">未出图</p>
+      : `${validateBlock(true)}<p class="stamp-run">未出图</p>
         <h2>把当前计划渲染成专利附图</h2>
         <p class="muted">渲染走与模型完全相同的 CLI 与 QA 闸门；通过后自动生成交底版（图号＋件号表）与递交版（仅图号）。</p>
         ${api.readOnly ? '<p class="hint">静态演示站为预计算只读展示，不在浏览器里出图（需本地安装后的后端）。</p>'
@@ -225,7 +279,7 @@ function render() {
     : '13 项全部通过。到「导出」页打包附图包。';
   host.innerHTML = `
     <div class="qa-notices">
-      ${failNow ? jobFailPanel(job, r) : ''}
+      ${failNow ? jobFailPanel(job, r) : validateBlock(true)}
       ${stale ? `<div class="stale-bar">${staleMsg}
         <button class="btn sm" id="rerender-stale" ${rendering ? 'disabled' : ''}>${rendering ? '出图中…' : '重新出图'}</button></div>` : ''}
       ${legacy ? `<div class="compat-bar">旧版后端兼容模式：可出图、预览与查看 QA，但无法证明预览对应当前计划；导出需升级到新版后端。</div>` : ''}
@@ -304,6 +358,19 @@ function bindEvidence(result, ev, jobInputs) {
 
 // 作业成功：d 是 done 事件或 GET job 的数据；ev 是该作业的后端证据（只属于它）。
 async function applyResult(d, token, ev) {
+  // live：作业 done 带回的是 REST 精简结果（无预览 URL、无完整 QA）——权威的已发布结果从子应用
+  // /p/{pid}/api/render/status 读（预览 URL 带 ?v=<rid>）。已发布版本就是本作业（rid = 作业 ID）时才用本作业证据。
+  if (api.mode === 'live') {
+    let st;
+    try { st = await api.getRenderStatus(state.projectId); } catch (err) {
+      if (!isCurrent(token)) return;
+      setActive(null); toast('读取渲染结果失败：' + (err.hint || err.message), 'bad'); render(); return;
+    }
+    if (!isCurrent(token)) return;
+    const pub = st.result || null;
+    const mine = !!pub && resultVersion(pub) === ev.jobId;
+    return settleResult(pub, token, ev, mine ? { plan_etag: d?.result?.plan_etag || d?.inputs?.plan_etag } : null, mine);
+  }
   // 读权威结果：优先作业带回的 result，否则回工程/状态取一次（那份不一定属于本作业 → 不用本作业证据）
   let result = (d && d.result && d.result.figures) ? d.result : null;
   const fromJob = !!result;
@@ -315,9 +382,13 @@ async function applyResult(d, token, ev) {
     }
     if (!isCurrent(token)) return;       // 回读期间已换了作业：丢弃
   }
+  return settleResult(result, token, ev, d?.inputs, fromJob);
+}
+
+function settleResult(result, token, ev, jobInputs, mine) {
   state.render = result || null;
   state.renderJob = { id: ev.jobId || null, state: 'succeeded', running: false, ok: true, error: null, result: null, diag: null };
-  bindEvidence(result, fromJob ? ev : null, d?.inputs);
+  bindEvidence(result, mine ? ev : null, jobInputs);
   setActive(null);
   activeFig = null;
   bus.emit('rendered');
@@ -357,12 +428,16 @@ async function applyFailure(d, token, ev) {
 // 订阅一个作业直到终态。token 是该作业的令牌；ev 是它的后端证据。
 function follow(token, ev) {
   let settled = false;                   // 同一作业只采纳一次终态（done / error 与断线校准可能先后到达）
-  const finish = (d) => { if (settled) return; settled = true; applyResult(d, token, ev); };
-  const fail = (d) => { if (settled) return; settled = true; applyFailure(d, token, ev); };
+  const finish = (d) => { if (settled) return; settled = true; try { sub?.close?.(); } catch { /* */ } applyResult(d, token, ev); };
+  const fail = (d) => { if (settled) return; settled = true; try { sub?.close?.(); } catch { /* */ } applyFailure(d, token, ev); };
   try { sub?.close?.(); } catch { /* */ }
   sub = api.jobEvents(token.jobId, {
-    log(d) { if (!isCurrent(token)) return; logs.push(d.line); render(); },
-    stage(d) { if (!isCurrent(token)) return; if (d.label) logs.push(`✓ ${d.label} · ${(d.seconds || 0).toFixed(2)}s`); render(); },
+    log(d) { if (!isCurrent(token)) return; if (d.line) logs.push(...String(d.line).split('\n').filter(Boolean).slice(-12)); render(); },
+    stage(d) {
+      if (!isCurrent(token)) return;
+      if (d.label && d.label !== 'running') logs.push(`▶ ${d.label}${d.progress != null ? ` · ${Math.round(d.progress * 100)}%` : ''}`);
+      render();
+    },
     done(d) { finish(d); },
     fail(d) { fail(d); },
     disconnect() {                       // 断线：用 GET job 校准终态；作业已不存在（后端重启）就收尾，不让界面卡在「渲染中」
@@ -432,6 +507,7 @@ export function mountQa(el) {
   if (!host._bound) {
     bus.on('rendered', render);
     bus.on('render-stale', () => { if (!$stageHidden()) render(); });
+    bus.on('validate', () => { if (!$stageHidden() && !rendering) render(); });
     host._bound = true;
   }
 }

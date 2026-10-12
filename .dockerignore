@@ -1,0 +1,17 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.DS_Store
+static-site
+dist
+build
+*.egg-info
+webui/dev/screens
+webui/dev/static-site
+examples/**/*.stp
+examples/**/out
+.env
+.env.*
+!.env.example

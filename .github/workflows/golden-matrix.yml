@@ -1,0 +1,215 @@
+# 金样矩阵（架构 §3.3）：tag 或手动触发。{ubuntu-22.04, macos-14, windows-2022} × {3.9, 3.11, 3.12}
+# 跑验收（N14 = 完整 pytest，N10 金样）；另测三平台安装脚本与 wheel（仓库外全新虚拟环境跑验收）。
+# 汇总作业把通过的组合生成 docs/deploy/verified-environments.md 与 install-times.md（作为构件上传，
+# 由人审核后再提交进仓库——不自动推送）。
+name: golden-matrix
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  golden:
+    name: 验收 ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-2022]
+        python: ["3.9", "3.11", "3.12"]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 系统依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libx11-6 fonts-noto-cjk
+      - name: 安装锁定依赖（计时）
+        run: |
+          t0=$(date +%s)
+          python -m pip install -U pip
+          python -m pip install -r requirements-pinned.txt -r requirements-web.txt pyyaml==6.0.3
+          echo "INSTALL_SECONDS=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"
+      - name: 验收（N14 = 完整 pytest；N10 金样）
+        run: python acceptance/run_acceptance.py --json acceptance.json
+      - name: 记录环境
+        if: always()
+        run: |
+          if [ -f acceptance.json ]; then
+            python scripts/verified_envs.py record --acceptance acceptance.json --label "${{ matrix.os }}" \
+              --install-seconds "${INSTALL_SECONDS:-0}" --install-method "pip -r requirements（CI）" \
+              --network "GitHub Actions 托管 runner，pip 无缓存" \
+              --source "CI ${{ github.workflow }} #${{ github.run_number }}" --commit "${GITHUB_SHA::12}" \
+              --out "records/env-${{ matrix.os }}-py${{ matrix.python }}.json"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: records-golden-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            records/
+            acceptance.json
+          if-no-files-found: ignore
+
+  install-scripts:
+    name: 安装脚本 ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装目录（故意带空格与中文）
+        shell: bash
+        run: echo "PFK_HOME=$RUNNER_TEMP/pfk home 测试" >> "$GITHUB_ENV"
+      - name: 系统依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libx11-6 fonts-noto-cjk
+      - name: install.sh --no-start（Linux）
+        if: runner.os == 'Linux'
+        run: ./install.sh --no-start && ./install.sh --no-start
+      - name: 安装并启动.command --no-start（macOS）
+        if: runner.os == 'macOS'
+        run: ./安装并启动.command --no-start && ./安装并启动.command --no-start
+      - name: 安装并启动.ps1 -NoStart（Windows PowerShell 5.1，即「右键运行」的解释器）
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          .\安装并启动.ps1 -NoStart
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\安装并启动.ps1 -NoStart
+          exit $LASTEXITCODE
+      - name: 启动冒烟（端口 8807，打开首页与静态资源）
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then VPY="$PFK_HOME/venv-py3.12/Scripts/python.exe"; else VPY="$PFK_HOME/venv-py3.12/bin/python"; fi
+          "$VPY" scripts/pfk_cli.py start --port 8807 --no-browser --no-example --data "$RUNNER_TEMP/pfk-data" > start.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8807/ -o home.html && curl -fsS http://127.0.0.1:8807/static/js/api.js -o /dev/null; then
+              echo "工作台已就绪（${i}s）"; break
+            fi
+            sleep 2
+          done
+          grep -q 'inkline\|墨线\|data-brand' home.html
+          curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8807/v1/projects | grep -q 401
+      - name: 记录安装时长
+        if: always()
+        shell: bash
+        run: |
+          python scripts/verified_envs.py record --install-timing "$PFK_HOME/install-timing.json" \
+            --label "${{ matrix.os }}（安装脚本）" --network "GitHub Actions 托管 runner，pip 无缓存" \
+            --source "CI ${{ github.workflow }} #${{ github.run_number }}" --commit "${GITHUB_SHA::12}" \
+            --out "records/install-${{ matrix.os }}.json" || true
+          cp "$PFK_HOME/install.log" "records/install-${{ matrix.os }}.log" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: records-install-${{ matrix.os }}
+          path: |
+            records/
+            start.log
+          if-no-files-found: ignore
+
+  wheel:
+    name: wheel 全新环境 ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-2022]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 系统依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libx11-6 fonts-noto-cjk
+      - name: 构建 wheel
+        run: |
+          python -m pip install -U pip build==1.2.2
+          python -m build --wheel --outdir dist
+      - name: 仓库外全新虚拟环境安装（计时）
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$RUNNER_TEMP/wheel-venv/Scripts"; else BIN="$RUNNER_TEMP/wheel-venv/bin"; fi
+          echo "WBIN=$BIN" >> "$GITHUB_ENV"
+          t0=$(date +%s)
+          "$BIN/python" -m pip install -U pip
+          WHL="$(ls dist/*.whl)"
+          "$BIN/python" -m pip install "${WHL}[web,test]"
+          echo "INSTALL_SECONDS=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"
+      - name: 资源定位 + 自检 + 验收（工作目录在仓库外）
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$WBIN/pfk" paths --check
+          "$WBIN/pfk" doctor --profile web
+          "$WBIN/pfk" acceptance --json "$RUNNER_TEMP/wheel-acceptance.json"
+      - name: 记录环境
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/wheel-acceptance.json" ]; then
+            "$WBIN/python" scripts/verified_envs.py record --acceptance "$RUNNER_TEMP/wheel-acceptance.json" \
+              --label "${{ matrix.os }}（wheel）" --install-seconds "${INSTALL_SECONDS:-0}" \
+              --install-method "pip install wheel[web,test]" --network "GitHub Actions 托管 runner，pip 无缓存" \
+              --source "CI ${{ github.workflow }} #${{ github.run_number }}" --commit "${GITHUB_SHA::12}" \
+              --out "records/wheel-${{ matrix.os }}.json"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: records-wheel-${{ matrix.os }}
+          path: records/
+          if-no-files-found: ignore
+
+  summarize:
+    name: 汇总「已验证环境」
+    needs: [golden, install-scripts, wheel]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: records-*
+          path: all-records
+          merge-multiple: false
+      - name: 生成 verified-environments.md / install-times.md
+        run: |
+          python3 scripts/verified_envs.py render --records all-records --out-dir generated
+          cat generated/verified-environments.md >> "$GITHUB_STEP_SUMMARY"
+          cat generated/install-times.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-environments
+          path: generated/

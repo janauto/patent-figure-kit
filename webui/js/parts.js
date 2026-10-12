@@ -7,7 +7,7 @@ import {
 } from './state.js';
 import { api } from './api.js';
 import { flashParts } from './viewer.js';
-import { toast } from './main.js';
+import { toast, confirmOutbound } from './main.js';
 
 let root; let query = '';
 let pollTimer = null;
@@ -233,36 +233,34 @@ function bind() {
   });
 }
 
-// 结构识别：起一个 suggest 作业演示进度（mock 的结构已预置，作业完成后沿用现有结构）。
+// 结构识别（AI，外发完整零件清单）：live 与兼容模式都走子应用 POST api/structure/analyze → 轮询 api/structure。
+// live 外发前先明示（能力接口 ai.outbound_note）；没有 AI 通道时后端 409，按钮本就禁用。
+async function pollStructure() {
+  let r;
+  try { r = await api.getStructure(state.projectId); } catch (err) {
+    state.structureJob = { error: err.message }; render(); toast('结构识别状态读取失败：' + err.message, 'bad'); return;
+  }
+  state.structureJob = r.job || null;
+  if (r.job?.running) { render(); setTimeout(pollStructure, 3000); return; }
+  if (r.structure) { state.structure = r.structure; indexStructure(); }
+  if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
+  bus.emit('structure'); render();
+  if (r.job?.error) toast('结构识别失败：' + r.job.error, 'bad');
+  else toast(`结构识别完成：${state.structure?.groups?.length || 0} 个结构组`, 'ok');
+}
+
 async function analyze() {
   try {
+    if (!api.isLegacy) {
+      const n = (state.assembly?.parts || []).length;
+      const ok = await confirmOutbound({ title: 'AI 识别结构会外发零件清单', count: n,
+        extra: '结构识别需要整份零件清单（零件名、尺寸、装配路径）来归组；只发文字，不发几何模型。' });
+      if (!ok) { toast('已取消，没有外发任何内容。', ''); return; }
+    }
     state.structureJob = { running: true };
     render();
-    const res = await api.analyzeStructure(state.projectId);   // legacy → /api/structure/analyze；live → suggest 作业
-    if (api.isLegacy) {
-      // 旧后端：轮询 /api/structure 直到识别作业结束
-      const poll = async () => {
-        const r = await api.getStructure();
-        state.structureJob = r.job || null;
-        if (r.job?.running) { render(); setTimeout(poll, 3000); return; }
-        if (r.structure) { state.structure = r.structure; indexStructure(); }
-        if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
-        bus.emit('structure'); render();
-        if (r.job?.error) toast('结构识别失败：' + r.job.error, 'bad');
-        else toast(`结构识别完成：${state.structure?.groups?.length || 0} 个结构组`, 'ok');
-      };
-      setTimeout(poll, 3000);
-      return;
-    }
-    api.jobEvents(res.job_id, {
-      done() {
-        state.structureJob = null;
-        if (state.structure?.source === 'ai') setView({ colorBy: 'structure' });
-        bus.emit('structure'); render();
-        toast(`结构识别完成：${state.structure?.groups?.length || 0} 个结构组`, 'ok');
-      },
-      fail(d) { state.structureJob = { error: d.message }; render(); toast('结构识别失败：' + d.message, 'bad'); },
-    });
+    await api.analyzeStructure(state.projectId);
+    setTimeout(pollStructure, 1500);
   } catch (err) { state.structureJob = null; render(); toast('无法开始识别：' + (err.hint || err.message), 'bad'); }
 }
 
@@ -300,5 +298,5 @@ function applySuggestion(index) {
 export function initParts(el) {
   root = el;
   ['booted', 'plan', 'selection', 'active-figure', 'view', 'structure'].forEach((evt) => bus.on(evt, render));
-  bus.on('booted', () => { if (state.structureJob?.running) poll(); });
+  bus.on('booted', () => { if (state.structureJob?.running) pollStructure(); });
 }

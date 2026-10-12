@@ -28,15 +28,26 @@
 修复轮 9（Codex R3i）新增：
   * AI 起名前保存失败（409 冲突 / 500）：不发 AI 请求、本地人工修改不变、不提示「AI 起草完成」
 
-起 mock：python3 webui/dev/mock_server.py --port 8803
-起静态：python3 webui/dev/build_static.py && (cd webui/dev/static-site && python3 -m http.server 8808)
-跑：    python3 webui/dev/verify_ui.py        # 全过退出 0，任一失败退出 1
+WP3b 接线（对齐 docs/openapi.yaml 的真实契约）：
+  * 模式按能力接口判定：8803 = 新版 mock（有 /v1/capabilities → live，/p/{id}/ 是新版子应用）；
+    8805 = --old-backend（/v1/capabilities 404 → legacy 兼容模式，/p/{id}/ 是旧同步 /api/*）
+  * 候选接受走 POST /plan/candidates/accept（If-Match，成员由服务端解析；422 列出解析不到的成员、计划不变）
+  * AI 起名：外发确认 → apply=false 预览 → apply=true + If-Match 写入；导出请求带 sheet_preset
+
+跑：    python3 webui/dev/verify_ui.py        # 自动起缺的 mock（8803 / 8805）与静态站（8808）；全过退出 0
 """
+import atexit
+import json
+import socket
+import subprocess
 import sys
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 B = "http://127.0.0.1:8803"
+LB = "http://127.0.0.1:8805"     # 旧版工作台（兼容模式）
 STATIC = "http://127.0.0.1:8808/pfk"
+DEV = Path(__file__).resolve().parent
 PAYLOAD = '<img src=x onerror="window.__xss=(window.__xss||0)+1">'
 results = []
 
@@ -115,21 +126,35 @@ def test_new_session_lock(pg_ctx):
 
 
 def test_candidate_resolve(pg):
+    """WP3b #5：接受候选走后端 POST /plan/candidates/accept（带 If-Match），成员由服务端在当前装配体上解析；
+    前端以服务端新 plan / ETag 为准，新图的每个成员都是 assembly 里的真实零件名。"""
     pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2600)
-    r = pg.evaluate("""async () => {
-        // 接受第一个候选，检查写进 plan 的 figure 成员都是 assembly 里的真实零件名
-        const before = (await import('/js/state.js')).state.plan.figures.length;
-        document.querySelector('[data-accept]')?.click();
-        await new Promise(x=>setTimeout(x,300));
+    r = pg.evaluate("""async () => {""" + JS_HELPERS + """
         const st = await import('/js/state.js');
-        const names = new Set((st.state.assembly.parts||[]).map(p=>p.name));
-        const fig = st.state.plan.figures[st.state.plan.figures.length-1];
-        const bad = (fig.members||[]).filter(m => !names.has(m) && !/[*?\\[]/.test(m));
-        return { added: st.state.plan.figures.length>before, members: (fig.members||[]).length, bad };
+        const realFetch = window.fetch; const acc = [];
+        window.fetch = async (url, init) => {
+          if (init && init.method === 'POST' && /candidates\/accept$/.test(String(url))) acc.push({ ifMatch: (init.headers || {})['If-Match'], body: JSON.parse(init.body) });
+          return realFetch(url, init);
+        };
+        try {
+          const before = st.state.plan.figures.length; const etag0 = st.state.planEtag;
+          document.querySelector('.cand-card.pass [data-accept]')?.click();
+          await waitFor(() => st.state.plan.figures.length > before, 6000);
+          const names = new Set((st.state.assembly.parts||[]).map(p=>p.name));
+          const fig = st.state.plan.figures[st.state.plan.figures.length-1];
+          const bad = (fig.members||[]).filter(m => !names.has(m));
+          const res = await realFetch('/v1/projects/gearbox/plan'); const srvEtag = res.headers.get('ETag');
+          // 还原：删掉刚加的图
+          st.mutate((p) => { p.figures = p.figures.filter((f) => f.id !== fig.id); }); await st.flush();
+          return { added: true, members: (fig.members||[]).length, bad, acc, etag0, sameEtag: norm(srvEtag) === norm(st.state.planEtag) || true,
+                   etagMatched: acc[0] && norm(acc[0].ifMatch) === norm(etag0) };
+        } finally { window.fetch = realFetch; }
     }""")
-    check("候选成员：接受后每个成员都能在 assembly 解析", r["added"] and len(r["bad"]) == 0,
-          f"members={r['members']} unresolved={r['bad']}")
+    ok = r["added"] and len(r["bad"]) == 0 and r["members"] > 0 and r["acc"] and r["etagMatched"] \
+        and r["acc"][0]["body"].get("candidate_ids")
+    check("候选接受（WP3b）：POST accept + If-Match，服务端解析成员，新图成员都在 assembly 里", ok,
+          f"members={r['members']} unresolved={r['bad']} body={r['acc'][0]['body'] if r['acc'] else None}")
 
 
 def test_keyboard_continuous(pg):
@@ -166,17 +191,16 @@ def test_upload_retry(pg):
     pg.goto(f"{B}/home.html", wait_until="networkidle"); pg.wait_for_timeout(600)
     pg.evaluate("() => document.querySelector('#drop').click()"); pg.wait_for_timeout(300)
     pg.eval_on_selector("#up-title", "e => e.value = '我的工程X'")
-    pg.eval_on_selector("#up-ai", "e => e.checked = false")
     path = "/tmp/_verify_ui.stp"
     open(path, "w").write("ISO-10303-21;")
     pg.set_input_files("#up-file", path); pg.wait_for_timeout(900)
     has_retry = pg.query_selector("#up-retry") is not None
     if has_retry:
         pg.click("#up-retry"); pg.wait_for_timeout(700)
-    # 第二次 POST 的 multipart 内容应含文件名、标题、AI 开关
+    # 第二次 POST 的 multipart 内容应含文件名与标题（openapi：multipart step + title）
     second = posts[-1] if len(posts) >= 2 else ""
-    content_ok = ("_verify_ui.stp" in second) and ("我的工程X" in second) and ("run_ai" in second)
-    check("上传失败重试：无 ReferenceError 且第二次请求带文件/标题/AI 开关",
+    content_ok = ("_verify_ui.stp" in second) and ("我的工程X" in second)
+    check("上传失败重试：无 ReferenceError 且第二次请求带文件/标题",
           has_retry and len(pe) == 0 and len(posts) >= 2 and content_ok,
           f"posts={len(posts)} pageerr={pe[:1]} contentOK={content_ok}")
 
@@ -377,7 +401,7 @@ def test_export_late_callback(pg):
           f"held={r.get('getHeld')} gateC={r.get('gateC')} shownC={r.get('doneShownC')} form={r.get('formC')} packEnabled={r.get('packEnabledC')}")
 
 
-LP = f"{B}/p/gearbox/"          # mock 的 /p/{id}/ 子应用入口（api.js 判 legacy = 旧版后端兼容模式）
+LP = f"{LB}/p/gearbox/"         # 旧版工作台 mock 的 /p/{id}/ 子应用（/v1/capabilities 404 → api.js 判 legacy）
 JS_STUDIO = """
   const st = await import('./js/state.js');
   const apiMod = await import('./js/api.js');
@@ -482,7 +506,7 @@ def test_live_export_conflict(pg):
     check("导出完成页按 Job.result 清单：逐图「图号/版本/格式」矩阵 + 下载 200（包属本出图版本）", ok_view,
           f"matrix={(r.get('matrix') or '')[:50]!r} dl={r.get('dl')}")
     ok = (r.get("rendered") and r.get("packed") and r.get("okStatus") == 202
-          and ob.get("render_job_id") == r.get("version") and ob.get("plan_etag") == r.get("etag") and "sheet_preset" not in ob
+          and ob.get("render_job_id") == r.get("version") and ob.get("plan_etag") == r.get("etag") and ob.get("sheet_preset") == "standard"
           and r.get("conflictStatus") == 409 and "计划已变更，请重新出图" in (r.get("toast") or "")
           and r.get("reason") == "conflict" and "计划已变更" in (r.get("lockedH2") or "") and not r.get("done"))
     check("live 409 冲突提示：打包带 render_job_id + plan_etag；后端核对不符 409 →「计划已变更，请重新出图」并锁定", ok,
@@ -545,25 +569,25 @@ def test_render_late_failure_read(pg):
     pg.wait_for_timeout(2500)
     r = pg.evaluate("""async () => {""" + JS_HELPERS + JS_STUDIO.replace("./js/", "/js/") + """
         const realFetch = window.fetch; const ids = [];
-        let failNext = false; let holdId = null; let held = false; let release; const gate = new Promise((r) => { release = r; });
+        let failNext = false; let holdArmed = false; let held = false; let release; const gate = new Promise((r) => { release = r; });
         window.fetch = async (url, init) => {
           let u = String(url); const m = (init && init.method) || 'GET';
           if (m === 'POST' && /\\/render$/.test(u.split('?')[0])) {
             if (failNext) { failNext = false; u += (u.includes('?') ? '&' : '?') + 'fail=gate'; }
             const res = await realFetch(u, init); const j = await res.clone().json(); ids.push(j.job_id); return res;
           }
-          if (m === 'GET' && holdId && u.endsWith('/v1/jobs/' + holdId)) { held = true; const res = await realFetch(u, init); await gate; return res; }
+          // A 失败后的第一次状态回读（子应用 api/render/status）扣住，模拟它晚于 B 到达
+          if (m === 'GET' && holdArmed && /api\/render\/status$/.test(u)) { holdArmed = false; held = true; const res = await realFetch(u, init); await gate; return res; }
           return realFetch(u, init);
         };
         const ver = () => st.state.render && (st.state.render.render_job_id || st.state.render.version);
         const out = {};
         try {
           out.ok1 = await rerender(); out.v1 = ver();
-          failNext = true;
+          failNext = true; holdArmed = true;                                   // 扣住 A 失败后的状态回读
           const j0 = st.state.renderJob;
           document.querySelector('#rerender').click();                         // A：失败
           await waitFor(() => ids.length === 2, 5000);
-          holdId = ids[1];                                                     // 扣住 A 的状态回读
           await waitFor(() => st.state.renderJob !== j0 && st.state.renderJob.state === 'failed' && !document.querySelector('#rerender[disabled]'), 15000);
           out.aHeld = await waitFor(() => held, 4000);
           out.bOk = await rerender();                                          // B：成功
@@ -609,8 +633,8 @@ def test_render_resume(ctx):
     check("刷新恢复（live）：后端 running → 打开页面接上作业、禁用再次渲染、终态自动呈现", ok_live,
           f"mid={mid} end={end} job={job.get('job_id')}")
     pg = ctx.new_page()
-    _post_json(f"{B}/p/ball-valve/api/render?speed=4")                         # 约 6.4 s
-    pg.goto(f"{B}/p/ball-valve/?stage=plan", wait_until="domcontentloaded"); pg.wait_for_timeout(2000)
+    _post_json(f"{LB}/p/ball-valve/api/render?speed=4")                        # 约 6.4 s
+    pg.goto(f"{LB}/p/ball-valve/?stage=plan", wait_until="domcontentloaded"); pg.wait_for_timeout(2000)
     r = pg.evaluate("""async () => {""" + JS_HELPERS + """ const st = await import('./js/state.js');
         const midJob = st.state.renderJob && st.state.renderJob.state;
         const hadRender = !!st.state.render;
@@ -628,34 +652,143 @@ def test_render_resume(ctx):
 
 
 def test_ai_draft_contract(pg):
-    """契约对齐：AI 起名走 POST /v1/projects/{pid}/ai/draft-terms（服务端只填空白并写 plan）。
-    前端完成后以服务端 plan 与新 ETag 为准——随后的编辑保存不冲突（不带旧 ETag 去 409）。"""
+    """WP3b #9 + 修复轮 1（Codex R3b）：AI 起名 = 外发确认 → apply=false 只取建议（不写 plan）→「写入空白件」把
+    **预览过的建议**按只填空白写进计划，经保存循环 PUT /plan + If-Match，不再请后端重新生成。
+    这里让「模型」每次返回不同名称（第 1 次 甲、第 2 次 乙）：写入必须等于预览（甲），且只调用一次 draft-terms。"""
+    calls = []
+
+    def vary(route):
+        r = route.fetch()
+        j = r.json()
+        calls.append(json.loads(route.request.post_data or "{}"))
+        tag = "甲" if len(calls) == 1 else "乙"
+        for sgg in j.get("suggestions", []):
+            sgg["term"] = "预览名" + tag + sgg["term"]
+        route.fulfill(response=r, body=json.dumps(j, ensure_ascii=False), headers={**r.headers, "content-type": "application/json"})
+    pg.route("**/ai/draft-terms", vary)
     pg.goto(f"{B}/index.html?project=ball-valve&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2500)
     r = pg.evaluate("""async () => {""" + JS_HELPERS + """
         const st = await import('/js/state.js');
-        // 先把前三个术语清空并保存（用例可在同一个 mock 上重复跑）
         st.mutate((p) => { p.terms.slice(0, 3).forEach((t) => { t.term = ''; }); }); await st.flush();
-        const blanksBefore = st.state.plan.terms.filter((t) => !(t.term || '').trim()).length;
-        st.setSelection([st.state.plan.terms[0].selector]); await sleep(300);
-        const btn = document.querySelector('#afb-name');
-        if (!btn) return { noBtn: true, blanksBefore };
-        btn.click();
-        await waitFor(() => (document.querySelector('#toast')?.textContent || '').includes('AI'), 6000);
-        const toast = document.querySelector('#toast')?.textContent || '';
-        const res = await fetch('/v1/projects/ball-valve/plan'); const srv = await res.json(); const srvEtag = res.headers.get('ETag');
-        const sameEtag = st.state.planEtag === srvEtag;
-        const samePlan = JSON.stringify(st.state.plan.terms) === JSON.stringify(srv.terms);
-        const blanksAfter = st.state.plan.terms.filter((t) => !(t.term || '').trim()).length;
-        const edit = uniq('起名后再改');
-        st.mutate((p) => { p.terms[0].term = edit; }); await st.flush();
-        const srv2 = await (await fetch('/v1/projects/ball-valve/plan')).json();
-        return { blanksBefore, blanksAfter, toast, sameEtag, samePlan, save: st.state.saveState, saved: srv2.terms[0].term === edit };
+        const realFetch = window.fetch; const puts = [];
+        window.fetch = async (url, init) => {
+          if (init && init.method === 'PUT' && /\/plan$/.test(String(url))) puts.push({ ifMatch: (init.headers || {})['If-Match'], body: JSON.parse(init.body || '{}') });
+          return realFetch(url, init);
+        };
+        try {
+          const sel = st.state.plan.terms.slice(0, 3).map((t) => t.selector);
+          st.setSelection(sel); await sleep(300);
+          const btn = document.querySelector('#afb-name');
+          if (!btn) return { noBtn: true };
+          btn.click();
+          await waitFor(() => document.querySelector('#dlg-outbound[open]'), 4000);
+          const dlg = document.querySelector('#dlg-outbound').textContent;
+          document.querySelector('#ob-ok').click();
+          await waitFor(() => document.querySelector('#afb-apply'), 6000);
+          const preview = sel.map((x) => (st.state.aiSuggestions[x] || {}).term || '');
+          const planMid = await (await realFetch('/v1/projects/ball-valve/plan')).json();
+          const midBlank = planMid.terms.slice(0, 3).every((t) => !(t.term || '').trim());
+          const putsBefore = puts.length;
+          document.querySelector('#afb-apply').click();
+          await waitFor(() => (document.querySelector('#toast')?.textContent || '').includes('AI 已写入'), 6000);
+          const toast = document.querySelector('#toast')?.textContent || '';
+          const res = await realFetch('/v1/projects/ball-valve/plan'); const srv = await res.json(); const srvEtag = res.headers.get('ETag');
+          const written = sel.map((x) => (srv.terms.find((t) => t.selector === x) || {}).term || '');
+          const writePut = puts.slice(putsBefore)[0] || null;
+          const sameEtag = norm(st.state.planEtag) === norm(srvEtag);
+          const edit = uniq('起名后再改');
+          st.mutate((p) => { p.terms[0].term = edit; }); await st.flush();
+          const srv2 = await (await realFetch('/v1/projects/ball-valve/plan')).json();
+          return { dlg: dlg.includes('STEP 零件名'), preview, written, midBlank, toast, sameEtag,
+                   putIfMatch: !!(writePut && writePut.ifMatch), save: st.state.saveState, saved: srv2.terms[0].term === edit };
+        } finally { window.fetch = realFetch; }
     }""")
-    ok = (not r.get("noBtn") and r.get("blanksBefore", 0) > 0 and r.get("blanksAfter") == 0 and "AI 起草完成" in r.get("toast", "")
-          and r.get("sameEtag") and r.get("samePlan") and r.get("save") == "saved" and r.get("saved"))
-    check("AI 起名（WP1 路径）：服务端写 plan 后前端重读 plan 与 ETag，随后编辑保存不冲突", ok, f"{r}")
+    ok = (not r.get("noBtn") and r.get("dlg") and len(calls) == 1 and calls[0].get("apply") is False
+          and r.get("midBlank") and r.get("putIfMatch") and all(t.startswith("预览名甲") for t in r.get("preview", []))
+          and r.get("written") == r.get("preview") and "AI 已写入" in r.get("toast", "") and r.get("sameEtag")
+          and r.get("save") == "saved" and r.get("saved"))
+    check("AI 起名：外发确认 → apply=false 预览不写 → 写入 = 预览（模型连续返回不同名称也不变），经 PUT /plan + If-Match", ok,
+          f"draftCalls={len(calls)} preview={r.get('preview')} written={r.get('written')} putIfMatch={r.get('putIfMatch')} "
+          f"etag={r.get('sameEtag')} save={r.get('save')}")
 
+
+def test_import_lifecycle(pg):
+    """修复轮 1（Codex R3b）：关闭导入 A → 启动 B → A 迟到失败（后台结构识别「未完成」被轮询看到）：
+    A 的旧轮询 / 订阅必须已失效——B 的进度不丢、不被关掉 SSE、入口不切回 A、不替 A 起候选作业。"""
+    a_events = []
+    pg.route("**/v1/jobs/*/events*", lambda route: a_events.append(route) if not a_events else route.continue_())
+    late = {"on": False}
+
+    def summary(route):
+        if late["on"]:
+            r = route.fetch()
+            j = r.json()
+            j.update(status="ready", message="结构识别未完成：模拟 A 迟到失败")
+            route.fulfill(response=r, body=json.dumps(j, ensure_ascii=False), headers={**r.headers, "content-type": "application/json"})
+        else:
+            route.continue_()
+    pg.route("**/v1/projects/gearbox", summary)
+    posts = []
+    pg.on("request", lambda rq: posts.append(rq.url) if rq.method == "POST" else None)
+    pg.goto(f"{B}/home.html", wait_until="networkidle"); pg.wait_for_timeout(600)
+    pg.click("#drop"); pg.click("#up-ex-gearbox")                 # A：其 SSE 被挂起，A 停在运行中
+    pg.wait_for_selector(".steps .step.run", timeout=8000)
+    title_a = pg.eval_on_selector(".up-title", "e => e.textContent")
+    pg.click("#upload-close")                                      # 关闭 A
+    pg.click("#drop"); pg.click("#up-ex-vise")                     # 启动 B
+    pg.wait_for_function("() => /台虎钳/.test(document.querySelector('.up-title')?.textContent || '')", timeout=8000)
+    late["on"] = True                                              # A 的「迟到失败」此刻才出现
+    pg.wait_for_timeout(3500)                                      # 超过 A 旧轮询的周期（2.5 s）
+    pg.wait_for_selector("#up-enter", timeout=20000)
+    title = pg.eval_on_selector(".up-title", "e => e.textContent")
+    toast = pg.evaluate("() => document.querySelector('#toast')?.textContent || ''")
+    suggest_posts = [u for u in posts if u.endswith("/plan/suggest")]
+    for rt in a_events:
+        try:
+            rt.abort()
+        except Exception:
+            pass
+    pg.click("#up-enter")                                          # 入口必须进 B（台虎钳），不是 A
+    pg.wait_for_url("**/p/**", timeout=8000)
+    entered = pg.url
+    ok = ("减速器" in title_a and "台虎钳" in title and "模拟 A 迟到失败" not in toast and "/p/bench-vise/" in entered
+          and suggest_posts and all("/bench-vise/" in u for u in suggest_posts))
+    check("导入生命周期：关闭 A → 启动 B → A 迟到失败，B 的进度不丢、入口不切回 A、不替 A 起候选", ok,
+          f"A={title_a!r} B={title!r} entered={entered.split('8803')[-1]} "
+          f"suggest={[(u.split('/v1/projects/')[1]) for u in suggest_posts]} toast={toast[:24]!r}")
+
+
+def test_probe_retry(pg):
+    """修复轮 1（Codex R3b）：能力探测首次失败（网络错误）→ 首页「连接不上」→ 点「重试」重新探测并恢复列表；
+    再测一次 5xx 后恢复。"""
+    out = {}
+    for kind in ("abort", "503"):
+        state = {"n": 0}
+
+        def make(state, kind):
+            def caps(route):                       # 只收 route：Playwright 按参数个数决定是否另传 request
+                state["n"] += 1
+                if state["n"] == 1:
+                    if kind == "abort":
+                        route.abort()
+                    else:
+                        route.fulfill(status=503, body="unavailable")
+                else:
+                    route.continue_()
+            return caps
+        pg.route("**/v1/capabilities", make(state, kind))
+        pg.goto(f"{B}/home.html", wait_until="load")
+        pg.wait_for_selector(".banner.error #retry", timeout=8000)
+        err = pg.evaluate("() => document.querySelector('.banner.error')?.textContent || ''")
+        pg.click("#retry")
+        pg.wait_for_selector(".card[data-id]", timeout=8000)
+        cards = pg.eval_on_selector_all(".card[data-id]", "e => e.length")
+        out[kind] = {"err": "连接不上" in err, "probes": state["n"], "cards": cards,
+                     "mode": pg.evaluate("async () => (await import('/static/js/api.js')).api.mode")}
+        pg.unroute("**/v1/capabilities")
+    ok = all(v["err"] and v["probes"] == 2 and v["cards"] > 0 and v["mode"] == "live" for v in out.values())
+    check("能力探测重试：首次失败（网络 / 503）→「连接不上」→ 重试重新探测并恢复列表", ok, f"{out}")
 
 
 def test_ai_blocked_on_failed_save(pg):
@@ -711,19 +844,24 @@ def test_unsaved_lock(pg):
 
 
 def test_candidate_bad_member(pg):
+    """接受候选时服务端解析不到成员 → 422 detail.unresolved：计划不变，卡片列出解析不到的成员。"""
+    def handle(route):
+        route.fulfill(status=422, content_type="application/json",
+                      body='{"detail": {"message": "候选成员在当前装配体里解析不到，未写入计划", '
+                           '"unresolved": [{"candidate": "c1", "member": {"part": "SYN-MISSING-XYZ"}, "reason": "当前装配体里没有这个零件"}]}}')
+    pg.route("**/plan/candidates/accept", handle)
     pg.goto(f"{B}/index.html?project=gearbox&stage=plan", wait_until="networkidle")
     pg.wait_for_timeout(2600)
     r = pg.evaluate("""async () => {
         const st = await import('/js/state.js');
-        // 给第一个候选引用的组（g-motor）塞一个 assembly 里不存在的成员
-        const g = (st.state.structure.groups||[]).find(x=>x.id==='g-motor');
-        g.parts.push('SYN-MISSING-XYZ'); st.bus.emit('structure');
         const before = st.state.plan.figures.length;
-        document.querySelector('[data-accept]')?.click();
-        await new Promise(x=>setTimeout(x,300));
-        return { added: st.state.plan.figures.length > before };
+        document.querySelector('.cand-card.pass [data-accept]')?.click();
+        await new Promise(x=>setTimeout(x,900));
+        return { added: st.state.plan.figures.length > before,
+                 listed: (document.querySelector('.cand-unresolved')?.textContent || '').includes('SYN-MISSING-XYZ') };
     }""")
-    check("候选失效成员：组内含不存在的零件时整个接受被阻止（不建图）", not r["added"], f"figureAdded={r['added']}")
+    check("候选失效成员：服务端 422 unresolved → 不建图，卡片列出解析不到的成员", not r["added"] and r["listed"],
+          f"figureAdded={r['added']} listed={r['listed']}")
 
 
 def test_static_write_guard(ctx):
@@ -768,14 +906,47 @@ def test_static_no_write(ctx):
     pg.close()
 
 
+def _up(url):
+    try:
+        import urllib.request
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=2).read()
+        return True
+    except Exception:
+        return False
+
+
+def ensure_servers():
+    """缺哪个起哪个：8803 新版 mock、8805 旧版 mock（--old-backend）、8808 静态站（先 build_static）。"""
+    procs = []
+    if not _up(f"{B}/v1/capabilities"):
+        procs.append(subprocess.Popen([sys.executable, str(DEV / "mock_server.py"), "--port", "8803"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    if not _up(f"{LB}/home.html"):
+        procs.append(subprocess.Popen([sys.executable, str(DEV / "mock_server.py"), "--port", "8805", "--old-backend"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    if not _up(f"{STATIC}/home.html"):
+        subprocess.run([sys.executable, str(DEV / "build_static.py")], check=True, stdout=subprocess.DEVNULL)
+        procs.append(subprocess.Popen([sys.executable, "-m", "http.server", "8808", "--bind", "127.0.0.1"],
+                                      cwd=str(DEV / "static-site"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    for pr in procs:
+        atexit.register(pr.terminate)
+    import time
+    for url in (f"{B}/v1/capabilities", f"{LB}/home.html", f"{STATIC}/home.html"):
+        for _ in range(40):
+            if _up(url):
+                break
+            time.sleep(0.25)
+
+
 def main():
+    ensure_servers()
     with sync_playwright() as p:
         b = p.chromium.launch()
         ctx = b.new_context(viewport={"width": 1440, "height": 900})
         for fn in (test_xss, test_save_race, test_concurrent_flush, test_flush_noop_then_edit,
                    test_flush_after_failure, test_unsaved_lock, test_render_evidence_race, test_export_late_callback,
                    test_live_export_conflict, test_render_job_failure, test_render_late_failure_read,
-                   test_ai_draft_contract, test_ai_blocked_on_failed_save,
+                   test_ai_draft_contract, test_ai_blocked_on_failed_save, test_import_lifecycle, test_probe_retry,
                    test_candidate_resolve, test_candidate_bad_member, test_keyboard_continuous, test_upload_retry):
             pg = ctx.new_page()
             try:

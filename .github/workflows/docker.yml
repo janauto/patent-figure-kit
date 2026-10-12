@@ -1,0 +1,139 @@
+# 服务器形态（架构 §4 T2）：构建 linux/amd64 镜像 → compose 起 app + Caddy → 从 runner（第二客户端）经 HTTPS
+# 跑冒烟（from-example → 候选 → 出图 → 导出 → 下载；浏览器 Cookie 与 Agent Bearer 两条鉴权路）。
+# GHCR 推送只在手动触发且勾选、并且仓库变量 PFK_OUTBOUND_GATE=passed（架构 §7.4 首次外发门禁）时才执行。
+name: docker
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-compose.yml
+      - Caddyfile
+      - requirements-*.txt
+      - pyproject.toml
+      - scripts/patent_figure/deploy_opts.py
+      - scripts/deploy_smoke.py
+      - scripts/workbench.py
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+    inputs:
+      push_ghcr:
+        description: "推送镜像到 GHCR（外发：须先过架构 §7.4 首次外发门禁）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-smoke:
+    name: 构建 + 容器冒烟（经 Caddy）
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      PFK_IMAGE: patent-figure-kit:ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建镜像（linux/amd64）
+        run: docker buildx build --platform linux/amd64 --load -t "$PFK_IMAGE" .
+      - name: 镜像检查：非 root、无密钥、OCP 可导入、中文字体在
+        run: |
+          test "$(docker run --rm --entrypoint id "$PFK_IMAGE" -u)" = "10001"
+          docker run --rm --entrypoint sh "$PFK_IMAGE" -c 'env | grep -E "TOKEN|KEY|SECRET" && exit 1 || exit 0'
+          docker run --rm --entrypoint python "$PFK_IMAGE" -c "import OCP.STEPControl, pypdfium2, fastapi; print('imports ok')"
+          docker run --rm --entrypoint sh "$PFK_IMAGE" -c 'ls /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
+          docker run --rm --entrypoint pfk "$PFK_IMAGE" doctor --profile web
+      - name: 镜像内验收（一次性容器；N10 金样在 Linux / Python 3.11 上复核）
+        run: |
+          mkdir -p out && chmod 777 out
+          docker run --rm --user 0:0 -e HOME=/tmp/h -v "$PWD/out:/out" --entrypoint pfk "$PFK_IMAGE" \
+            acceptance --json /out/acceptance-image.json
+      - name: 准备 .env（随机 token 与 Basic Auth 密码，只在本次运行内存在）
+        run: |
+          TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          PASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(16))')"
+          echo "::add-mask::$TOKEN"
+          echo "::add-mask::$PASS"
+          HASH="$(docker run --rm caddy:2.8.4-alpine caddy hash-password --plaintext "$PASS")"
+          {
+            echo "PFK_TENANT=ci"
+            echo "WORKBENCH_TOKEN=$TOKEN"
+            echo "PFK_PUBLIC_URL=https://localhost:8443"
+            echo "PFK_SITE_ADDRESS=localhost"
+            echo "PFK_HTTP_PORT=8080"
+            echo "PFK_HTTPS_PORT=8443"
+            echo "PFK_BASIC_USER=pfk"
+            echo "PFK_BASIC_HASH='$HASH'"
+            echo "PFK_IMAGE=$PFK_IMAGE"
+          } > .env
+          echo "WORKBENCH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "PFK_BASIC_PASS=$PASS" >> "$GITHUB_ENV"
+      - name: docker compose up（app 健康后才起 Caddy）
+        run: |
+          docker compose up -d --no-build
+          for _ in $(seq 1 90); do
+            st="$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q app)")"
+            [ "$st" = "healthy" ] && break
+            sleep 2
+          done
+          test "$st" = "healthy"
+          for _ in $(seq 1 30); do
+            docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt caddy-root.crt 2>/dev/null && break
+            sleep 2
+          done
+          test -s caddy-root.crt
+      - name: 后端端口不可绕过代理直连（非可信对端 → 403）
+        run: |
+          code="$(docker run --rm --network pfk-ci_pfk curlimages/curl:8.10.1 -s -o /dev/null -w '%{http_code}' http://app:8790/healthz)"
+          echo "直连后端：HTTP $code"
+          test "$code" = "403"
+      - name: 服务以非 root 运行
+        run: test "$(docker compose exec -T app id -u)" = "10001"
+      - name: 冒烟（runner 作为第二客户端，校验 Caddy 证书链；再用真浏览器经代理开首页与工程页）
+        run: |
+          python3 -m pip install --user playwright==1.58.0
+          python3 -m playwright install --with-deps chromium
+          python3 scripts/deploy_smoke.py --url https://localhost:8443 --cacert caddy-root.crt --browser
+      - name: curl 再验一次 HTTPS（独立 TLS 实现）
+        run: |
+          code="$(curl -sS --cacert caddy-root.crt -u "pfk:$PFK_BASIC_PASS" -o /dev/null -w '%{http_code}' https://localhost:8443/)"
+          test "$code" = "200"
+          code="$(curl -sS --cacert caddy-root.crt -o /dev/null -w '%{http_code}' https://localhost:8443/)"
+          test "$code" = "401"
+      - name: 日志（失败时）
+        if: failure()
+        run: docker compose logs --no-color | tail -n 300
+      - name: 收尾
+        if: always()
+        run: |
+          docker compose down -v || true
+          rm -f .env
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-smoke
+          path: out/
+          if-no-files-found: ignore
+
+  push-ghcr:
+    name: 推送 GHCR（手动 + 外发门禁）
+    needs: build-smoke
+    if: github.event_name == 'workflow_dispatch' && inputs.push_ghcr && vars.PFK_OUTBOUND_GATE == 'passed'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 构建并推送（linux/amd64）
+        run: |
+          IMG="ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/patent-figure-kit"
+          docker buildx build --platform linux/amd64 --push -t "$IMG:${GITHUB_SHA::12}" .
