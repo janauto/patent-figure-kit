@@ -12,7 +12,7 @@
 | `package/docx-disclosure-p1.png` | 交底版 Word 的 Quick Look 文档预览（**非实际分页验证**：底部会露出下一张图；Word 只做结构核验，实际排版以 Word 打开为准） | macOS Quick Look（`qlmanage`）预览渲染；非 macOS 上跳过 |
 | `package/dxf-source.png` | 交底版 DXF 在查看器里的样子 | `ezdxf` drawing add-on（matplotlib 后端），白底黑线 |
 | `package/figure-description.txt`、`package/checklist.txt` | 导出包里的 `附图说明.txt` 与 `核对清单.txt` 原文 | 原样拷出 |
-| `readme/runs/` | README 性能表、验收、安装时长与零件数的原始记录（命令、机型、版本、缓存状态、每次样本），索引见 `readme/runs/README.md` | `measure_readme.py`、`scripts/bench.py`、`acceptance/run_acceptance.py`、`安装并启动.command` 的实际运行输出，已去掉本机路径与 token |
+| `readme/runs/` | README 性能表、验收、安装时长与零件数的原始记录（命令、机型、版本、缓存状态、每次样本），索引见 `readme/runs/README.md` | `measure_readme.py`、`acceptance/run_acceptance.py`、`安装并启动.command` 的实际运行输出，已去掉本机路径与 token |
 | `screens/` | 五屏四态截图（20 张 + 补充 3 张），`screens.json` 逐张说明来源 | `webui/dev/capture_live.py` |
 
 ## 重拍

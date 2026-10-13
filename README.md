@@ -111,7 +111,9 @@
 - **AI 是可选项。** AI 只用于起草零件中文名、识别结构分组、整理流程图文字，碰不到坐标、字高和编号。通道关闭时不发出任何 AI 请求，流程照样走完（零件名在术语页自己填）。
   - **默认是「自动」**：检测到环境变量 `DEEPSEEK_API_KEY`，或本机装有 CodeBuddy CLI，就会启用通道，不需要你另外配置。
   - **AI 起名：逐次确认。** 外发前界面列明发给谁、发哪些字段（只含你选中的空白件）。
-  - **AI 识别结构：不逐次确认。** 通道可用时，上传 STEP 或载入示例后，工作台会在后台**自动**把零件清单（零件名、尺寸、装配路径）发给该通道识别一次；上传对话框会提示。几何模型本身不外发。
+  - **AI 识别结构：不逐次确认。** 通道可用时，上传 STEP 或载入示例后，工作台会在后台**自动**调用该通道识别一次（上传对话框会提示）。
+    - **会发送（由几何派生的元数据）**：每个零件的零件名 / 代号、实例数、包围盒尺寸、零件中心坐标、装配路径；整机包围盒与主轴方向；已经填过的人工名称。工程里有术语库或 BOM 映射时，二者整体附入。被计划 `source.exclude` 排除的零件和退化件不发送。
+    - **不发送**：STEP 文件本身，以及任何几何数据（实体、曲面、网格）。注意：坐标、尺寸、装配路径虽不是几何文件，仍能反映零件的位置关系和装配结构。
   - **怎样关闭（请在导入未公开的模型之前设好）**：启动前设环境变量 `PFK_AI_PROVIDER=none`（例：`PFK_AI_PROVIDER=none python3 scripts/pfk_cli.py start`），或在 `~/.config/patent-workbench/config.json` 里写 `"provider": "none"`。首页右上角显示「AI 未接入」即为已关闭。当前版本的「设置」对话框里还没有「不使用 AI」选项，只能用这两种方式关闭。
 - **演示站无需上传。** 静态演示站只放三个公开示例的预计算结果，不能上传，也不出图。
 - **数据放在哪。** 工程数据在 `~/.patent-workbench`，设置与密钥在 `~/.config/patent-workbench/config.json`（权限 0600），都不在仓库里。密钥只经环境变量或本机配置文件提供，不会写进仓库；请不要提交这两个目录。
@@ -295,7 +297,7 @@ docker compose up -d
     <td align="center" width="50%"><img src="docs/assets/readme/feat-candidate-blocked.jpg" alt="候选分图：整机兜底候选被拦，写明标号太多找不到互不交叉的位置，并给建议"><br>
       <sub><b>候选分图</b> — 子装配、同轴组、沿主轴分解、整机兜底；每张都实际渲染过闸，被拦的写明原因与建议。</sub></td>
     <td align="center" width="50%"><img src="docs/assets/readme/feat-structure.jpg" alt="结构树：按 STEP 装配层级分组，3D 按结构着色"><br>
-      <sub><b>结构识别</b> — 按 STEP 装配层级自动分组；AI 通道可用时，导入后会<b>自动</b>外发零件清单让 AI 归成看得懂的结构组（不逐次确认，关闭方式见<a href="#数据与隐私">数据与隐私</a>）。</sub></td>
+      <sub><b>结构识别</b> — 按 STEP 装配层级自动分组；AI 通道可用时，导入后会<b>自动</b>外发零件名、尺寸、中心坐标、装配路径等元数据，让 AI 归成看得懂的结构组（不逐次确认；外发字段与关闭方式见<a href="#数据与隐私">数据与隐私</a>）。</sub></td>
   </tr>
   <tr>
     <td align="center"><img src="docs/assets/readme/feat-explode.jpg" alt="透明度调低、按结构拉开爆炸的减速器"><br>
@@ -329,7 +331,7 @@ docker compose up -d
 
 ## 性能（实测）
 
-每张表都附原始记录（命令、机型、版本、缓存状态、每次样本），索引见 [`docs/assets/readme/runs/`](docs/assets/readme/runs/README.md)。
+下表附原始记录（命令、机型、版本、缓存状态、每次样本），索引见 [`docs/assets/readme/runs/`](docs/assets/readme/runs/README.md)。
 
 **三个公开示例 · 金路径分段**（真实工作台，REST 接口与界面同一组）。每次测量都用全新数据目录和刚启动的工作台进程（几何缓存为空），AI 关闭；每项 3 次样本取中位，单位秒，计时为服务端作业起止时间。测于 Apple M5 · 10 核 · 16 GB · macOS 27.0.1 · Python 3.9.6 · cadquery-ocp 7.7.2 · 提交 7f2d653（工作树无改动）。原始记录：[`perf-golden.json`](docs/assets/readme/runs/perf-golden.json)；零件数见 [`models.json`](docs/assets/readme/runs/models.json)。
 
@@ -344,35 +346,7 @@ docker compose up -d
 - 「改计划后出图」= 改一个零件中文名后重出（消隐缓存命中，版面与标号重算）。
 - 复测：`python3 docs/assets/measure_readme.py --reps 3 --out <文件>`（冷渲染加 `--no-suggest`）。
 
-**规模档与改前 / 改后**。同一台机器（同上）、同一生成器（本仓库 `make_demo_assemblies.py`）与同一种子生成的整机样例；改前 = 提交 `54f9425`（内核稳固之前，独立检出），改后 = 本仓库提交 `d54f8aa`（出图代码与 7f2d653 相同）。命令：
-
-```bash
-python3 scripts/bench.py --tiers 50 200 --reps 3 --amortize-k 5 --seed 12345 --json bench-after.json
-python3 scripts/bench.py --repo <54f9425 的检出> --tiers 50 200 --reps 3 --amortize-k 5 --seed 12345 --json bench-before.json
-```
-
-原始记录：[`bench-before.json`](docs/assets/readme/runs/bench-before.json) / [`bench-after.json`](docs/assets/readme/runs/bench-after.json)，命令与环境见同名 `.env.json`。
-
-分段耗时（秒，每项 3 次样本取中位）：
-
-| 指标 | 50 实例 改前 | 50 实例 改后 | 200 实例 改前 | 200 实例 改后 |
-| --- | ---: | ---: | ---: | ---: |
-| 解析装配 | 0.51 | 0.51 | 0.53 | 0.54 |
-| 生成 3D 网格（GLB） | 0.47 | 0.47 | 0.47 | 0.48 |
-| 出图 · 无缓存 | 0.68 | 0.74 | 0.89 | 1.00 |
-| 出图 · 消隐全命中 | 0.65 | 0.65 | 0.71 | 0.73 |
-| 出图 · 改计划重排 | 0.64 | 0.66 | 0.71 | 0.74 |
-| 出图 · 重出图 | 0.68 | 0.74 | 0.88 | 1.01 |
-
-连续出图摊销（同一工程连续出图 5 次的**总耗时**，秒；**单轮测量，不是中位数**）：
-
-| 路径 | 50 实例 改前 | 50 实例 改后 | 200 实例 改前 | 200 实例 改后 |
-| --- | ---: | ---: | ---: | ---: |
-| 每次起子进程 | 3.32 | 3.42 | 4.30 | 4.17 |
-| 常驻 worker（OCP 只导入一次） | —（改前没有 worker） | 0.93 | — | 1.68 |
-
-- 规模档样例是「一张整机装配图标 N 个零件」，标号远超版面上限，渲染在排版阶段就被闸门拦下（退出码 1）——测到的是解析、消隐、排版到被拦为止，这本身是闸门正确的表现；两条路径退出码一致（记录里 `equivalent_work: true`）。能落图的真实耗时看上一张表。
-- 改后冷渲染略慢，来自原子发布、按 key 的跨进程锁和写入校验，是并发安全与过闸正确性的固定成本；工作台里的收益在常驻 worker：这一轮单次测量里，连续 5 次出图比每次起子进程快 3.7 倍（50 实例）/ 2.5 倍（200 实例）。
+**大装配体性能基准：待 M2。** 现有 `scripts/bench.py --scaled` 生成的 50 / 200 实例样例是「一张图标全部零件」，单图标记数超过上限 20，在计划校验阶段（`E_TOO_MANY_LABELS`）就退出，没有走到消隐、排版和发布，所以不能代表大装配体的出图、缓存或常驻 worker 性能，这一版不发布这类数字。M2 会改用拆成多图（每图不超过 20 个标记）、能完整出图的样例重测。
 
 ## 与常见做法对比
 
@@ -390,6 +364,7 @@ python3 scripts/bench.py --repo <54f9425 的检出> --tiers 50 200 --reps 3 --am
 | 项 | 现在怎么办 | 为什么现在不做 |
 | --- | --- | --- |
 | 剖视图 / 局部放大 | 需要时另行绘制 | 需要剖切面与剖面线规则的独立研究，先保证常规视图的确定性 |
+| 大装配体性能基准 | 只发布三个公开示例的金路径实测 | 现有缩放样例在计划校验阶段就退出，不代表出图性能；要换成拆成多图、能完整出图的样例再测 |
 | 说明书对表（件号 ↔ 说明书双向核对） | 导出包附《核对清单.txt》，人工核对 | 需要先设计零件身份与定位模型，否则对不准 |
 | 改版重算（模型改版后保留标号） | 改版后整套重出 | 需要稳定的零件身份与标号迁移模型，不想给出「没变的零件照旧」的假承诺 |
 | 多局版式（USPTO、EPO 等） | 只做 CNIPA 版式，中文术语 | 先把一局做扎实 |
@@ -402,7 +377,7 @@ python3 scripts/bench.py --repo <54f9425 的检出> --tiers 50 200 --reps 3 --am
 - Word 按文档结构核验（每页一张图、图片不超版心、分页），实际排版以 Word 打开为准；PDF 按文件里的页面几何逐页核验。
 - 选「保守版心 165×245」时，个别高图缩放后字高会低于 3.5 mm，会被如实判不通过，界面会提示；默认用标准版心。
 - 附图标记按术语表顺序发号；设为「不标」的术语（如标准件）保留它的号位，所以号码可能不连续（上面示例的 9 号即行星销）。
-- 隐藏线消隐基于 OpenCASCADE；数千个零件的超大装配体会很慢，可先用 `--include` / `--exclude` 收窄范围。DWG 依赖 AutoCAD 或 LibreDWG，LibreDWG 不适合超大的合并图纸。
+- 隐藏线消隐基于 OpenCASCADE；数千个零件的超大装配体还没有做性能基准，可能较慢，可先用 `--include` / `--exclude` 收窄范围。DWG 依赖 AutoCAD 或 LibreDWG，LibreDWG 不适合超大的合并图纸。
 - 间接依赖未锁版本（直接依赖已锁），由 CI 矩阵兜底。
 - 核验只对导出包原文件有效：每个文件写出时记 sha256，改动一个字节即判「文件已被修改」。
 - 作业与导出记录目前只增不删（服务器形态请定期清理数据卷）。
@@ -458,7 +433,7 @@ docs/assets/             README 用图及其生成脚本（capture_readme.py）
 
 ## English
 
-**墨线 (working name) · patent-figure-kit** turns a 3D CAD assembly (STEP) into patent drawings laid out to CNIPA (China) formal requirements. Hidden-line removal is computed from the geometry; reference numerals, leader lines and sheet layout are computed by the program. An LLM only fills in blanks (Chinese part names, structure groups, flowchart wording) and never touches coordinates, text heights or numerals. Drawing generation runs locally. The AI channel is optional, but note: it is **on by default** when a `DEEPSEEK_API_KEY` or a local CodeBuddy CLI is detected; AI part naming asks before each request, while **AI structure recognition sends the parts list (names, sizes, assembly paths) automatically after a STEP upload or example load** — the geometry itself is not sent. To turn AI off, start with `PFK_AI_PROVIDER=none` or put `"provider": "none"` in `~/.config/patent-workbench/config.json` before importing unpublished models; the settings dialog has no "no AI" option yet.
+**墨线 (working name) · patent-figure-kit** turns a 3D CAD assembly (STEP) into patent drawings laid out to CNIPA (China) formal requirements. Hidden-line removal is computed from the geometry; reference numerals, leader lines and sheet layout are computed by the program. An LLM only fills in blanks (Chinese part names, structure groups, flowchart wording) and never touches coordinates, text heights or numerals. Drawing generation runs locally. The AI channel is optional, but note: it is **on by default** when a `DEEPSEEK_API_KEY` or a local CodeBuddy CLI is detected; AI part naming asks before each request, while **AI structure recognition runs automatically after a STEP upload or example load** and sends geometry-derived metadata: per part its name/code, instance count, bounding-box size, center coordinates and assembly path; the overall bounding box and principal axis; any part names already entered; plus the whole glossary and BOM mapping when the project has them (parts excluded by the plan are left out). The STEP file and any geometry (solids, surfaces, meshes) are not sent — but coordinates, sizes and paths still reveal how parts are positioned and assembled. To turn AI off, start with `PFK_AI_PROVIDER=none` or put `"provider": "none"` in `~/.config/patent-workbench/config.json` before importing unpublished models; the settings dialog has no "no AI" option yet.
 
 - **Three steps**: drop a STEP → review candidate figure splits (each one is actually rendered and gated) → render through 13 QA gates and export a package: filing PDF/Word (figure numbers only), disclosure PDF/Word (with a part table), DXF sources, a figure-description text and a manual-review checklist. Failed figures never reach the deliverable folder.
 - **Determinism**: on the verified environments listed above, the same plan renders drawings with identical normalized entity digests (6-decimal coordinates, geometry and text entities, file header and handles excluded). Acceptance node N10 checks this against a golden digest; this round all 19 nodes passed on macOS 27.0.1 / Python 3.9.6 (record: `docs/assets/readme/runs/acceptance.jsonl`).
