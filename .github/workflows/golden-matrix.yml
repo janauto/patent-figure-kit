@@ -89,9 +89,19 @@ jobs:
       - name: install.sh --no-start（Linux）
         if: runner.os == 'Linux'
         run: ./install.sh --no-start && ./install.sh --no-start
-      - name: 安装并启动.command --no-start（macOS）
+      # 复现用户双击的环境：系统自带 /bin/bash 3.2 + 终端默认的 UTF-8 区域设置。runner 的 PATH 里 bash 是
+      # Homebrew 5.x、默认区域未设定，都会掩盖「$VAR 后紧跟全角字符被并进变量名」这类问题（WP4b）。
+      - name: 安装脚本 --no-start（macOS：/bin/bash 3.2 + zh_CN.UTF-8）
         if: runner.os == 'macOS'
-        run: ./安装并启动.command --no-start && ./安装并启动.command --no-start
+        env:
+          LANG: zh_CN.UTF-8
+          LC_ALL: zh_CN.UTF-8
+        run: |
+          v="$(/bin/bash -c 'echo "$BASH_VERSION"')"
+          echo "/bin/bash $v"
+          case "$v" in 3.*) ;; *) echo "::warning::/bin/bash 不是 3.x（${v}），本步不再覆盖 macOS 自带 bash" ;; esac
+          /bin/bash ./install.sh --no-start
+          /bin/bash ./安装并启动.command --no-start
       - name: 安装并启动.ps1 -NoStart（Windows PowerShell 5.1，即「右键运行」的解释器）
         if: runner.os == 'Windows'
         shell: powershell
