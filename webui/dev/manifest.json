@@ -284,7 +284,7 @@
     "assembly": {
      "schema": "patent-assembly/1",
      "source": {
-      "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-planetary-gearbox.stp",
+      "step": "examples/planetary-gearbox/demo-planetary-gearbox.stp",
       "sha256": "b3f786bc8ba867bb2b91c7ec0029d5f27a921e58a34bf2812b8b128b88c565d0",
       "instances": 27,
       "distinct": 15
@@ -1840,7 +1840,7 @@
     "assembly": {
      "schema": "patent-assembly/1",
      "source": {
-      "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-bench-vise.stp",
+      "step": "examples/planetary-gearbox/demo-bench-vise.stp",
       "sha256": "3e0ac05c6d72eaf5ab303e412303c889d08c33f7b4d406ecae935056544da400",
       "instances": 20,
       "distinct": 12
@@ -2860,7 +2860,7 @@
     "assembly": {
      "schema": "patent-assembly/1",
      "source": {
-      "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-ball-valve.stp",
+      "step": "examples/planetary-gearbox/demo-ball-valve.stp",
       "sha256": "7d07a043f93d736fdbf657846d490635acce071edeed9fc0703123c8a28c42cc",
       "instances": 18,
       "distinct": 9
