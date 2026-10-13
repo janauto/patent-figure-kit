@@ -1,0 +1,192 @@
+{"cmd": ["/bin/bash", "./安装并启动.command", "--no-start", "--data", "<数据目录>"], "start": "2026-10-14 00:10:20", "machine": "Apple M5", "ncpu": 10, "mem_gb": 16, "os": "macOS 27.0.1", "python3": "Python 3.9.6", "commit": "d54f8aa", "dirty_files": ["README.md"], "env": {"LANG": null, "LC_ALL": null, "LC_CTYPE": null, "PIP_NO_CACHE_DIR": "1", "PFK_AI_PROVIDER": null, "PFK_HOME": "<安装目录>"}, "load_avg_at_start": [8.4736328125, 11.943359375, 9.39306640625]}
+{"t": 0.024, "line": ""}
+{"t": 0.025, "line": "==== patent-figure-kit 安装并启动  2026-10-14 00:10:20 ===="}
+{"t": 0.025, "line": "仓库：<仓库>"}
+{"t": 0.025, "line": "安装目录：<安装目录>"}
+{"t": 0.156, "line": "Python：/opt/homebrew/bin/python3.12（3.12）"}
+{"t": 0.194, "line": "安装依赖（首次约需几分钟，取决于网络；几何内核约 150 MB）…"}
+{"t": 1.887, "line": "Requirement already satisfied: pip in <安装目录>/venv-py3.12/lib/python3.12/site-packages (26.2.1)"}
+{"t": 14.095, "line": "Collecting cadquery-ocp==7.7.2 (from -r <仓库>/requirements-pinned.txt (line 14))"}
+{"t": 17.465, "line": "  Downloading cadquery_ocp-7.7.2-cp312-cp312-macosx_11_0_arm64.whl.metadata (2.0 kB)"}
+{"t": 19.204, "line": "Collecting ezdxf==1.4.2 (from -r <仓库>/requirements-pinned.txt (line 15))"}
+{"t": 19.745, "line": "  Downloading ezdxf-1.4.2-cp312-cp312-macosx_11_0_arm64.whl.metadata (9.8 kB)"}
+{"t": 21.016, "line": "Collecting numpy==2.0.2 (from -r <仓库>/requirements-pinned.txt (line 16))"}
+{"t": 21.439, "line": "  Downloading numpy-2.0.2-cp312-cp312-macosx_14_0_arm64.whl.metadata (60 kB)"}
+{"t": 22.59, "line": "Collecting jsonschema==4.25.1 (from -r <仓库>/requirements-pinned.txt (line 17))"}
+{"t": 22.955, "line": "  Downloading jsonschema-4.25.1-py3-none-any.whl.metadata (7.6 kB)"}
+{"t": 23.632, "line": "Collecting matplotlib==3.9.4 (from -r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 24.061, "line": "  Downloading matplotlib-3.9.4-cp312-cp312-macosx_11_0_arm64.whl.metadata (11 kB)"}
+{"t": 24.73, "line": "Collecting pytest==8.4.2 (from -r <仓库>/requirements-pinned.txt (line 19))"}
+{"t": 25.126, "line": "  Downloading pytest-8.4.2-py3-none-any.whl.metadata (7.7 kB)"}
+{"t": 25.832, "line": "Collecting fastapi==0.128.8 (from -r <仓库>/requirements-web.txt (line 17))"}
+{"t": 26.219, "line": "  Downloading fastapi-0.128.8-py3-none-any.whl.metadata (30 kB)"}
+{"t": 26.804, "line": "Collecting python-multipart==0.0.20 (from -r <仓库>/requirements-web.txt (line 18))"}
+{"t": 27.273, "line": "  Downloading python_multipart-0.0.20-py3-none-any.whl.metadata (1.8 kB)"}
+{"t": 27.821, "line": "Collecting uvicorn==0.39.0 (from -r <仓库>/requirements-web.txt (line 19))"}
+{"t": 28.218, "line": "  Downloading uvicorn-0.39.0-py3-none-any.whl.metadata (6.8 kB)"}
+{"t": 28.628, "line": "Collecting httpx==0.28.1 (from -r <仓库>/requirements-web.txt (line 20))"}
+{"t": 29.028, "line": "  Downloading httpx-0.28.1-py3-none-any.whl.metadata (7.1 kB)"}
+{"t": 29.84, "line": "Collecting openpyxl==3.1.5 (from -r <仓库>/requirements-web.txt (line 21))"}
+{"t": 30.243, "line": "  Downloading openpyxl-3.1.5-py2.py3-none-any.whl.metadata (2.5 kB)"}
+{"t": 30.727, "line": "Collecting python-docx==1.2.0 (from -r <仓库>/requirements-web.txt (line 22))"}
+{"t": 31.129, "line": "  Downloading python_docx-1.2.0-py3-none-any.whl.metadata (2.0 kB)"}
+{"t": 31.819, "line": "Collecting pypdf==6.7.4 (from -r <仓库>/requirements-web.txt (line 23))"}
+{"t": 32.212, "line": "  Downloading pypdf-6.7.4-py3-none-any.whl.metadata (7.1 kB)"}
+{"t": 32.898, "line": "Collecting pypdfium2==5.10.1 (from -r <仓库>/requirements-web.txt (line 24))"}
+{"t": 33.304, "line": "  Downloading pypdfium2-5.10.1-py3-none-macosx_12_0_arm64.whl.metadata (70 kB)"}
+{"t": 34.23, "line": "Collecting pyparsing>=2.0.1 (from ezdxf==1.4.2->-r <仓库>/requirements-pinned.txt (line 15))"}
+{"t": 34.791, "line": "  Downloading pyparsing-3.3.3-py3-none-any.whl.metadata (5.9 kB)"}
+{"t": 35.253, "line": "Collecting typing_extensions>=4.6.0 (from ezdxf==1.4.2->-r <仓库>/requirements-pinned.txt (line 15))"}
+{"t": 35.666, "line": "  Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)"}
+{"t": 36.542, "line": "Collecting fonttools (from ezdxf==1.4.2->-r <仓库>/requirements-pinned.txt (line 15))"}
+{"t": 36.943, "line": "  Downloading fonttools-4.66.1-cp312-cp312-macosx_10_13_universal2.whl.metadata (130 kB)"}
+{"t": 37.924, "line": "Collecting attrs>=22.2.0 (from jsonschema==4.25.1->-r <仓库>/requirements-pinned.txt (line 17))"}
+{"t": 38.218, "line": "  Downloading attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)"}
+{"t": 38.568, "line": "Collecting jsonschema-specifications>=2023.03.6 (from jsonschema==4.25.1->-r <仓库>/requirements-pinned.txt (line 17))"}
+{"t": 38.973, "line": "  Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl.metadata (2.9 kB)"}
+{"t": 39.585, "line": "Collecting referencing>=0.28.4 (from jsonschema==4.25.1->-r <仓库>/requirements-pinned.txt (line 17))"}
+{"t": 39.877, "line": "  Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)"}
+{"t": 40.755, "line": "Collecting rpds-py>=0.7.1 (from jsonschema==4.25.1->-r <仓库>/requirements-pinned.txt (line 17))"}
+{"t": 41.107, "line": "  Downloading rpds_py-2026.9.1-cp312-cp312-macosx_11_0_arm64.whl.metadata (4.1 kB)"}
+{"t": 42.085, "line": "Collecting contourpy>=1.0.1 (from matplotlib==3.9.4->-r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 42.421, "line": "  Downloading contourpy-1.4.0-cp312-cp312-macosx_11_0_arm64.whl.metadata (3.8 kB)"}
+{"t": 42.749, "line": "Collecting cycler>=0.10 (from matplotlib==3.9.4->-r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 43.059, "line": "  Downloading cycler-0.12.1-py3-none-any.whl.metadata (3.8 kB)"}
+{"t": 44.107, "line": "Collecting kiwisolver>=1.3.1 (from matplotlib==3.9.4->-r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 44.417, "line": "  Downloading kiwisolver-1.5.1-cp312-cp312-macosx_11_0_arm64.whl.metadata (5.2 kB)"}
+{"t": 45.024, "line": "Collecting packaging>=20.0 (from matplotlib==3.9.4->-r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 45.358, "line": "  Downloading packaging-26.3-py3-none-any.whl.metadata (3.5 kB)"}
+{"t": 46.012, "line": "Collecting pillow>=8 (from matplotlib==3.9.4->-r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 46.434, "line": "  Downloading pillow-12.3.0-cp312-cp312-macosx_11_0_arm64.whl.metadata (9.1 kB)"}
+{"t": 46.816, "line": "Collecting python-dateutil>=2.7 (from matplotlib==3.9.4->-r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 47.151, "line": "  Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)"}
+{"t": 47.46, "line": "Collecting iniconfig>=1 (from pytest==8.4.2->-r <仓库>/requirements-pinned.txt (line 19))"}
+{"t": 47.778, "line": "  Downloading iniconfig-2.3.1-py3-none-any.whl.metadata (2.8 kB)"}
+{"t": 48.148, "line": "Collecting pluggy<2,>=1.5 (from pytest==8.4.2->-r <仓库>/requirements-pinned.txt (line 19))"}
+{"t": 48.461, "line": "  Downloading pluggy-1.6.0-py3-none-any.whl.metadata (4.8 kB)"}
+{"t": 48.772, "line": "Collecting pygments>=2.7.2 (from pytest==8.4.2->-r <仓库>/requirements-pinned.txt (line 19))"}
+{"t": 49.364, "line": "  Downloading pygments-2.21.0-py3-none-any.whl.metadata (2.5 kB)"}
+{"t": 49.797, "line": "Collecting starlette<1.0.0,>=0.40.0 (from fastapi==0.128.8->-r <仓库>/requirements-web.txt (line 17))"}
+{"t": 50.081, "line": "  Downloading starlette-0.52.1-py3-none-any.whl.metadata (6.3 kB)"}
+{"t": 50.823, "line": "Collecting pydantic>=2.7.0 (from fastapi==0.128.8->-r <仓库>/requirements-web.txt (line 17))"}
+{"t": 51.163, "line": "  Downloading pydantic-2.14.1-py3-none-any.whl.metadata (133 kB)"}
+{"t": 52.126, "line": "Collecting typing-inspection>=0.4.2 (from fastapi==0.128.8->-r <仓库>/requirements-web.txt (line 17))"}
+{"t": 52.472, "line": "  Downloading typing_inspection-0.4.4-py3-none-any.whl.metadata (2.6 kB)"}
+{"t": 53.122, "line": "Collecting annotated-doc>=0.0.2 (from fastapi==0.128.8->-r <仓库>/requirements-web.txt (line 17))"}
+{"t": 53.457, "line": "  Downloading annotated_doc-0.0.5-py3-none-any.whl.metadata (6.5 kB)"}
+{"t": 53.808, "line": "Collecting click>=7.0 (from uvicorn==0.39.0->-r <仓库>/requirements-web.txt (line 19))"}
+{"t": 54.112, "line": "  Downloading click-8.5.0-py3-none-any.whl.metadata (2.6 kB)"}
+{"t": 54.421, "line": "Collecting h11>=0.8 (from uvicorn==0.39.0->-r <仓库>/requirements-web.txt (line 19))"}
+{"t": 54.785, "line": "  Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)"}
+{"t": 55.166, "line": "Collecting anyio (from httpx==0.28.1->-r <仓库>/requirements-web.txt (line 20))"}
+{"t": 55.808, "line": "  Downloading anyio-4.15.1-py3-none-any.whl.metadata (4.7 kB)"}
+{"t": 56.429, "line": "Collecting certifi (from httpx==0.28.1->-r <仓库>/requirements-web.txt (line 20))"}
+{"t": 57.084, "line": "  Downloading certifi-2026.7.22-py3-none-any.whl.metadata (2.5 kB)"}
+{"t": 57.675, "line": "Collecting httpcore==1.* (from httpx==0.28.1->-r <仓库>/requirements-web.txt (line 20))"}
+{"t": 57.96, "line": "  Downloading httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)"}
+{"t": 58.473, "line": "Collecting idna (from httpx==0.28.1->-r <仓库>/requirements-web.txt (line 20))"}
+{"t": 59.06, "line": "  Downloading idna-3.20-py3-none-any.whl.metadata (7.2 kB)"}
+{"t": 59.447, "line": "Collecting et-xmlfile (from openpyxl==3.1.5->-r <仓库>/requirements-web.txt (line 21))"}
+{"t": 59.765, "line": "  Downloading et_xmlfile-2.0.0-py3-none-any.whl.metadata (2.7 kB)"}
+{"t": 61.06, "line": "Collecting lxml>=3.1.0 (from python-docx==1.2.0->-r <仓库>/requirements-web.txt (line 22))"}
+{"t": 61.479, "line": "  Downloading lxml-6.1.3-cp312-cp312-macosx_10_13_universal2.whl.metadata (3.3 kB)"}
+{"t": 61.813, "line": "Collecting annotated-types>=0.6.0 (from pydantic>=2.7.0->fastapi==0.128.8->-r <仓库>/requirements-web.txt (line 17))"}
+{"t": 62.184, "line": "  Downloading annotated_types-0.8.0-py3-none-any.whl.metadata (15 kB)"}
+{"t": 63.596, "line": "Collecting pydantic-core==2.50.1 (from pydantic>=2.7.0->fastapi==0.128.8->-r <仓库>/requirements-web.txt (line 17))"}
+{"t": 63.911, "line": "  Downloading pydantic_core-2.50.1-cp312-cp312-macosx_11_0_arm64.whl.metadata (6.5 kB)"}
+{"t": 64.257, "line": "Collecting six>=1.5 (from python-dateutil>=2.7->matplotlib==3.9.4->-r <仓库>/requirements-pinned.txt (line 18))"}
+{"t": 64.556, "line": "  Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)"}
+{"t": 64.864, "line": "Downloading cadquery_ocp-7.7.2-cp312-cp312-macosx_11_0_arm64.whl (166.4 MB)"}
+{"t": 150.874, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 166.4/166.4 MB 1.8 MB/s  0:01:26"}
+{"t": 151.172, "line": "Downloading ezdxf-1.4.2-cp312-cp312-macosx_11_0_arm64.whl (2.9 MB)"}
+{"t": 152.235, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.9/2.9 MB 4.0 MB/s  0:00:01"}
+{"t": 152.517, "line": "Downloading numpy-2.0.2-cp312-cp312-macosx_14_0_arm64.whl (5.0 MB)"}
+{"t": 154.184, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.0/5.0 MB 3.2 MB/s  0:00:01"}
+{"t": 154.46, "line": "Downloading jsonschema-4.25.1-py3-none-any.whl (90 kB)"}
+{"t": 155.371, "line": "Downloading matplotlib-3.9.4-cp312-cp312-macosx_11_0_arm64.whl (7.8 MB)"}
+{"t": 158.847, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.8/7.8 MB 2.5 MB/s  0:00:03"}
+{"t": 159.166, "line": "Downloading pytest-8.4.2-py3-none-any.whl (365 kB)"}
+{"t": 159.573, "line": "Downloading fastapi-0.128.8-py3-none-any.whl (103 kB)"}
+{"t": 159.851, "line": "Downloading python_multipart-0.0.20-py3-none-any.whl (24 kB)"}
+{"t": 160.163, "line": "Downloading uvicorn-0.39.0-py3-none-any.whl (68 kB)"}
+{"t": 160.698, "line": "Downloading httpx-0.28.1-py3-none-any.whl (73 kB)"}
+{"t": 160.967, "line": "Downloading openpyxl-3.1.5-py2.py3-none-any.whl (250 kB)"}
+{"t": 161.316, "line": "Downloading python_docx-1.2.0-py3-none-any.whl (252 kB)"}
+{"t": 161.675, "line": "Downloading pypdf-6.7.4-py3-none-any.whl (331 kB)"}
+{"t": 162.029, "line": "Downloading pypdfium2-5.10.1-py3-none-macosx_12_0_arm64.whl (3.6 MB)"}
+{"t": 163.084, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.6/3.6 MB 4.3 MB/s  0:00:01"}
+{"t": 163.392, "line": "Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)"}
+{"t": 163.804, "line": "Downloading pluggy-1.6.0-py3-none-any.whl (20 kB)"}
+{"t": 164.352, "line": "Downloading starlette-0.52.1-py3-none-any.whl (74 kB)"}
+{"t": 164.706, "line": "Downloading anyio-4.15.1-py3-none-any.whl (132 kB)"}
+{"t": 165.13, "line": "Downloading annotated_doc-0.0.5-py3-none-any.whl (5.3 kB)"}
+{"t": 165.433, "line": "Downloading attrs-26.1.0-py3-none-any.whl (67 kB)"}
+{"t": 165.975, "line": "Downloading click-8.5.0-py3-none-any.whl (125 kB)"}
+{"t": 166.311, "line": "Downloading contourpy-1.4.0-cp312-cp312-macosx_11_0_arm64.whl (284 kB)"}
+{"t": 166.751, "line": "Downloading cycler-0.12.1-py3-none-any.whl (8.3 kB)"}
+{"t": 167.26, "line": "Downloading fonttools-4.66.1-cp312-cp312-macosx_10_13_universal2.whl (3.1 MB)"}
+{"t": 168.765, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.1/3.1 MB 2.4 MB/s  0:00:01"}
+{"t": 169.472, "line": "Downloading h11-0.16.0-py3-none-any.whl (37 kB)"}
+{"t": 169.766, "line": "Downloading idna-3.20-py3-none-any.whl (69 kB)"}
+{"t": 170.924, "line": "Downloading iniconfig-2.3.1-py3-none-any.whl (7.6 kB)"}
+{"t": 171.285, "line": "Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)"}
+{"t": 171.8, "line": "Downloading kiwisolver-1.5.1-cp312-cp312-macosx_11_0_arm64.whl (64 kB)"}
+{"t": 172.49, "line": "Downloading lxml-6.1.3-cp312-cp312-macosx_10_13_universal2.whl (8.6 MB)"}
+{"t": 178.442, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.6/8.6 MB 1.7 MB/s  0:00:05"}
+{"t": 178.716, "line": "Downloading packaging-26.3-py3-none-any.whl (129 kB)"}
+{"t": 179.325, "line": "Downloading pillow-12.3.0-cp312-cp312-macosx_11_0_arm64.whl (4.8 MB)"}
+{"t": 180.935, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.8/4.8 MB 3.5 MB/s  0:00:01"}
+{"t": 181.216, "line": "Downloading pydantic-2.14.1-py3-none-any.whl (488 kB)"}
+{"t": 181.719, "line": "Downloading pydantic_core-2.50.1-cp312-cp312-macosx_11_0_arm64.whl (2.0 MB)"}
+{"t": 182.817, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.0/2.0 MB 2.5 MB/s  0:00:01"}
+{"t": 183.114, "line": "Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)"}
+{"t": 183.43, "line": "Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)"}
+{"t": 183.835, "line": "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 3.5 MB/s  0:00:00"}
+{"t": 184.12, "line": "Downloading pyparsing-3.3.3-py3-none-any.whl (126 kB)"}
+{"t": 184.436, "line": "Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)"}
+{"t": 185.045, "line": "Downloading referencing-0.37.0-py3-none-any.whl (26 kB)"}
+{"t": 185.321, "line": "Downloading rpds_py-2026.9.1-cp312-cp312-macosx_11_0_arm64.whl (341 kB)"}
+{"t": 185.964, "line": "Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)"}
+{"t": 186.258, "line": "Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)"}
+{"t": 186.558, "line": "Downloading typing_inspection-0.4.4-py3-none-any.whl (14 kB)"}
+{"t": 186.934, "line": "Downloading certifi-2026.7.22-py3-none-any.whl (136 kB)"}
+{"t": 187.237, "line": "Downloading et_xmlfile-2.0.0-py3-none-any.whl (18 kB)"}
+{"t": 187.565, "line": "Installing collected packages: cadquery-ocp, typing_extensions, six, rpds-py, python-multipart, pypdfium2, pypdf, pyparsing, pygments, pluggy, pillow, packaging, numpy, lxml, kiwisolver, iniconfig, idna, h11, fonttools, et-xmlfile, cycler, click, certifi, attrs, annotated-types, annotated-doc, uvicorn, typing-inspection, referencing, python-docx, python-dateutil, pytest, pydantic-core, openpyxl, httpcore, ezdxf, contourpy, anyio, starlette, pydantic, matplotlib, jsonschema-specifications, httpx, jsonschema, fastapi"}
+{"t": 196.332, "line": ""}
+{"t": 196.335, "line": "Successfully installed annotated-doc-0.0.5 annotated-types-0.8.0 anyio-4.15.1 attrs-26.1.0 cadquery-ocp-7.7.2 certifi-2026.7.22 click-8.5.0 contourpy-1.4.0 cycler-0.12.1 et-xmlfile-2.0.0 ezdxf-1.4.2 fastapi-0.128.8 fonttools-4.66.1 h11-0.16.0 httpcore-1.0.9 httpx-0.28.1 idna-3.20 iniconfig-2.3.1 jsonschema-4.25.1 jsonschema-specifications-2025.9.1 kiwisolver-1.5.1 lxml-6.1.3 matplotlib-3.9.4 numpy-2.0.2 openpyxl-3.1.5 packaging-26.3 pillow-12.3.0 pluggy-1.6.0 pydantic-2.14.1 pydantic-core-2.50.1 pygments-2.21.0 pyparsing-3.3.3 pypdf-6.7.4 pypdfium2-5.10.1 pytest-8.4.2 python-dateutil-2.9.0.post0 python-docx-1.2.0 python-multipart-0.0.20 referencing-0.37.0 rpds-py-2026.9.1 six-1.17.0 starlette-0.52.1 typing-inspection-0.4.4 typing_extensions-4.16.0 uvicorn-0.39.0"}
+{"t": 196.546, "line": "依赖安装完成，用时 196 秒。"}
+{"t": 196.617, "line": "计时记录：<安装目录>/install-timing.json"}
+{"t": 196.621, "line": ""}
+{"t": 196.622, "line": "环境自检 …"}
+{"t": 271.879, "line": "patent-figure 环境自检（scripts/doctor.py）"}
+{"t": 271.879, "line": ""}
+{"t": 271.879, "line": "  [OK      ] python                          Python 3.12.15 · <安装目录>/venv-py3.12/bin/python（要求 >= 3.9）"}
+{"t": 271.88, "line": "  [OK      ] cadquery-ocp                    7.7.2（已验证 6 个子模块）"}
+{"t": 271.88, "line": "  [OK      ] ezdxf                           1.4.2"}
+{"t": 271.88, "line": "  [OK      ] numpy                           2.0.2"}
+{"t": 271.88, "line": "  [OK      ] jsonschema                      4.25.1"}
+{"t": 271.88, "line": "  [OK      ] matplotlib                      3.9.4"}
+{"t": 271.88, "line": "  [OK      ] pytest                          8.4.2"}
+{"t": 271.88, "line": "  [OK      ] ezdxf-drawing-matplotlib        MatplotlibBackend 可用"}
+{"t": 271.88, "line": "  [缺失    ] font-simfang（可选）            未找到 simfang.ttf（GB/T 14691 长仿宋体）。DXF 里记的仍是样式名 simfang.ttf，所以文件本身正确；后果是本机回退到 NotoSansCJKsc-Black.otf、NotoSansCJKsc-Bold.otf、NotoSansCJKsc-DemiLight.otf 显示，换到没有该字体的机器上中文可能变方块"}
+{"t": 271.88, "line": "                修复：把 simfang.ttf 装到 ~/Library/Fonts（macOS）或 ~/.local/share/fonts（Linux）；若拿不到该字体，按 references/workflow.md §4 走轮廓化 DWG 路线，让中文以几何而不是文字交付"}
+{"t": 271.88, "line": "  [OK      ] font-txt-shx（可选）            /Applications/Autodesk/AutoCAD 2026/AutoCAD 2026.app/Contents/Resources/Fonts/shx/txt.shx"}
+{"t": 271.88, "line": "  [OK      ] autocad-core-console（可选）    /Applications/Autodesk/AutoCAD 2026/AutoCAD 2026.app/Contents/Helpers/AcCoreConsole.app/Contents/MacOS/AcCoreConsole"}
+{"t": 271.88, "line": "  [OK      ] libredwg-dwgread（可选）        /opt/homebrew/bin/dwgread"}
+{"t": 271.88, "line": "  [OK      ] plan-studio-deps（可选）        fastapi / uvicorn / httpx / openpyxl / python-docx 齐备，可运行 scripts/workbench.py 与 scripts/plan_studio.py"}
+{"t": 271.88, "line": "  [OK      ] deliverable-pdf-check（可选）   pypdf 6.7.4 —— 导出包 PDF 可逐页核验（页幅/页边/字高/图号/页数）"}
+{"t": 271.88, "line": "  [OK      ] deliverable-pdf-render（可选）  pypdfium2 5.10.1（BSD/Apache）—— 导出 PDF 必需：逐页独立渲染核验可见性"}
+{"t": 271.88, "line": ""}
+{"t": 271.88, "line": "必需项 8/8 通过，可选项 6/7 可用。"}
+{"t": 271.88, "line": "结论：环境可用"}
+{"t": 272.149, "line": ""}
+{"t": 272.149, "line": "Web 工作台 / 导出包（安装脚本视为必需）："}
+{"t": 272.149, "line": "  [OK      ] Web 工作台（fastapi / uvicorn / httpx / openpyxl / python-docx）"}
+{"t": 272.149, "line": "  [OK      ] 导出包 PDF 逐页结构核验（pypdf）"}
+{"t": 272.149, "line": "  [OK      ] 导出包 PDF 逐页渲染核验（pypdfium2，导出必需）"}
+{"t": 272.149, "line": "  [OK      ] 浏览器上传 STEP 的表单解析（python-multipart）"}
+{"t": 272.15, "line": ""}
+{"t": 272.15, "line": "结论：可以启动工作台。"}
+{"t": 272.155, "line": ""}
+{"t": 272.155, "line": "安装完成（--no-start：不启动）。以后启动：\"<安装目录>/venv-py3.12/bin/python\" \"<仓库>/scripts/pfk_cli.py\" start"}
+{"exit": 0, "elapsed": 272.158, "load_avg_at_end": [7.8642578125, 9.64599609375, 9.03466796875]}

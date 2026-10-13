@@ -1,0 +1,392 @@
+{
+ "env": {
+  "machine": "Apple M5",
+  "ncpu": 10,
+  "mem_gb": 16,
+  "os": "macOS 27.0.1",
+  "python": "3.9.6",
+  "commit": "7f2d653",
+  "dirty": false,
+  "date": "2026-10-13 05:09",
+  "ocp": "7.7.2.0"
+ },
+ "runs": [
+  {
+   "example": "gearbox",
+   "rep": 0,
+   "load_example": {
+    "server_s": 2.016,
+    "client_s": 2.078
+   },
+   "suggest": {
+    "server_s": 2.285,
+    "client_s": 2.343,
+    "n": 6,
+    "pass": 4
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 1.066,
+    "client_s": 1.123,
+    "job": "25b4fe0a010b4181a94bf844ad426487"
+   },
+   "render_again": {
+    "server_s": 0.93,
+    "client_s": 0.947,
+    "job": "678beeed583d403fa07ec6d40cc51e4f"
+   },
+   "render_after_edit": {
+    "server_s": 1.002,
+    "client_s": 1.048,
+    "job": "113c678e46ec4ad8b75c50610a29a06b"
+   },
+   "export": {
+    "server_s": 4.736,
+    "client_s": 4.749,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 10.103
+  },
+  {
+   "example": "vise",
+   "rep": 0,
+   "load_example": {
+    "server_s": 2.011,
+    "client_s": 2.056
+   },
+   "suggest": {
+    "server_s": 1.074,
+    "client_s": 1.095,
+    "n": 6,
+    "pass": 4
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 0.363,
+    "client_s": 0.371,
+    "job": "84a5177a220a447baf8e21e1eab588cb"
+   },
+   "render_again": {
+    "server_s": 0.346,
+    "client_s": 0.353,
+    "job": "4cc3353059b1496b9f938abe711226e2"
+   },
+   "render_after_edit": {
+    "server_s": 0.36,
+    "client_s": 0.371,
+    "job": "4952ccd7c83c43cdbf4460feb5f1bf06"
+   },
+   "export": {
+    "server_s": 3.591,
+    "client_s": 3.626,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 7.039
+  },
+  {
+   "example": "valve",
+   "rep": 0,
+   "load_example": {
+    "server_s": 2.024,
+    "client_s": 2.087
+   },
+   "suggest": {
+    "server_s": 0.876,
+    "client_s": 0.903,
+    "n": 4,
+    "pass": 3
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 0.486,
+    "client_s": 0.499,
+    "job": "86aad6a8dc824d07822f05217244492b"
+   },
+   "render_again": {
+    "server_s": 0.494,
+    "client_s": 0.54,
+    "job": "2c76f2a0b3764ab0a28f4c3bd676a1f5"
+   },
+   "render_after_edit": {
+    "server_s": 0.487,
+    "client_s": 0.494,
+    "job": "2b6f75c9fed64c309ed56b09d6d491a3"
+   },
+   "export": {
+    "server_s": 3.777,
+    "client_s": 3.8,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 7.163
+  },
+  {
+   "example": "gearbox",
+   "rep": 1,
+   "load_example": {
+    "server_s": 2.028,
+    "client_s": 2.079
+   },
+   "suggest": {
+    "server_s": 2.245,
+    "client_s": 2.256,
+    "n": 6,
+    "pass": 4
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 1.007,
+    "client_s": 1.063,
+    "job": "48740e4931014141b8723f528e299608"
+   },
+   "render_again": {
+    "server_s": 0.938,
+    "client_s": 0.987,
+    "job": "8b34f615cf9f43c1b5484e6a1120cd08"
+   },
+   "render_after_edit": {
+    "server_s": 1.006,
+    "client_s": 1.059,
+    "job": "47c4c0626ab24553b958042e09288d89"
+   },
+   "export": {
+    "server_s": 4.784,
+    "client_s": 4.792,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 10.064
+  },
+  {
+   "example": "vise",
+   "rep": 1,
+   "load_example": {
+    "server_s": 2.014,
+    "client_s": 2.063
+   },
+   "suggest": {
+    "server_s": 1.072,
+    "client_s": 1.092,
+    "n": 6,
+    "pass": 4
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 0.363,
+    "client_s": 0.371,
+    "job": "03837fb6379b40398a3a6bf2e88a3cb6"
+   },
+   "render_again": {
+    "server_s": 0.34,
+    "client_s": 0.377,
+    "job": "45e30c258a5d4f3692cb81f057199527"
+   },
+   "render_after_edit": {
+    "server_s": 0.364,
+    "client_s": 0.418,
+    "job": "b137ebcdd6e24b00972735009db44a72"
+   },
+   "export": {
+    "server_s": 3.643,
+    "client_s": 3.685,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 7.092
+  },
+  {
+   "example": "valve",
+   "rep": 1,
+   "load_example": {
+    "server_s": 2.045,
+    "client_s": 2.084
+   },
+   "suggest": {
+    "server_s": 0.884,
+    "client_s": 0.934,
+    "n": 4,
+    "pass": 3
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 0.483,
+    "client_s": 0.505,
+    "job": "be3d9048a9f447d9990f0939cc94965e"
+   },
+   "render_again": {
+    "server_s": 0.498,
+    "client_s": 0.526,
+    "job": "944a9fb0ee4c49a6894a82ee56a9b211"
+   },
+   "render_after_edit": {
+    "server_s": 0.493,
+    "client_s": 0.545,
+    "job": "e4b7ea8e8800430d800b02c9517980c9"
+   },
+   "export": {
+    "server_s": 3.806,
+    "client_s": 3.843,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 7.218
+  },
+  {
+   "example": "gearbox",
+   "rep": 2,
+   "load_example": {
+    "server_s": 2.013,
+    "client_s": 2.053
+   },
+   "suggest": {
+    "server_s": 2.289,
+    "client_s": 2.331,
+    "n": 6,
+    "pass": 4
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 0.996,
+    "client_s": 1.048,
+    "job": "a62290c414d841c9b13a188dc8facbb4"
+   },
+   "render_again": {
+    "server_s": 1.066,
+    "client_s": 1.078,
+    "job": "6004a38431354d83a4d1fcbf17fbc96c"
+   },
+   "render_after_edit": {
+    "server_s": 1.052,
+    "client_s": 1.07,
+    "job": "2d00ab836a4d4514a9bb62229ffdc201"
+   },
+   "export": {
+    "server_s": 4.809,
+    "client_s": 4.821,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 10.107
+  },
+  {
+   "example": "vise",
+   "rep": 2,
+   "load_example": {
+    "server_s": 2.015,
+    "client_s": 2.029
+   },
+   "suggest": {
+    "server_s": 1.1,
+    "client_s": 1.134,
+    "n": 6,
+    "pass": 4
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 0.369,
+    "client_s": 0.375,
+    "job": "d4f5f349d7424b61b947ce5f1541cecd"
+   },
+   "render_again": {
+    "server_s": 0.355,
+    "client_s": 0.405,
+    "job": "805383dde0ac45a6b1f0610f36427933"
+   },
+   "render_after_edit": {
+    "server_s": 0.376,
+    "client_s": 0.428,
+    "job": "70bf6aec1a234cdc86d4d7d5f72702a2"
+   },
+   "export": {
+    "server_s": 3.628,
+    "client_s": 3.672,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 7.112
+  },
+  {
+   "example": "valve",
+   "rep": 2,
+   "load_example": {
+    "server_s": 2.012,
+    "client_s": 2.02
+   },
+   "suggest": {
+    "server_s": 0.873,
+    "client_s": 0.905,
+    "n": 4,
+    "pass": 3
+   },
+   "figures": 2,
+   "render_first": {
+    "server_s": 0.481,
+    "client_s": 0.503,
+    "job": "5b623bc744c144eba61c6b1fef2881d3"
+   },
+   "render_again": {
+    "server_s": 0.488,
+    "client_s": 0.535,
+    "job": "afd820cfcd09479f901ad602c554bee5"
+   },
+   "render_after_edit": {
+    "server_s": 0.495,
+    "client_s": 0.534,
+    "job": "9a257c1e7e0047ef96981e8bfff633ad"
+   },
+   "export": {
+    "server_s": 3.816,
+    "client_s": 3.85,
+    "ok": true,
+    "items": 6,
+    "docs_ok": 4
+   },
+   "golden_total_s": 7.182
+  }
+ ],
+ "median": {
+  "gearbox": {
+   "load_example": 2.02,
+   "suggest": 2.29,
+   "render_first": 1.01,
+   "render_again": 0.94,
+   "render_after_edit": 1.01,
+   "export": 4.78,
+   "golden_total_s": 10.1,
+   "figures": 2,
+   "candidates": "4/6"
+  },
+  "vise": {
+   "load_example": 2.01,
+   "suggest": 1.07,
+   "render_first": 0.36,
+   "render_again": 0.35,
+   "render_after_edit": 0.36,
+   "export": 3.63,
+   "golden_total_s": 7.09,
+   "figures": 2,
+   "candidates": "4/6"
+  },
+  "valve": {
+   "load_example": 2.02,
+   "suggest": 0.88,
+   "render_first": 0.48,
+   "render_again": 0.49,
+   "render_after_edit": 0.49,
+   "export": 3.81,
+   "golden_total_s": 7.18,
+   "figures": 2,
+   "candidates": "3/4"
+  }
+ }
+}

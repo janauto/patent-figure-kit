@@ -1,0 +1,14 @@
+{
+ "T0_to_package_s": 15.19,
+ "import_and_candidates_s": 5.34,
+ "render_s": 2.29,
+ "export_s": 6.85,
+ "example": "gearbox",
+ "data_dir": "全新临时目录（无缓存首次运行）",
+ "ai": "关闭",
+ "machine": "Apple M5",
+ "os": "macOS 27.0.1",
+ "python": "3.9.6",
+ "commit": "7f2d653",
+ "date": "2026-10-13"
+}
