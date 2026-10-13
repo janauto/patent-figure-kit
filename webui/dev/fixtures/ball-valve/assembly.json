@@ -1,7 +1,7 @@
 {
   "schema": "patent-assembly/1",
   "source": {
-    "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-ball-valve.stp",
+    "step": "examples/planetary-gearbox/demo-ball-valve.stp",
     "sha256": "7d07a043f93d736fdbf657846d490635acce071edeed9fc0703123c8a28c42cc",
     "instances": 18,
     "distinct": 9
