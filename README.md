@@ -17,16 +17,18 @@
 
 <img src="docs/assets/hero.gif" width="92%" alt="真实录屏：空工作台 → 载入示例「行星齿轮减速器」→ 候选分图 → 出图并过 13 项质量闸门 → 导出附图包，右上角是本次运行的计时">
 
-<sub>真实录屏：全新数据目录、无缓存首次运行，等待处定格、不快进，右上角计时取自录制日志（<a href="docs/assets/readme/hero-run.json">hero-run.json</a>）。测于 Apple M5（10 核）· 16 GB · macOS 27.0.1 · Python 3.9.6 · 提交 7f2d653。<br>示例模型由 <code>scripts/make_demo_assemblies.py</code> 生成，与任何真实产品无关。</sub>
+<sub>真实录屏：全新数据目录、无缓存首次运行，等待处定格、不快进，右上角计时取自录制日志（<a href="docs/assets/readme/hero-run.json">hero-run.json</a>）。单次运行，测于 Apple M5 · macOS 27.0.1 · Python 3.9.6 · 提交 7f2d653，AI 关闭。<br>示例模型由 <code>scripts/make_demo_assemblies.py</code> 生成，与任何真实产品无关。</sub>
 
 **品胜 AI Lab 开源项目**
+
+<sub>开发期显示名「墨线」与「品胜 AI Lab」署名均须通过首次外发门禁确认（产品名与署名确认、商标检索），确认前可能调整。</sub>
 
 </div>
 
 > **和生成式描边工具有什么不同？** 在我们 2026 年 10 月调研的 7 款涉及附图的商业 AI 专利产品里，做结构附图的几款从草图、照片或截图出发，用生成式模型描边再人工改标号，其余是流程图生成或传统画图工具加自动编号；未见宣称从 3D 几何做确定性消隐的。墨线走另一条路：线条从 STEP 几何算出来，标号由程序发放，AI 只做填空（读代号、起中文名、整理方法描述），碰不到坐标、字高和编号。
 
 > [!NOTE]
-> 墨线（`DISPLAY_NAME`）是开发期显示名，仓库技术名保留 `patent-figure-kit`；`SKILL.md` 曾用名 `patent-drawing-dwg-cleanup`。见[命名与商标声明](#命名与商标声明)。
+> 墨线（`DISPLAY_NAME`）是开发期显示名，「品胜 AI Lab」（`BRAND`）是开发期署名，两者均须通过首次外发门禁确认；仓库技术名保留 `patent-figure-kit`；`SKILL.md` 曾用名 `patent-drawing-dwg-cleanup`。见[命名与商标声明](#命名与商标声明)。
 
 ---
 
@@ -49,7 +51,7 @@
   </tr>
 </table>
 
-首屏动图那一次运行：示例「行星齿轮减速器」（15 种零件 / 27 个实例），从点下示例到拿到压缩包用了 **15.2 秒**（载入与候选分图 5.3 s、出图 2.3 s、打包与逐页核验 6.8 s），全新数据目录、无缓存首次运行，日志见 [`hero-run.json`](docs/assets/readme/hero-run.json)。同一台机器上多次测量的中位数见[性能](#性能实测)。
+首屏动图那一次运行（单次）：示例「行星齿轮减速器」（15 种零件 / 27 个实例，见 [`models.json`](docs/assets/readme/runs/models.json)），从点下示例到拿到压缩包用了 **15.2 秒**（载入与候选分图 5.3 s、出图 2.3 s、打包与逐页核验 6.8 s；三段之和小于总时长，差额是步骤之间的点击间隔），全新数据目录、无缓存首次运行，记录见 [`hero-run.json`](docs/assets/readme/hero-run.json)。3 次样本的中位数见[性能](#性能实测)。
 
 没有 STEP？Creo、SolidWorks、CATIA、NX、Inventor、Fusion 等主流 CAD 都能「另存为 / 导出」STEP（`.stp` / `.step`），导出时选「装配体」并保留零件名。墨线只收 STEP，不直接读原生格式。
 
@@ -64,8 +66,8 @@
       <sub><b>递交版 PDF</b>（主交付）— 仅图号；A4，按形式要求留页边，图号在图正下方。<code>pypdfium2</code> 栅格。</sub>
     </td>
     <td align="center" width="33%">
-      <img src="docs/assets/package/docx-disclosure-p1.png" alt="交底版 Word 第 1 页：同一张图，左下角多一张「序号｜名称」件号表"><br>
-      <sub><b>交底版 Word</b>（主交付）— 多一张件号名称表，供研发与代理师核对。macOS 系统预览渲染。</sub>
+      <img src="docs/assets/package/docx-disclosure-p1.png" alt="交底版 Word 的 macOS Quick Look 文档预览（非实际分页）：图1 与左下角「序号｜名称」件号表，底部已露出下一张图"><br>
+      <sub><b>交底版 Word</b>（主交付）— 多一张件号名称表，供研发与代理师核对。图为 macOS Quick Look 文档预览，<b>非实际分页验证</b>（底部已露出下一张图）；Word 只做结构核验，实际排版以 Word 打开为准。</sub>
     </td>
     <td align="center" width="33%">
       <img src="docs/assets/package/dxf-source.png" alt="交底版 DXF 在查看器中的样子：线稿、标号、件号表与图号"><br>
@@ -106,10 +108,11 @@
 公开前的专利附图是商业秘密，所以这一段放在前面。
 
 - **本地出图，模型不出机。** 解析、消隐、标号、闸门、导出全部在你的电脑（或你自己的服务器）上完成，核心出图链路不依赖任何外部接口。工作台默认只监听 `127.0.0.1`。
-- **AI 是可选项。** AI 只用于起草零件中文名、识别结构分组、整理流程图文字。没有配置模型通道时一个字节都不外发，流程照样走完（名字自己填）。
-  - 默认设置是「自动」：检测到环境变量 `DEEPSEEK_API_KEY`，或本机装有 CodeBuddy CLI 时会启用通道；不想外发，在工作台「设置」里选「不使用 AI」。
-  - **AI 起名**外发前逐次确认：界面列明发给谁、发哪些字段（只含你选中的空白件）。
-  - **AI 识别结构**会外发整份零件清单（这是该功能的用途）；通道已接入时，上传或载入后会在后台自动识别一次，上传对话框会提示。
+- **AI 是可选项。** AI 只用于起草零件中文名、识别结构分组、整理流程图文字，碰不到坐标、字高和编号。通道关闭时不发出任何 AI 请求，流程照样走完（零件名在术语页自己填）。
+  - **默认是「自动」**：检测到环境变量 `DEEPSEEK_API_KEY`，或本机装有 CodeBuddy CLI，就会启用通道，不需要你另外配置。
+  - **AI 起名：逐次确认。** 外发前界面列明发给谁、发哪些字段（只含你选中的空白件）。
+  - **AI 识别结构：不逐次确认。** 通道可用时，上传 STEP 或载入示例后，工作台会在后台**自动**把零件清单（零件名、尺寸、装配路径）发给该通道识别一次；上传对话框会提示。几何模型本身不外发。
+  - **怎样关闭（请在导入未公开的模型之前设好）**：启动前设环境变量 `PFK_AI_PROVIDER=none`（例：`PFK_AI_PROVIDER=none python3 scripts/pfk_cli.py start`），或在 `~/.config/patent-workbench/config.json` 里写 `"provider": "none"`。首页右上角显示「AI 未接入」即为已关闭。当前版本的「设置」对话框里还没有「不使用 AI」选项，只能用这两种方式关闭。
 - **演示站无需上传。** 静态演示站只放三个公开示例的预计算结果，不能上传，也不出图。
 - **数据放在哪。** 工程数据在 `~/.patent-workbench`，设置与密钥在 `~/.config/patent-workbench/config.json`（权限 0600），都不在仓库里。密钥只经环境变量或本机配置文件提供，不会写进仓库；请不要提交这两个目录。
 
@@ -126,7 +129,7 @@
 
 **确定性口径**：在已验证环境（见下表）下，同一份 plan 渲染出的图纸规范化图元摘要一致——坐标取 6 位小数，覆盖几何与文字实体，不含文件头与句柄。不在表里的环境不作承诺。
 
-本轮在提交 `7f2d653` 上整套运行 `python3 acceptance/run_acceptance.py`：**19 个节点全部通过，退出码 0，用时 424 秒**（N14 内含 685 个单元测试）。节点说明见 [`acceptance/README.md`](acceptance/README.md)。
+本轮在提交 `d54f8aa`（出图代码与 7f2d653 相同）上整套运行 `python3 acceptance/run_acceptance.py`：**19 个节点全部通过，退出码 0**（N14 内含 685 个单元测试）。原始记录（机型、Python、提交号、逐行时间戳）：[`acceptance.jsonl`](docs/assets/readme/runs/acceptance.jsonl)。节点说明见 [`acceptance/README.md`](acceptance/README.md)。
 
 **已验证环境**（摘自 [`docs/deploy/verified-environments.md`](docs/deploy/verified-environments.md)，只列实测通过的组合）：
 
@@ -149,7 +152,7 @@ cp examples/planetary-gearbox/figure-plan.json "$HOME/pfk-demo/"
 python3 scripts/analyze_assembly.py "$HOME/pfk-demo/demo-planetary-gearbox.stp" -o "$HOME/pfk-demo/assembly.json" --include 'PGB-*'
 python3 scripts/export_figure_package.py "$HOME/pfk-demo/figure-plan.json" --assembly "$HOME/pfk-demo/assembly.json" -o "$HOME/pfk-demo/附图包"
 Expected: six "[通过]" lines and "（全部通过）", exit 0; $HOME/pfk-demo/附图包 contains 说明书附图_递交版.pdf.
-Python must be 3.9–3.12 (3.13+ unsupported). Full acceptance (about 7–10 minutes): python3 acceptance/run_acceptance.py — do not pipe it, the exit code matters. -->
+Python must be 3.9–3.12 (3.13+ unsupported). Full acceptance (takes several minutes): python3 acceptance/run_acceptance.py — do not pipe it, the exit code matters. -->
 
 按你想走多深选一级：
 
@@ -178,7 +181,7 @@ Python must be 3.9–3.12 (3.13+ unsupported). Full acceptance (about 7–10 min
 演示站把三个公开示例（减速器、台虎钳、球阀）的真实出图结果预先算好：可以旋转 3D、翻候选分图与闸门判词、看三版预览与 13 项 QA、下载导出包样例；不能上传，也不出图。站点随首次外发发布到 GitHub Pages；现在可以在本地构建并预览：
 
 ```bash
-python3 scripts/build_static_site.py            # → static-site/patent-figure-kit/（约 30 秒）
+python3 scripts/build_static_site.py            # → static-site/patent-figure-kit/
 cd static-site && python3 -m http.server 8808   # 浏览器打开 http://127.0.0.1:8808/patent-figure-kit/
 ```
 
@@ -197,7 +200,7 @@ cd static-site && python3 -m http.server 8808   # 浏览器打开 http://127.0.0
 脚本会检测 Python、在用户目录建独立虚拟环境、装锁定依赖、自检，然后启动工作台并打开浏览器。**装一次几分钟，之后日常使用不碰命令行**；再次运行时依赖没变就跳过安装，几秒打开。
 
 - 预期输出：自检结尾是 `结论：可以启动工作台。`，随后打印 `专利附图工作台已启动：http://127.0.0.1:8790/?token=…` 并打开浏览器。
-- 本机实测（2026-10-13，macOS 27.0.1，Python 3.12.15，pip 无缓存，经本机网络代理访问 PyPI）：依赖安装 167 秒，脚本全程 235 秒。安装时长强依赖网络，历次记录见 [`install-times.md`](docs/deploy/install-times.md)。
+- 本机实测（单次运行，2026-10-14，Apple M5 · 10 核 · 16 GB · macOS 27.0.1，脚本选用 Python 3.12.15，`PIP_NO_CACHE_DIR=1` 无 pip 缓存，运行时机器另有负载）：依赖安装 196 秒，脚本全程 272 秒。原始记录（命令、环境、逐行时间戳）：[`install-command.jsonl`](docs/assets/readme/runs/install-command.jsonl)。安装时长强依赖网络，历次记录见 [`install-times.md`](docs/deploy/install-times.md)。
 - 常用参数：`--no-start`（只安装与自检）、`--port 8791`、`--data 目录`、`--reinstall`；国内网络可先设 `PIP_INDEX_URL`（如清华镜像）。
 - 虚拟环境位置：macOS `~/Library/Application Support/patent-figure-kit/`，Linux `~/.local/share/patent-figure-kit/`，Windows `%LOCALAPPDATA%\patent-figure-kit\`；环境变量 `PFK_HOME` 可改。
 
@@ -215,9 +218,9 @@ python3 -m pip install -r requirements-pinned.txt -r requirements-web.txt
 python3 scripts/pfk_cli.py doctor
 ```
 
-首次安装要下载约 165 MB 的几何内核 `cadquery-ocp`（macOS arm64 实测），请耐心等待。`doctor` 首次运行要导入几何内核并逐项自检，本机实测约 70 秒；预期输出结尾是 `结论：可以启动工作台。`，退出码 `0`。
+首次安装要下载约 166 MB 的几何内核 `cadquery-ocp`（macOS arm64 · Python 3.12 的轮子，见上面的安装记录），请耐心等待。`doctor` 首次运行要导入几何内核并逐项自检，会多等一会儿；预期输出结尾是 `结论：可以启动工作台。`，退出码 `0`。
 
-**冒烟测试：不开界面，出一套附图包**（约 10 秒）：
+**冒烟测试：不开界面，出一套附图包**：
 
 ```bash
 mkdir -p "$HOME/pfk-demo"
@@ -237,7 +240,7 @@ python3 scripts/pfk_cli.py start           # 打开 http://127.0.0.1:8790/?token
 
 工程数据默认放在 `~/.patent-workbench`（与双击安装共用）；想另放一处，加 `--data 目录`。
 
-**跑完整验收**（约 7–10 分钟，不要用管道接输出，否则会吞掉退出码）：
+**跑完整验收**（需要几分钟；不要用管道接输出，否则会吞掉退出码）：
 
 ```bash
 python3 acceptance/run_acceptance.py       # 预期：通过 19 ／ 未通过 0 ／ 跳过 0，退出码 0
@@ -292,7 +295,7 @@ docker compose up -d
     <td align="center" width="50%"><img src="docs/assets/readme/feat-candidate-blocked.jpg" alt="候选分图：整机兜底候选被拦，写明标号太多找不到互不交叉的位置，并给建议"><br>
       <sub><b>候选分图</b> — 子装配、同轴组、沿主轴分解、整机兜底；每张都实际渲染过闸，被拦的写明原因与建议。</sub></td>
     <td align="center" width="50%"><img src="docs/assets/readme/feat-structure.jpg" alt="结构树：按 STEP 装配层级分组，3D 按结构着色"><br>
-      <sub><b>结构识别</b> — 按 STEP 装配层级自动分组；配置模型通道后可让 AI 归成看得懂的结构组（可选）。</sub></td>
+      <sub><b>结构识别</b> — 按 STEP 装配层级自动分组；AI 通道可用时，导入后会<b>自动</b>外发零件清单让 AI 归成看得懂的结构组（不逐次确认，关闭方式见<a href="#数据与隐私">数据与隐私</a>）。</sub></td>
   </tr>
   <tr>
     <td align="center"><img src="docs/assets/readme/feat-explode.jpg" alt="透明度调低、按结构拉开爆炸的减速器"><br>
@@ -326,7 +329,9 @@ docker compose up -d
 
 ## 性能（实测）
 
-**三个公开示例 · 金路径分段**（真实工作台，REST 接口与界面同一组）。每次测量都用全新数据目录和刚启动的工作台进程（几何缓存为空），3 次取中位，单位秒。测于 Apple M5（10 核）· 16 GB · macOS 27.0.1 · Python 3.9.6 · cadquery-ocp 7.7.2 · 提交 7f2d653。
+每张表都附原始记录（命令、机型、版本、缓存状态、每次样本），索引见 [`docs/assets/readme/runs/`](docs/assets/readme/runs/README.md)。
+
+**三个公开示例 · 金路径分段**（真实工作台，REST 接口与界面同一组）。每次测量都用全新数据目录和刚启动的工作台进程（几何缓存为空），AI 关闭；每项 3 次样本取中位，单位秒，计时为服务端作业起止时间。测于 Apple M5 · 10 核 · 16 GB · macOS 27.0.1 · Python 3.9.6 · cadquery-ocp 7.7.2 · 提交 7f2d653（工作树无改动）。原始记录：[`perf-golden.json`](docs/assets/readme/runs/perf-golden.json)；零件数见 [`models.json`](docs/assets/readme/runs/models.json)。
 
 | 示例 | 规模 | 载入示例（首次） | 候选分图（含逐个试渲染） | 首次出图 | 重出图 | 改计划后出图 | 导出附图包 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -334,25 +339,40 @@ docker compose up -d
 | 台虎钳 | 12 种 / 20 实例，2 张图 | 2.01 | 1.07（6 个，4 个过闸） | 0.36 | 0.35 | 0.36 | 3.63 |
 | 球阀 | 9 种 / 18 实例，2 张图 | 2.02 | 0.88（4 个，3 个过闸） | 0.48 | 0.49 | 0.49 | 3.81 |
 
-- 「首次出图」排在候选分图之后，候选试渲染已让部分零件的消隐结果进了缓存；跳过候选、几何缓存完全为空时，首次出图实测为 1.19 / 0.55 / 0.63 秒。
+- 「首次出图」排在候选分图之后，候选试渲染已让部分零件的消隐结果进了缓存；跳过候选、几何缓存完全为空时，首次出图为 1.19 / 0.55 / 0.63 秒（同条件 3 次中位，[`perf-golden-cold.json`](docs/assets/readme/runs/perf-golden-cold.json)）。
 - 「导出附图包」= 递交版 + 交底版，PDF + Word + DXF，300 dpi，标准版心，含对文件本身的逐页核验。
 - 「改计划后出图」= 改一个零件中文名后重出（消隐缓存命中，版面与标号重算）。
+- 复测：`python3 docs/assets/measure_readme.py --reps 3 --out <文件>`（冷渲染加 `--no-suggest`）。
 
-**规模档与改前 / 改后**（`scripts/bench.py --tiers 50 200 --reps 3`，固定种子生成的整机样例，同机同样例）。改前 = 提交 `54f9425`（内核稳固之前），改后 = `7f2d653`。
+**规模档与改前 / 改后**。同一台机器（同上）、同一生成器（本仓库 `make_demo_assemblies.py`）与同一种子生成的整机样例；改前 = 提交 `54f9425`（内核稳固之前，独立检出），改后 = 本仓库提交 `d54f8aa`（出图代码与 7f2d653 相同）。命令：
 
-| 指标（秒，中位） | 50 实例 改前 | 50 实例 改后 | 200 实例 改前 | 200 实例 改后 |
+```bash
+python3 scripts/bench.py --tiers 50 200 --reps 3 --amortize-k 5 --seed 12345 --json bench-after.json
+python3 scripts/bench.py --repo <54f9425 的检出> --tiers 50 200 --reps 3 --amortize-k 5 --seed 12345 --json bench-before.json
+```
+
+原始记录：[`bench-before.json`](docs/assets/readme/runs/bench-before.json) / [`bench-after.json`](docs/assets/readme/runs/bench-after.json)，命令与环境见同名 `.env.json`。
+
+分段耗时（秒，每项 3 次样本取中位）：
+
+| 指标 | 50 实例 改前 | 50 实例 改后 | 200 实例 改前 | 200 实例 改后 |
 | --- | ---: | ---: | ---: | ---: |
-| 解析装配 | 0.55 | 0.53 | 0.54 | 0.54 |
-| 生成 3D 网格（GLB） | 0.48 | 0.47 | 0.47 | 0.48 |
-| 出图 · 无缓存 | 0.69 | 0.72 | 0.88 | 0.99 |
-| 出图 · 消隐全命中 | 0.65 | 0.68 | 0.72 | 0.73 |
-| 出图 · 改计划重排 | 0.66 | 0.66 | 0.73 | 0.73 |
-| 出图 · 重出图 | 0.70 | 0.73 | 0.91 | 0.99 |
-| 连续 5 次出图 · 每次起子进程 | 3.34 | 3.41 | 4.19 | 4.21 |
-| 连续 5 次出图 · 常驻 worker | — | **0.94** | — | **1.72** |
+| 解析装配 | 0.51 | 0.51 | 0.53 | 0.54 |
+| 生成 3D 网格（GLB） | 0.47 | 0.47 | 0.47 | 0.48 |
+| 出图 · 无缓存 | 0.68 | 0.74 | 0.89 | 1.00 |
+| 出图 · 消隐全命中 | 0.65 | 0.65 | 0.71 | 0.73 |
+| 出图 · 改计划重排 | 0.64 | 0.66 | 0.71 | 0.74 |
+| 出图 · 重出图 | 0.68 | 0.74 | 0.88 | 1.01 |
 
-- 规模档样例是「一张整机装配图标 N 个零件」，标号远超版面上限，渲染在排版阶段就被闸门拦下（退出码 1）——测到的是解析、消隐、排版到被拦为止，这本身是闸门正确的表现；能落图的真实耗时看上一张表。
-- 改后冷渲染略慢，来自原子发布、按 key 的跨进程锁和写入校验，是并发安全与过闸正确性的固定成本；工作台里真正的收益是常驻 worker：OCP 只导入一次，连续出图快 3.6 倍（50 实例）/ 2.4 倍（200 实例）。
+连续出图摊销（同一工程连续出图 5 次的**总耗时**，秒；**单轮测量，不是中位数**）：
+
+| 路径 | 50 实例 改前 | 50 实例 改后 | 200 实例 改前 | 200 实例 改后 |
+| --- | ---: | ---: | ---: | ---: |
+| 每次起子进程 | 3.32 | 3.42 | 4.30 | 4.17 |
+| 常驻 worker（OCP 只导入一次） | —（改前没有 worker） | 0.93 | — | 1.68 |
+
+- 规模档样例是「一张整机装配图标 N 个零件」，标号远超版面上限，渲染在排版阶段就被闸门拦下（退出码 1）——测到的是解析、消隐、排版到被拦为止，这本身是闸门正确的表现；两条路径退出码一致（记录里 `equivalent_work: true`）。能落图的真实耗时看上一张表。
+- 改后冷渲染略慢，来自原子发布、按 key 的跨进程锁和写入校验，是并发安全与过闸正确性的固定成本；工作台里的收益在常驻 worker：这一轮单次测量里，连续 5 次出图比每次起子进程快 3.7 倍（50 实例）/ 2.5 倍（200 实例）。
 
 ## 与常见做法对比
 
@@ -389,11 +409,11 @@ docker compose up -d
 
 ## 命名与商标声明
 
-「墨线」是开发期显示名（代码常量 `DISPLAY_NAME`），可能调整；「墨线图」是制图通名，本项目不主张对该词的独占。正式对外前会做商标检索。仓库技术名 `patent-figure-kit` 保持不变。本项目与任何同名或近似名称的商业产品无关。文中提到的 CAD 软件名、Claude Code、Codex 等为各自权利人的商标。
+「墨线」是开发期显示名（代码常量 `DISPLAY_NAME`），「品胜 AI Lab」是开发期署名（代码常量 `BRAND`），两者均须通过首次外发门禁确认，可能调整；「墨线图」是制图通名，本项目不主张对该词的独占。正式对外前会做商标检索。仓库技术名 `patent-figure-kit` 保持不变。本项目与任何同名或近似名称的商业产品无关。文中提到的 CAD 软件名、Claude Code、Codex 等为各自权利人的商标。
 
 ## 关于品胜 AI Lab
 
-品胜 AI Lab 把在专利与研发流程里实际用到的工具整理开源，墨线是其中之一。主页：<!-- 品胜 AI Lab 主页链接（待补，受首次外发门禁） -->（待补）。
+品胜 AI Lab 把在专利与研发流程里实际用到的工具整理开源，墨线是其中之一。**本署名尚待首次外发门禁确认**；主页链接待补。
 
 ## 贡献与许可证
 
@@ -438,12 +458,12 @@ docs/assets/             README 用图及其生成脚本（capture_readme.py）
 
 ## English
 
-**墨线 (working name) · patent-figure-kit** turns a 3D CAD assembly (STEP) into patent drawings laid out to CNIPA (China) formal requirements. Hidden-line removal is computed from the geometry; reference numerals, leader lines and sheet layout are computed by the program. An LLM only fills in blanks (Chinese part names, structure groups, flowchart wording) and never touches coordinates, text heights or numerals. Everything runs locally; the optional AI channel asks before sending anything.
+**墨线 (working name) · patent-figure-kit** turns a 3D CAD assembly (STEP) into patent drawings laid out to CNIPA (China) formal requirements. Hidden-line removal is computed from the geometry; reference numerals, leader lines and sheet layout are computed by the program. An LLM only fills in blanks (Chinese part names, structure groups, flowchart wording) and never touches coordinates, text heights or numerals. Drawing generation runs locally. The AI channel is optional, but note: it is **on by default** when a `DEEPSEEK_API_KEY` or a local CodeBuddy CLI is detected; AI part naming asks before each request, while **AI structure recognition sends the parts list (names, sizes, assembly paths) automatically after a STEP upload or example load** — the geometry itself is not sent. To turn AI off, start with `PFK_AI_PROVIDER=none` or put `"provider": "none"` in `~/.config/patent-workbench/config.json` before importing unpublished models; the settings dialog has no "no AI" option yet.
 
 - **Three steps**: drop a STEP → review candidate figure splits (each one is actually rendered and gated) → render through 13 QA gates and export a package: filing PDF/Word (figure numbers only), disclosure PDF/Word (with a part table), DXF sources, a figure-description text and a manual-review checklist. Failed figures never reach the deliverable folder.
-- **Determinism**: on the verified environments listed above, the same plan renders drawings with identical normalized entity digests (6-decimal coordinates, geometry and text entities, file header and handles excluded). Acceptance node N10 checks this against a golden digest; this round all 19 nodes passed on macOS 27 / Python 3.9.6.
-- **Measured**: on an Apple M5 (16 GB, macOS 27.0.1, Python 3.9.6), the 27-instance gearbox example went from "load example" to a downloaded package in 15.2 s on a fresh data directory (first run, no cache; the run shown in the GIF). Median timings per step are in the performance tables above.
+- **Determinism**: on the verified environments listed above, the same plan renders drawings with identical normalized entity digests (6-decimal coordinates, geometry and text entities, file header and handles excluded). Acceptance node N10 checks this against a golden digest; this round all 19 nodes passed on macOS 27.0.1 / Python 3.9.6 (record: `docs/assets/readme/runs/acceptance.jsonl`).
+- **Measured** (single run, the one shown in the GIF; record in `docs/assets/readme/hero-run.json`): on an Apple M5 (macOS 27.0.1, Python 3.9.6, AI off), the 27-instance gearbox example went from "load example" to a downloaded package in 15.2 s on a fresh data directory (first run, no cache). Three-sample medians per step, with raw records, are in the performance section above.
 - **Install**: double-click `安装并启动.command` (macOS) / run `安装并启动.ps1` (Windows) / `./install.sh` (Linux), or use the source checkout commands in the Install section; Docker for linux/amd64 is verified by CI after first publication. Agents: `SKILL.md` (Claude Code), `AGENTS.md` (Codex and others), REST `/v1/*`, MCP `/mcp`.
 - **Not legal advice.** Layout follows CNIPA formal requirements; acceptance by the office is final. Section views, specification cross-checking, revision re-numbering and USPTO/EPO layouts are on the roadmap.
 
-MIT licensed. A Pisen AI Lab open-source project.
+MIT licensed. A Pisen AI Lab open-source project. The working name 墨线 and the Pisen AI Lab attribution are both subject to confirmation at the first-publication gate and may change.

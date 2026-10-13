@@ -1,0 +1,32 @@
+{
+ "what": "三个公开示例的零件种类数与实例总数（与工作台 /v1/projects/{pid}/parts 同一口径：非退化零件，按 instances 求和）",
+ "commands": [
+  "python3 scripts/make_demo_assemblies.py -o <tmp>",
+  "python3 scripts/analyze_assembly.py <tmp>/demo-planetary-gearbox.stp -o <tmp>/gearbox.assembly.json --include 'PGB-*'",
+  "python3 scripts/analyze_assembly.py <tmp>/demo-bench-vise.stp -o <tmp>/vise.assembly.json --include 'VISE-*'",
+  "python3 scripts/analyze_assembly.py <tmp>/demo-ball-valve.stp -o <tmp>/valve.assembly.json --include 'VALVE-*'"
+ ],
+ "commit": "d54f8aa",
+ "python": "3.9.6",
+ "date": "2026-10-14 00:08",
+ "models": {
+  "gearbox": {
+   "step": "demo-planetary-gearbox.stp",
+   "include": "PGB-*",
+   "part_kinds": 15,
+   "instances": 27
+  },
+  "vise": {
+   "step": "demo-bench-vise.stp",
+   "include": "VISE-*",
+   "part_kinds": 12,
+   "instances": 20
+  },
+  "valve": {
+   "step": "demo-ball-valve.stp",
+   "include": "VALVE-*",
+   "part_kinds": 9,
+   "instances": 18
+  }
+ }
+}

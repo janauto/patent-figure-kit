@@ -1,0 +1,163 @@
+{
+  "repo": "<本仓库检出>",
+  "commit": "d54f8aa",
+  "python": "3.9.6",
+  "reps": 3,
+  "seed": 12345,
+  "tiers": [
+    {
+      "n_instances": 50,
+      "input_step_sha256": "ba1c22c61520e60ad13939f913ee5266dde65a3f2254a204708697f5a6021ece",
+      "segments": {
+        "export_path": [
+          "skipped(no figure rendered)",
+          "skipped(no figure rendered)",
+          "skipped(no figure rendered)"
+        ],
+        "segments_median_s": {
+          "receive": 0.0002,
+          "analyze": 0.5149,
+          "glb": 0.4657,
+          "render": 0.7436,
+          "annotate": null,
+          "qa": null,
+          "export": null
+        },
+        "candidates_median_s": null,
+        "cache_states_render_median_s": {
+          "no_cache": 0.7436,
+          "hlr_hit": 0.6478,
+          "plan_partial": 0.6617,
+          "rerender": 0.7389
+        },
+        "render_returncodes": [
+          1,
+          1,
+          1
+        ],
+        "render_figcounts": [
+          0,
+          0,
+          0
+        ],
+        "reps": 3
+      },
+      "worker_amortization": {
+        "k": 5,
+        "subprocess_total_s": 3.424,
+        "subprocess_per_render_s": 0.685,
+        "subprocess_returncodes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "subprocess_figcounts": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "subprocess_path": "per-call subprocess (PFK_WORKER=0)",
+        "worker_total_s": 0.926,
+        "worker_per_render_s": 0.185,
+        "worker_returncodes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "worker_figcounts": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "worker_path": "resident worker (OCP imported once)",
+        "equivalent_work": true,
+        "speedup_x": 3.7
+      }
+    },
+    {
+      "n_instances": 200,
+      "input_step_sha256": "2d17cdc9bc4aeedd48c5e3a1a466b1d0a94365b5cc650ccbce38421516a04f34",
+      "segments": {
+        "export_path": [
+          "skipped(no figure rendered)",
+          "skipped(no figure rendered)",
+          "skipped(no figure rendered)"
+        ],
+        "segments_median_s": {
+          "receive": 0.0002,
+          "analyze": 0.5368,
+          "glb": 0.4753,
+          "render": 1.0011,
+          "annotate": null,
+          "qa": null,
+          "export": null
+        },
+        "candidates_median_s": null,
+        "cache_states_render_median_s": {
+          "no_cache": 1.0011,
+          "hlr_hit": 0.7334,
+          "plan_partial": 0.7353,
+          "rerender": 1.0145
+        },
+        "render_returncodes": [
+          1,
+          1,
+          1
+        ],
+        "render_figcounts": [
+          0,
+          0,
+          0
+        ],
+        "reps": 3
+      },
+      "worker_amortization": {
+        "k": 5,
+        "subprocess_total_s": 4.166,
+        "subprocess_per_render_s": 0.833,
+        "subprocess_returncodes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "subprocess_figcounts": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "subprocess_path": "per-call subprocess (PFK_WORKER=0)",
+        "worker_total_s": 1.684,
+        "worker_per_render_s": 0.337,
+        "worker_returncodes": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "worker_figcounts": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "worker_path": "resident worker (OCP imported once)",
+        "equivalent_work": true,
+        "speedup_x": 2.47
+      }
+    }
+  ]
+}

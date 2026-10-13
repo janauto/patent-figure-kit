@@ -16,7 +16,7 @@ Python 3.9–3.12；新代码保持 Python 3.9 语法。
 ## 提交前
 
 ```bash
-python3 acceptance/run_acceptance.py     # 19 个节点全部通过，退出码 0（约 7–10 分钟；不要用管道接输出）
+python3 acceptance/run_acceptance.py     # 19 个节点全部通过，退出码 0（需要几分钟；不要用管道接输出）
 ```
 
 - **N10 不得变**：`tests/fixtures/golden_digest.txt` 是金样。摘要变了说明图纸变了，先读差异，不要直接重录。
