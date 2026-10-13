@@ -81,7 +81,7 @@ case "$OS_NAME" in
     fi
     ;;
   Linux)
-    [ "$ARCH" = "x86_64" ] || fail "不支持的 Linux 架构：$ARCH（几何内核 cadquery-ocp 7.7.2 只有 x86_64 轮子）" \
+    [ "$ARCH" = "x86_64" ] || fail "不支持的 Linux 架构：${ARCH}（几何内核 cadquery-ocp 7.7.2 只有 x86_64 轮子）" \
       "换一台 x86_64 机器；ARM 服务器目前不支持（见 docs/deploy/server.md）"
     ;;
   *)
@@ -119,14 +119,14 @@ else
 fi
 if [ -z "$PY" ]; then
   if [ -n "$NEED_VENV_PKG" ]; then
-    fail "找到 Python $NEED_VENV_PKG，但缺少虚拟环境组件（venv / ensurepip）" \
+    fail "找到 Python ${NEED_VENV_PKG}，但缺少虚拟环境组件（venv / ensurepip）" \
       "Ubuntu / Debian：sudo apt install python${NEED_VENV_PKG}-venv，然后重新运行本脚本"
   fi
   fail "没找到 Python 3.9–3.12（3.13 及以上暂不支持：几何内核没有对应版本）" \
     "到 https://www.python.org/downloads/ 安装 Python 3.12，装好后重新运行本脚本"
 fi
 PY_VER="$(py_version "$PY")"
-say "Python：$PY（$PY_VER）"
+say "Python：${PY}（${PY_VER}）"
 
 if [ "$OS_NAME" = "Linux" ]; then
   GLIBC="$("$PY" -c 'import platform; print(platform.libc_ver()[1] or "0")' 2>/dev/null || echo 0)"

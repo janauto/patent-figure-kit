@@ -1,7 +1,7 @@
 {
   "schema": "patent-assembly/1",
   "source": {
-    "step": "/Users/linxiansheng/development/patent-figure-kit/examples/planetary-gearbox/demo-planetary-gearbox.stp",
+    "step": "examples/planetary-gearbox/demo-planetary-gearbox.stp",
     "sha256": "b3f786bc8ba867bb2b91c7ec0029d5f27a921e58a34bf2812b8b128b88c565d0",
     "instances": 27,
     "distinct": 15
