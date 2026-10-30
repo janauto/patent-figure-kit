@@ -1,6 +1,6 @@
 <div align="center">
 
-# 墨线 · patent-figure-kit
+# patent-figure-kit
 
 **给专利工程师和代理师的「STEP 一键出附图」工具**
 
